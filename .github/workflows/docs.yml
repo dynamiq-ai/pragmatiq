@@ -1,0 +1,40 @@
+name: docs-site
+
+# Build the documentation site and verify its facts have not drifted from the code.
+on:
+  push:
+    branches: [main]
+    paths: ['website/**', 'scripts/docs_facts.py', 'scripts/docs_drift_check.py', 'pragmatiq/**']
+  pull_request:
+    paths: ['website/**', 'scripts/docs_facts.py', 'scripts/docs_drift_check.py', 'pragmatiq/**']
+
+jobs:
+  drift-check:
+    # facts.json must match what the library emits today (model sizes, config defaults,
+    # gate list, API surface), so the docs cannot silently fall out of sync with the code.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -e ".[dev]"
+      - run: python scripts/docs_drift_check.py
+
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: website/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build

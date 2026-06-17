@@ -1,0 +1,51 @@
+---
+title: PRAGMA+Nemotron variant
+description: Embedding high-cardinality text with a frozen text model and reconstructing it with MSE — switchable, off by default.
+---
+
+The paper describes a variant in which high-cardinality **text** fields (merchant names,
+device ids, free-text memos) are not split into BPE pieces. Instead a *frozen* text model
+maps each value's full string to a single vector, and the MLM objective reconstructs that
+continuous vector with **MSE** rather than predicting sub-word ids. pragmatiq ships it as a
+switchable option — **off by default**, so the BPE path stays byte-identical. <Badge variant="optional">Paper · opt-in</Badge>
+
+## How it changes the pipeline
+
+- **Tokenizer**: a text field emits **one sentinel token** (`is_text = 1`) and carries its raw
+  string, instead of several BPE pieces.
+- **Model**: the model owns a frozen text encoder; each text token's string is embedded once,
+  projected into the model width, and added to that token's input vector.
+- **Objective**: a parallel `Linear(3d → text_dim)` head reconstructs masked text tokens'
+  frozen embeddings. The loss becomes:
+
+$$
+\mathcal{L} = \text{CE}_{\text{(non-text)}} + \lambda \cdot \text{MSE}_{\text{(text)}}, \qquad \lambda = \texttt{text\_loss\_weight}\ (\text{default } 1)
+$$
+
+## Switching it on
+
+It is switchable from the **data step alone** — tokenize in embed mode and `pretrain` builds
+the matching frozen encoder and reconstruction head automatically:
+
+```bash
+pip install -e ".[nemotron]"   # adds transformers (the frozen embedder)
+pragmatiq tokenize data/synth --out data/tok --config configs/data/tokenizer_nemotron.yaml
+pragmatiq pretrain data/tok --name nemo --model-size medium   # text branch auto-wired
+```
+
+Two encoders are registered (`@register_text_encoder`):
+
+- **`hash`** — a deterministic, dependency-free, non-semantic stand-in, so the whole path
+  (embed-mode tokenization, the input projection, the MSE branch, masking that routes text to
+  reconstruction) runs on CPU in CI without downloading a multi-GB model.
+- **`nemotron`** — the production frozen embedder via 🤗 `transformers`, mean-pooled, under
+  `no_grad`.
+
+<DecisionCard
+  title="Off by default; the BPE path stays byte-identical"
+  why="The variant is an opt-in trade (a credit lift at some latency cost). Defaulting it off means existing runs are unchanged and the variant is a deliberate choice, verified by a byte-identity check on the BPE forward."
+  alternative="Making frozen-text-embedding the default, which would change every run's behavior and pull transformers into the base install."
+/>
+
+Serving handles both variants — build the Triton image with `PRAGMATIQ_TRITON_EXTRAS=nemotron`
+(see [Serving](/docs/tutorials/serve)).

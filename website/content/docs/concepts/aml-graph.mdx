@@ -1,0 +1,52 @@
+---
+title: AML over the transfer graph
+description: pragmatiq's own extension (not in the PRAGMA paper) — a GraphSAGE ablation that recovers money-mule rings a per-user embedding cannot see.
+---
+
+<Callout type="warn" title="This is pragmatiq's own extension — not in the PRAGMA paper">
+Everything in [Architecture](/docs/concepts/architecture) is the paper's recipe. The
+graph-based AML work here is built **standalone on top of** the paper's user embeddings to
+explore a question the paper does not: can a graph neural network over a money-transfer graph
+recover signal a per-user embedding cannot? <Badge variant="ours">Our addition</Badge>
+</Callout>
+
+## Why a graph
+
+Mule-ring (money-laundering) detection is **relational**: a launderer is defined by *who they
+transact with* — fan-in of small credits, layering among the ring, rapid fan-out — not just
+their own behavior. A per-user embedding, however good, cannot by construction see a
+counterparty pattern that spans accounts. So we build a directed transfer graph from
+`transfers.parquet` and run a three-way comparison.
+
+## The three-way ablation
+
+`api.gnn(...)` (the `.[gnn]` extra) trains a 2–3 layer GraphSAGE and reports held-out ROC-AUC,
+mean ± std over seeds, for:
+
+- **(a) isolated pragmatiq embeddings** — a probe on each user's embedding alone, no graph.
+- **(b) GraphSAGE + pragmatiq features** — message passing over the transfer graph with
+  pragmatiq embeddings as node features.
+- **(c) GraphSAGE + hand-crafted features** — the same graph, with generic structural node
+  features (degree, volume, counterparties).
+
+The robust, gated result is **relational recovery**: a GraphSAGE over the transfer graph beats
+a probe on isolated embeddings ((c) > (a) by a wide margin), so the AML signal lives in the
+transfer structure an isolated embedding misses.
+
+```bash
+pip install -e ".[gnn]"
+pragmatiq gnn data/tok --run runs/aml \
+  --transfers data/synth/transfers.parquet \
+  --aml-label data/synth/labels/aml.parquet
+```
+
+## An honest caveat
+
+On the default synthetic book the mules are *structurally* distinctive (elevated fan-in),
+which hand-crafted degree features capture directly — a strong baseline that GNN+pragmatiq
+matches without feature engineering. A regime where *learned* features clearly beat
+hand-crafted ones needs a behaviorally-dominant laundering signal (mules that look structurally
+normal but whose event sequences betray them); the generator can be calibrated toward that.
+See [`MODEL_CARD.md`](https://github.com/dynamiq-ai/pragmatiq/blob/main/MODEL_CARD.md) and
+the [`04_aml_gnn` notebook](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb)
+for the full discussion and the latest numbers.

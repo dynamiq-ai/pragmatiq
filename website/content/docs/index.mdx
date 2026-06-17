@@ -1,0 +1,43 @@
+---
+title: Introduction
+description: What pragmatiq is, who it is for, and how this documentation is organized.
+---
+
+**pragmatiq** is an open, reproducible implementation of the PRAGMA recipe for
+banking foundation models. It turns a user's long, irregular stream of timestamped
+key–value events — card transactions, app sessions, transfers, profile facts — into a
+single dense **user embedding** that downstream teams probe, fine-tune, graph, and serve.
+
+It ships the whole stack: a deterministic synthetic data generator, a key–value–time
+tokenizer, a padding-free PyTorch encoder stack, training and evaluation pipelines,
+ONNX/Triton serving, and a graph-based AML extension. **Everything runs on CPU first**;
+CUDA and flash-attn are accelerations, not requirements.
+
+## Who this is for
+
+Machine-learning engineers and data scientists — especially at banks — who want to
+**replicate** the approach on their own data and understand *why* each decision was made.
+The throughline of these docs is **reproducibility**: exact commands, exact data formats,
+seeds and determinism, and an explicit record of every default we chose where the paper
+is silent.
+
+## How the docs are organized
+
+<Cards>
+  <Card title="Quickstart" href="/docs/get-started/quickstart" description="Install and run the whole pipeline — generate, tokenize, pretrain, embed, probe — on CPU in minutes." />
+  <Card title="Architecture" href="/docs/concepts/architecture" description="Deep-dive: tokenization, temporal encoding, the encoder stack, and the objective — what each piece means and why." />
+</Cards>
+
+## A 30-second tour
+
+```bash
+pip install -e ".[dev]"     # CPU-capable; Python 3.11+
+pragmatiq quickstart        # synth -> tokenize -> pretrain -> embed -> probe
+```
+
+`quickstart` runs the full pipeline on synthetic users and prints a credit-risk probe
+score against a raw-count baseline — proof the embedding carries signal beyond trivial
+counts.
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.

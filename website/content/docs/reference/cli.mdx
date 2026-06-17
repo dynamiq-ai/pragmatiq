@@ -1,0 +1,36 @@
+---
+title: CLI
+description: The pragmatiq command-line interface — a thin wrapper over the Python API.
+---
+
+The CLI is intentionally thin: each command parses arguments and calls a function in
+[`pragmatiq/api.py`](/docs/reference/api), so the CLI, notebooks, and production callers all
+use the same library surface. Run any command with `--help` for its full options.
+
+| Command | What it does |
+| --- | --- |
+| `pragmatiq synth generate` | Generate a synthetic dataset (`--config`, `--n-users`, `--seed`, `--n-workers`). |
+| `pragmatiq synth calibrate` | Fit generator priors to shareable aggregate statistics (no raw data). |
+| `pragmatiq validate` | Check a dataset against the [data contract](/docs/reference/data-contract). |
+| `pragmatiq tokenize` | Fit the tokenizer and write tokenized shards + index. |
+| `pragmatiq pretrain` | Pretrain a model (`--model-size`, `--config`, `--resume auto`). |
+| `pragmatiq embed` | Embed every user with a trained model → parquet. |
+| `pragmatiq probe` | Probe a model on a label table (`--probe-model gbdt\|logistic\|lightgbm`). |
+| `pragmatiq finetune` | LoRA fine-tune a model's adapters + head on a label table. |
+| `pragmatiq uplift` | Evaluate communication-campaign uplift. |
+| `pragmatiq gnn` | Run the AML transfer-graph GraphSAGE ablation. |
+| `pragmatiq runs list / compare` | Inspect and compare runs. |
+| `pragmatiq benchmark` | Throughput benchmark for embedding. |
+| `pragmatiq quickstart` | End-to-end smoke: synth → tokenize → pretrain → probe. |
+
+## A typical session
+
+```bash
+pragmatiq synth generate --out data/synth --config configs/data/synthetic.yaml
+pragmatiq tokenize data/synth --out data/tok --n-workers 8
+pragmatiq pretrain data/tok --name demo --model-size small --config configs/pretrain.yaml
+pragmatiq embed data/tok --run runs/demo --out embeddings.parquet
+pragmatiq probe data/tok --run runs/demo --label data/synth/labels/default_12m.parquet
+```
+
+Each command maps 1:1 onto a function documented in the [Python API reference](/docs/reference/api).

@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If you use pragmatiq, please cite the software and the PRAGMA paper that inspired it."
+type: software
+title: "pragmatiq: an open-source PRAGMA-inspired banking foundation model stack"
+version: "0.1.0"
+license: Apache-2.0
+authors:
+  - name: "Dynamiq"
+    email: "support@getdynamiq.ai"
+repository-code: "https://github.com/dynamiq-ai/pragmatiq"
+url: "https://github.com/dynamiq-ai/pragmatiq"
+abstract: >-
+  pragmatiq is an independent implementation inspired by the PRAGMA paper
+  (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+references:
+  - type: article
+    title: "PRAGMA: Revolut Foundation Model"
+    authors:
+      - name: "Maxim Ostroukhov"
+      - name: "Ruslan Mikhailov"
+      - name: "Vladimir Iashin"
+      - name: "Artem Sokolov"
+      - name: "Andrei Akshonov"
+      - name: "Vitaly Protasov"
+      - name: "Dmitrii Beloborodov"
+      - name: "Vince Mullin"
+      - name: "Roman Yokunda Enzmann"
+      - name: "Georgios Kolovos"
+      - name: "Jason Renders"
+      - name: "Pavel Nesterov"
+      - name: "Anton Repushko"
+    doi: "10.48550/arXiv.2604.08649"
+    url: "https://arxiv.org/abs/2604.08649"
+    year: 2026

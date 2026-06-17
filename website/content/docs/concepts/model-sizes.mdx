@@ -1,0 +1,30 @@
+---
+title: Model sizes
+description: The nano / small / medium / large presets and how to pick one.
+---
+
+`ModelConfig.preset` defines four sizes. Depths are `(profile / event / history)` block
+counts; every block uses `ffn = 4·d` and dropout 0.1. The table is rendered from the code:
+
+<ModelSizes />
+
+`small` / `medium` / `large` correspond to the paper's **10M / 100M / 1B** parameter sizes.
+`nano` is pragmatiq's own addition <Badge variant="ours">Our addition</Badge> so the gates
+and `pragmatiq quickstart` run end-to-end on a **CPU in minutes**.
+
+## Picking a size
+
+- **`nano`** — CPU smoke tests, CI, notebooks, and the quickstart.
+- **`small`** — the default; a strong baseline that trains comfortably on a single GPU.
+- **`medium` / `large`** — scale up when you have the data and multiple GPUs; pair with
+  `config="auto"`, gradient accumulation, and multi-node DDP (see
+  [Configuration](/docs/reference/configuration) and the
+  [Pretrain tutorial](/docs/tutorials/pretrain)).
+
+```python
+api.pretrain("data/tok", "demo", model_size="medium")
+```
+
+Any architecture field (e.g. `rope_base`, `dropout`) can be overridden on top of a preset by
+passing it in the pretrain `config`. The test suite checks the model and MLM-head parameter
+counts against the nominal sizes, so the presets stay honest.

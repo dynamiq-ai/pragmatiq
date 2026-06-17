@@ -1,0 +1,38 @@
+---
+title: Paper fidelity
+description: Exactly what follows the PRAGMA paper, and what pragmatiq adds on top.
+---
+
+pragmatiq's goal is not novelty over PRAGMA — it is to make the implementation path concrete
+and honest. This page is the explicit ledger of what is the paper's and what is ours.
+
+| Component | Source |
+| --- | --- |
+| Key–value–time tokenization + `8·ln(1+Δt/8)` time transform | <Badge variant="paper">Paper</Badge> |
+| TimeRoPE on continuous log-seconds (profile = since milestone; history = to last event) | <Badge variant="paper">Paper</Badge> |
+| Profile / event / history encoders; tied 3d MLM head + label smoothing | <Badge variant="paper">Paper</Badge> |
+| Masking 15% token / 10% event / 10% key, 10% `[UNK]`-as-dropout | <Badge variant="paper">Paper</Badge> |
+| Model sizes 10M / 100M / 1B | <Badge variant="paper">Paper</Badge> |
+| Pre-training caps (event ≤24, profile ≤200, ≤6500 events/user) | <Badge variant="paper">Paper</Badge> |
+| PRAGMA+Nemotron frozen-text-embedding variant (MSE) | <Badge variant="optional">Paper · opt-in</Badge> |
+| Synthetic data generator | <Badge variant="ours">Our addition</Badge> |
+| AML transfer-graph GraphSAGE ablation | <Badge variant="ours">Our addition</Badge> |
+| Gradient-boosting downstream probe | <Badge variant="ours">Our default</Badge> |
+| `nano` CPU/CI model size | <Badge variant="ours">Our addition</Badge> |
+
+## How fidelity is kept honest
+
+- The **core representation** above is implemented to match the paper and reviewed against a
+  single internal spec that every module is checked against.
+- Where the paper is **silent** on an engineering detail, pragmatiq picks a default, exposes
+  it in config, and records it — see the [Decisions log](/docs/decisions/decisions-log).
+- Where pragmatiq **goes beyond** the paper (the generator, the AML graph), it is presented
+  standalone and labelled, never folded into a fidelity claim.
+
+The paper uses real Revolut data; pragmatiq cannot, so the synthetic generator stands in. That
+is the single largest gap between this implementation and the paper's results, and it is why
+the headline numbers here are about *signal recovery on synthetic data*, not about matching
+the paper's absolute metrics.
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.

@@ -1,0 +1,66 @@
+---
+title: Bring your own data
+description: Point pragmatiq at real bank records — produce the parquet contract, validate, then run the same pipeline.
+---
+
+pragmatiq trains on the same [parquet contract](/docs/reference/data-contract) whether the
+data is synthetic or yours. The only new work is producing those four files; everything
+downstream is identical.
+
+<Steps>
+
+<Step>
+
+### Produce the four files
+
+Write `events.parquet`, `profiles.parquet`, and (optionally) `transfers.parquet` +
+`labels/*.parquet` with the exact dtypes in the [data contract](/docs/reference/data-contract).
+The key idea: **event `fields` and profile `attributes` are `map<string,string>`** — pass raw
+string values; the tokenizer infers numeric / categorical / text per field. Do not pre-bin or
+pre-encode.
+
+```python
+import pyarrow as pa, pyarrow.parquet as pq
+events = pa.table({
+    "user_id": [...],
+    "ts": pa.array([...], type=pa.timestamp("us")),
+    "source": [...],                      # e.g. "transaction", "app", "transfer"
+    "fields": [...],                      # list of {str: str}
+})
+pq.write_table(events, "data/mybank/events.parquet")
+```
+
+</Step>
+
+<Step>
+
+### Validate, then run the pipeline
+
+```bash
+pragmatiq validate data/mybank          # fails loudly on dtype / integrity issues
+pragmatiq tokenize data/mybank --out data/tok --n-workers 8
+pragmatiq pretrain data/tok --name mybank --model-size small --config auto
+pragmatiq probe data/tok --run runs/mybank --label data/mybank/labels/<task>.parquet
+```
+
+At 1M–26M records, `--config auto` sizes the batch/schedule for you, and the truncation caps
+keep heavy-tailed histories tractable (see [Pretrain](/docs/tutorials/pretrain)).
+
+</Step>
+
+</Steps>
+
+## Things to know
+
+- **Time zones**: calendar features default to UTC; set `calendar_tz` (e.g. `Europe/London`)
+  if your timestamps are UTC instants but day/night and payday structure is local.
+- **Unseen values at inference** map to `[UNK]` with a logged warning — never a `KeyError`.
+  Refit the tokenizer when your value distribution shifts materially.
+- **Labels** need an `eval_ts` per user so histories are truncated before embedding (forecast,
+  not hindcast).
+
+<Callout title="Data never leaves your environment">
+Everything runs on CPU first and locally. The synthetic generator and
+`synth calibrate` exist so you can develop and benchmark against a realistic book without
+moving raw records.
+</Callout>

@@ -1,0 +1,65 @@
+---
+title: Data contract
+description: The four-file parquet contract pragmatiq trains on — exact columns and dtypes, enforced by `pragmatiq validate`.
+---
+
+pragmatiq trains on a small **parquet contract** — four files with strict dtypes, defined
+in [`pragmatiq/data/schema.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/pragmatiq/data/schema.py)
+and checked by `pragmatiq validate`. Synthetic data already conforms; this is what you
+produce to bring your own.
+
+## Files
+
+| File | Required columns |
+| --- | --- |
+| `events.parquet` | `user_id` (string), `ts` (timestamp[us]), `source` (string), `fields` (`map<string,string>`) |
+| `profiles.parquet` | `user_id` (string), `as_of` (timestamp[us]), `attributes` (`map<string,string>`), `lifelong` (`list<struct<key, ts>>`) |
+| `transfers.parquet` | optional, for the AML GNN: `from_user`, `to_user` (string), `ts` (timestamp[us]), `amount` (float64) |
+| `labels/*.parquet` | optional task tables: `user_id` (string), `eval_ts` (timestamp[us]), `label` (int8) |
+
+<Callout title="Everything is a string map">
+Event `fields` and profile `attributes` are `map<string,string>`. You do **not** pre-bin
+numbers or pre-encode categories — the tokenizer infers each field's kind (numeric /
+categorical / text) from the data. Pass values as strings (e.g. `"42.10"`, `"5411"`).
+</Callout>
+
+## Events
+
+One row per event. `source` groups schemas (e.g. `transaction`, `app`, `transfer`); `fields`
+holds that event's key/value pairs. Events do not need a fixed schema across sources — the
+tokenizer learns each key.
+
+```python
+import pyarrow as pa
+events = pa.table({
+    "user_id": ["u1", "u1"],
+    "ts": pa.array([1_700_000_000_000_000, 1_700_003_600_000_000], type=pa.timestamp("us")),
+    "source": ["transaction", "app"],
+    "fields": [
+        {"amount": "42.10", "mcc": "5411", "merchant": "TESCO STORES 4521"},
+        {"screen": "home", "action": "view"},
+    ],
+})
+```
+
+## Profiles
+
+One row per user: slowly-changing `attributes` plus `lifelong` milestones (each with its own
+first-occurrence `ts`, e.g. account opening). `as_of` is the snapshot moment the profile is
+valid at; lifelong recency is measured from it.
+
+## Transfers and labels
+
+`transfers.parquet` is the directed money-movement graph the [AML GNN](/docs/concepts/architecture)
+runs over (optional). Label tables are one row per user with an `eval_ts`; histories are
+truncated at it before embedding so metrics are forecasts, not hindcasts.
+
+## Validate
+
+```bash
+pragmatiq validate data/mybank
+```
+
+`validate` checks dtypes, referential integrity, and timestamp sanity, and fails loudly with
+an actionable message before you spend time tokenizing. Unseen keys/values at encode time map
+to `[UNK]` with a logged warning — never a `KeyError`.

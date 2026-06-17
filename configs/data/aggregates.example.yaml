@@ -1,0 +1,44 @@
+# Example bank-shareable aggregate statistics for `pragmatiq synth calibrate`.
+# No raw data: only population-level moments a bank can typically share.
+
+n_users: 50_000
+months: 25
+
+events_per_user_month: 38.0          # mean events per active user per month
+
+archetype_shares:                     # rough book composition
+  student: 0.06
+  salaried: 0.46
+  freelancer: 0.09
+  family: 0.18
+  pensioner: 0.05
+  high_net_worth: 0.02
+  trader: 0.04
+  dormant: 0.07
+  mule: 0.005
+  fraud_victim: 0.025
+
+fraud_base_rate: 0.006                # share of users hit by account takeover
+default_rate: 0.025                   # 12m default rate among scored users
+
+mcc_mix:                              # transaction share by category
+  grocery: 0.22
+  restaurant: 0.10
+  fast_food: 0.12
+  fuel: 0.07
+  transport: 0.08
+  online_retail: 0.11
+  clothing: 0.05
+  utilities: 0.04
+  streaming: 0.05
+  gambling: 0.015
+  atm: 0.05
+
+mean_amount_by_mcc:                   # mean ticket per category (GBP)
+  grocery: 32.50
+  restaurant: 41.00
+  fast_food: 11.20
+  fuel: 52.00
+  online_retail: 38.00
+  utilities: 95.00
+  streaming: 11.00

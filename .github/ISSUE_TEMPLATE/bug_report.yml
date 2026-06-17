@@ -1,0 +1,54 @@
+name: Bug report
+description: Report a reproducible problem in pragmatiq.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve pragmatiq.
+
+        pragmatiq is an independent implementation inspired by the PRAGMA paper
+        (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+
+        Please do not include real customer data, secrets, or private banking records.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Include the smallest command or code snippet that reproduces the issue.
+      placeholder: |
+        1. Run ...
+        2. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Python version, PyTorch version, install extras, CPU/GPU.
+      placeholder: |
+        - OS:
+        - Python:
+        - PyTorch:
+        - Install command:
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or traceback
+      render: shell

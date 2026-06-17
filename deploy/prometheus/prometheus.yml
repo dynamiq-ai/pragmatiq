@@ -1,0 +1,7 @@
+# Scrapes Triton's Prometheus metrics endpoint.
+global:
+  scrape_interval: 5s
+scrape_configs:
+  - job_name: triton
+    static_configs:
+      - targets: ["triton:8002"]
