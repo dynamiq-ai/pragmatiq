@@ -1,4 +1,4 @@
-# PRAGMA small (~10M params at ~28k vocab). Phase 4 size table.
+# PRAGMA small (~10M params at ~28k vocab). Size table.
 size: small
 dim: 192
 n_heads: 3

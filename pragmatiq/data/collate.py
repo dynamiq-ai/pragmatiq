@@ -15,7 +15,7 @@ Within-segment attention is what lets the CPU SDPA fallback match a flash-attn
 varlen forward exactly (global rule 5). The model does this by scattering each
 segment into a padded block and masking the padding keys (see
 ``pragmatiq/models/layers.py``); :func:`block_diag_mask` is an equivalent dense
-formulation used by the gate-3 padding-equivalence test.
+formulation used by the padding-equivalence test.
 """
 
 from __future__ import annotations
@@ -140,7 +140,7 @@ def run_with_oom_retry(
     """Call ``fn(token_budget)``; on CUDA OOM, halve the budget and retry.
 
     Returns ``(result, budget_used)``. Re-raises if the budget falls below
-    ``min_budget`` (Phase 3 OOM-retry contract). Safe on CPU:
+    ``min_budget`` (the OOM-retry contract). Safe on CPU:
     ``empty_cache`` is only called when CUDA is available.
     """
     log = logger or logging.getLogger(__name__)

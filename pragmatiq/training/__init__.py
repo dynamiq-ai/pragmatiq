@@ -1,4 +1,4 @@
-"""Training: masking, optimizers, pretrainer, fine-tuner, probe (Phase 5)."""
+"""Training: masking, optimizers, pretrainer, fine-tuner, probe."""
 
 from .autoconfig import AutoTrainPlan, autoconfigure
 from .finetuner import FineTuneConfig, LoRAFineTuner

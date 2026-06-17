@@ -1,4 +1,4 @@
-"""Masked-LM pretrainer on Lightning Fabric (Phase 5).
+"""Masked-LM pretrainer on Lightning Fabric.
 
 ``PreTrainer.fit`` runs the MLM objective with:
 
@@ -126,7 +126,7 @@ class TrainConfig:
     # divergence and should fail loud rather than burn compute to max_steps.
     max_consecutive_skips: int = 50
     # Observability: a one-line stderr heartbeat every log_every steps, and an
-    # optional Weights & Biases mirror (needs `pip install -e ".[wandb]"`).
+    # optional Weights & Biases mirror (needs `pip install -e ".[extras]"`).
     # metrics.jsonl and the TensorBoard mirror (runs/{name}/tb, active when the
     # `tensorboard` package is installed) are always on.
     verbose: bool = True
@@ -384,7 +384,7 @@ class PreTrainer:
 
         ``max_steps`` only bounds the loop — the LR schedule horizon stays
         ``config.max_steps`` — so stopping early then resuming reproduces the
-        uninterrupted trajectory exactly (the gate-5 resume contract).
+        uninterrupted trajectory exactly (the resume contract).
         """
         stop_at = self.config.max_steps if max_steps is None else max_steps
         resumed = False

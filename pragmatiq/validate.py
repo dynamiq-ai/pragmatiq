@@ -1,4 +1,4 @@
-"""Input validation with actionable errors (Phase 8).
+"""Input validation with actionable errors.
 
 ``validate_dataset`` checks a raw dataset directory against the data contract
 (schema.py) and flags the problems that silently corrupt training: wrong dtypes,
@@ -73,7 +73,7 @@ def _is_floatish(v: object) -> bool:
 
 def _check_field_cardinality(data_dir: Path, report: ValidationReport,
                              sample_rows: int = 200_000, cap: int = 200_000) -> None:
-    """Flag pathological field cardinality (Phase 8): a non-numeric
+    """Flag pathological field cardinality: a non-numeric
     event field that is (near-)unique per occurrence is almost always a per-event
     identifier — it explodes the categorical/BPE vocab and carries no learnable
     signal. Numeric magnitude fields are skipped (the tokenizer percentile-bins them)."""

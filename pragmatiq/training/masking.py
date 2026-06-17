@@ -1,4 +1,4 @@
-"""MLM masking strategy (Phase 4).
+"""MLM masking strategy.
 
 Three selection modes are unioned per batch:
 

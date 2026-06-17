@@ -1,4 +1,4 @@
-"""pragmatiq model components (Phase 4)."""
+"""pragmatiq model components."""
 
 from .embeddings import CalendarEmbedding, TimeRoPE, TokenEmbedding
 from .heads import ClassificationHead, MLMHead, mlm_loss

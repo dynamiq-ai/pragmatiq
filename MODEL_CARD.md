@@ -46,7 +46,9 @@ classifiers rather than acting as a decision system themselves:
   raw-count baseline that uses the same classifier.
 - **LoRA fine-tuning** (`pragmatiq finetune`): frozen backbone, rank-8 adapters
   plus a classification head on `z_h[USR]`, early stopping; `merge_lora()`
-  folds adapters back for export.
+  folds adapters back for export. The default adapters target the attention
+  `qkv` and output projections plus the MLP — a deliberate superset of the
+  paper's QKV+MLP placement.
 - **AML via GNN** (`pragmatiq gnn`): GraphSAGE over a money-transfer graph with
   pragmatiq embeddings as node features — mule rings are a relational fan-in/
   fan-out pattern that isolated per-user embeddings cannot see.
@@ -100,9 +102,9 @@ to it, and the oracle enforces a strict temporal split:
 
 Two difficulty knobs keep ceilings realistic: `trait_noise` blurs the
 trait-to-behavior mapping and `label_noise` flips a small fraction of binary
-labels. Gate 1 enforces that a gradient-boosted-tree baseline on hand-crafted
-features scores in a realistic band on credit (~0.75–0.85 AUC) and *fails the
-build* above 0.95, which would indicate leakage.
+labels. An acceptance check enforces that a gradient-boosted-tree baseline on
+hand-crafted features scores in a realistic band on credit (~0.75–0.85 AUC) and
+*fails the build* above 0.95, which would indicate leakage.
 
 ## Reproducibility
 
@@ -138,22 +140,29 @@ With it on:
 - Episode templates are stylized: real fraud, laundering, and financial
   distress are more varied than the injected account-takeover / mule-ring /
   stress-arc patterns.
-- **AML ablation finding.** The phase-6 ablation demonstrates *relational
-  recovery*: a GraphSAGE over the transfer graph with hand-crafted node features
-  (c) beats a probe on isolated pragmatiq embeddings (a) by a wide margin (a ≈ 0.50
-  at chance, c ≈ 0.85 on the full-scale benchmark — 12k accounts × 3 seeds). Money mules are modeled as *ordinary
-  recruited accounts* and their laundering legs are written to the transfer ledger
-  (`transfers.parquet`), not the card-event stream, so an isolated per-user
-  embedding cannot see the rings at all — exactly the relational point. Two
-  limitations bound this result: (1) the recovered signal is largely
-  transfer-graph **degree** (a 1-hop statistic) — a logistic control on the same
-  hand-crafted features *without* the graph (d) matches (c), so message passing
-  adds little over the features themselves on these synthetic rings; (2)
-  pragmatiq's behavioral embeddings do **not** beat hand-crafted degree (b < c),
-  because behaviorally-ordinary mules give the embedding no isolated signal. A
-  regime where *learned* features clearly beat hand-crafted ones needs a
-  behaviorally-dominant, multi-hop relational laundering signal — the open hard
-  case. See `notebooks/04_aml_gnn.ipynb`.
+- **AML ablation finding.** The four-arm ablation (full-scale benchmark: 12k
+  accounts × 3 seeds, small model, A100) reports, on identical splits:
+  **(a)** probe on isolated pragmatiq embeddings `0.498` (chance); **(b)**
+  GraphSAGE over transfers + pragmatiq features `0.554`; **(c)** GraphSAGE +
+  hand-crafted node features `0.670`; **(d)** logistic regression on the same
+  hand-crafted features, no graph, `0.604`. The synthetic mules are multi-hop
+  layered laundering chains: their amounts and counterparty degree are drawn to
+  *match ordinary accounts*, so 1-hop degree is not a trivial oracle ((d) is only
+  moderate at `0.604`), and the discriminative signal is the multi-hop layering
+  chain. The **gated claim** is *relational recovery*: a GraphSAGE over the
+  transfer graph recovers money-mule rings a probe on the isolated per-user
+  embedding cannot — `(c) 0.670 ≫ (a) 0.498` — so the AML signal lives in the
+  multi-hop transfer structure an isolated embedding misses, and message passing
+  adds over the same features without a graph (`(c) > (d)`). The **honest
+  limitation, reported not gated:** the learned per-user embedding adds only a
+  little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does **not** beat
+  hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated embedding sits
+  near chance, so the model does not capture the multi-hop laundering signal in
+  the per-user representation; recovering it in a learned representation is the
+  **open challenge**. This is consistent with the PRAGMA paper's own observation
+  that AML is a setting where the model underperforms because it processes user
+  histories in isolation — the GNN is pragmatiq's honest extension that probes
+  that gap. See `notebooks/04_aml_gnn.ipynb`.
 - **Serving path.** ONNX export (`pragmatiq export`) emits a faithful **dense
   reformulation** of the model: the same weights run over padded tensors, so the
   exported graph reproduces the native embeddings (validated against onnxruntime
@@ -162,8 +171,10 @@ With it on:
   the native varlen model and skips the padding the dense graph materializes — a
   deployment choice, not a fidelity gap. Pick Triton for throughput, ONNX for
   portability.
-- Long histories are encoded as-is; cost grows with token count under the
-  token-budget batching, and very long users dominate batches.
+- Long histories are capped by default (per-event ≤24 tokens, profile ≤200
+  tokens, ≤6500 most-recent events per user); set those caps to `None` to encode
+  histories in full. Cost grows with token count under the token-budget batching,
+  and very long users dominate batches.
 - Hyperparameters the paper does not specify (learning rates, token budget,
   vocab size, RoPE base, etc.) are documented guesses — see the README GUESS
   table.

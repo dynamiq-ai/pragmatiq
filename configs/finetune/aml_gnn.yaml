@@ -1,4 +1,4 @@
-# LoRA fine-tune config for the aml_gnn task (Phase 5).
+# LoRA fine-tune config for the aml_gnn task.
 lora_rank: 8
 lora_alpha: 8.0
 lr: 0.001

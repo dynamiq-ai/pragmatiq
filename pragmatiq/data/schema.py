@@ -1,12 +1,13 @@
 """Raw data contract: Arrow schemas and record types shared across pragmatiq.
 
-The on-disk contract (see the internal spec "Data contract") is four parquet files:
+The on-disk data contract is four parquet files:
 
 - ``events.parquet``:    user_id, ts (timestamp[us]), source, fields (map<str,str>)
 - ``profiles.parquet``:  user_id, as_of, attributes (map<str,str>),
   lifelong (list<struct<key, ts>>)
 - ``transfers.parquet``: from_user, to_user, ts, amount   (optional, for the GNN)
-- ``labels/*.parquet``:  task tables keyed by user_id (+ eval point)
+- ``labels/*.parquet``:  task tables keyed by user_id (+ a time column: an eval
+  point for forecast tasks, an observation horizon for membership tasks)
 """
 
 from __future__ import annotations
@@ -20,6 +21,10 @@ log = logging.getLogger(__name__)
 _warned_naive_ts = False
 
 SOURCES: tuple[str, ...] = ("transaction", "app", "trading", "communication")
+# Integer code for the transaction source (its position in SOURCES). Label
+# eligibility filters on transaction events, so it references this named constant
+# instead of a bare literal that would silently change meaning if SOURCES moved.
+SOURCE_TXN: int = SOURCES.index("transaction")
 
 EVENTS_SCHEMA = pa.schema(
     [
@@ -58,7 +63,10 @@ TRANSFERS_SCHEMA = pa.schema(
 def label_schema(task: str) -> pa.Schema:
     """Arrow schema for a label table. All tables carry user_id; extras vary by task."""
     base = [pa.field("user_id", pa.string(), nullable=False)]
-    if task in ("default_12m", "churn_6m", "ltv_positive", "aml"):
+    if task in ("default_12m", "churn_6m", "ltv_positive"):
+        # Forecast tasks: ``eval_ts`` is the point-in-time cut. The label is computed
+        # only from activity strictly after it, and consumers truncate histories at it
+        # so the outcome window never leaks into a user's embedding.
         cols = base + [
             pa.field("eval_ts", pa.timestamp("us"), nullable=False),
             pa.field("label", pa.int8(), nullable=False),
@@ -66,6 +74,19 @@ def label_schema(task: str) -> pa.Schema:
         if task == "ltv_positive":
             cols.append(pa.field("profit_6m", pa.float64(), nullable=False))
         return pa.schema(cols)
+    if task == "aml":
+        # Mule-ring membership is a full-observation detection task, not a forecast:
+        # the label reflects the user's role over their entire observed history. The
+        # time column records the horizon that history was observed through, so it is
+        # named ``observed_through`` rather than the forecast-style ``eval_ts`` — there
+        # is no point-in-time cut and histories are not truncated.
+        return pa.schema(
+            base
+            + [
+                pa.field("observed_through", pa.timestamp("us"), nullable=False),
+                pa.field("label", pa.int8(), nullable=False),
+            ]
+        )
     if task == "fraud":
         return pa.schema(
             base

@@ -1,4 +1,4 @@
-# PRAGMA large (~1B params at ~28k vocab). Phase 4 size table.
+# PRAGMA large (~1B params at ~28k vocab). Size table.
 size: large
 dim: 1024
 n_heads: 16

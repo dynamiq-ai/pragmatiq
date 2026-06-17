@@ -1,6 +1,6 @@
-"""Realism report: one self-contained HTML with the gate-1 diagnostic plots.
+"""Realism report: one self-contained HTML with the realism diagnostic plots.
 
-Plots per Phase 1: events-per-user histogram, inter-event times,
+Plots: events-per-user histogram, inter-event times,
 amount-by-MCC, hour-of-day, merchant Zipf, label prevalences. Figures embed as
 base64 PNGs so the file has no external assets.
 """

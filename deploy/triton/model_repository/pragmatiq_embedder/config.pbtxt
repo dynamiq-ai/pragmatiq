@@ -1,4 +1,6 @@
-# Triton config for the pragmatiq embedder (Phase 7).
+# Triton config for the pragmatiq embedder. This file sits at the model root; the
+# implementation lives in the version subdirectory `1/model.py` (Triton's model
+# repository requires <model>/<version>/<file>, and serves the highest version).
 # Python backend running the native varlen PyTorch model — the high-throughput
 # path (no padding); the ONNX export is the portable dense reformulation.
 # Batching is handled INSIDE the model: one request carries a JSON array of many
@@ -30,9 +32,12 @@ output [
 
 instance_group [
   {
-    # CPU-first (global rule 5): the stack must boot on a CPU-only host. The
-    # python backend loads the native PyTorch model, which uses CUDA when the
-    # model.py sees a GPU. For dedicated GPU serving, switch kind to KIND_GPU.
+    # CPU-first (global rule 5): the stack must boot on a CPU-only host, so the
+    # committed default is KIND_CPU. The python backend selects its compute
+    # device in 1/model.py: it runs on CUDA when PRAGMATIQ_SERVE_GPU=1 is set in
+    # the container environment and a GPU is visible (the path the deploy script
+    # takes when nvidia-smi is present), and on CPU otherwise. Setting kind to
+    # KIND_GPU here is also honored and pins each instance to its assigned GPU.
     count: 2
     kind: KIND_CPU
   }

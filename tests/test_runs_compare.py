@@ -1,4 +1,4 @@
-"""compare_runs alignment semantics (Phase 5: runs list|compare)."""
+"""compare_runs alignment semantics (runs list|compare)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""The pragmatiq model: profile / event / history encoders (Phase 4).
+"""The pragmatiq model: profile / event / history encoders.
 
 Pipeline for one :class:`~pragmatiq.data.collate.PackedBatch`:
 
@@ -41,7 +41,7 @@ CKPT_FORMAT = 2
 
 @dataclass
 class ModelConfig:
-    """pragmatiq model dimensions (Phase 4 size table)."""
+    """pragmatiq model dimensions (size table)."""
 
     vocab_size: int
     dim: int = 192
@@ -64,7 +64,7 @@ class ModelConfig:
         """A named size: ``nano`` (~1M, CPU/CI), ``small`` (10M), ``medium`` (100M), ``large`` (1B).
 
         ``nano`` is not in the paper; it exists so the gates and ``quickstart``
-        run end-to-end on a CPU in minutes (the internal spec: "nano config on CPU in CI").
+        run end-to-end on a CPU in minutes (the nano config targets CPU/CI).
 
         ``overrides`` lets callers tune any architecture field on top of the size
         table — notably ``rope_base`` and ``dropout`` (the paper-silent knobs the

@@ -1,4 +1,4 @@
-"""Batch embedding (Phase 7).
+"""Batch embedding.
 
 ``BatchEmbedder`` streams a tokenized shard directory through a trained model
 and writes ``embeddings.parquet`` (user_id + embedding vector), reporting
@@ -37,22 +37,51 @@ class BatchEmbedder:
         sampler = DynamicBatchSampler(ds.index, token_budget=self.token_budget, shuffle=False)
         sampler.set_epoch(0)
         loader = ShardDataLoader(ds, sampler)
-        uids: list[str] = []
-        vecs: list[np.ndarray] = []
+        out_path = Path(out_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        # Stream the output: flush a row group every ``chunk`` users instead of
+        # holding every vector in memory, so a full-book embed does not grow
+        # unbounded. An empty book still writes a valid file with this schema.
+        schema = pa.schema([pa.field("user_id", pa.string()),
+                            pa.field("embedding", pa.list_(pa.float32()))])
+        chunk = 20_000
+        buf_uids: list[str] = []
+        buf_vecs: list[np.ndarray] = []
+        n_users = 0
+        writer = pq.ParquetWriter(out_path, schema, compression="zstd")
+
+        def _flush() -> None:
+            if not buf_uids:
+                return
+            mat = np.concatenate(buf_vecs)
+            writer.write_table(pa.table(
+                {"user_id": buf_uids,
+                 "embedding": pa.array([row.tolist() for row in mat], type=pa.list_(pa.float32()))},
+                schema=schema))
+            buf_uids.clear()
+            buf_vecs.clear()
+
         t0 = time.time()
-        for batch in progress(loader, total=len(loader), desc="embed", unit="batch"):
-            batch = batch.to(self.device)
-            z = self.model.embed_users(batch).float().cpu().numpy()
-            uids.extend(batch.user_ids)
-            vecs.append(z)
-        ds.close()
-        mat = np.concatenate(vecs) if vecs else np.zeros((0, self.model.config.dim), dtype=np.float32)
+        try:
+            for batch in progress(loader, total=len(loader), desc="embed", unit="batch"):
+                batch = batch.to(self.device)
+                z = self.model.embed_users(batch).float().cpu().numpy()
+                buf_uids.extend(batch.user_ids)
+                buf_vecs.append(z)
+                n_users += len(batch.user_ids)
+                if len(buf_uids) >= chunk:
+                    _flush()
+            _flush()
+            if n_users == 0:
+                # An empty book still writes a valid file with the schema (the
+                # writer would otherwise close with no row group at all).
+                writer.write_table(pa.table(
+                    {"user_id": pa.array([], type=pa.string()),
+                     "embedding": pa.array([], type=pa.list_(pa.float32()))}, schema=schema))
+        finally:
+            writer.close()
+            ds.close()
         elapsed = max(time.time() - t0, 1e-6)
-        table = pa.table({"user_id": uids,
-                          "embedding": pa.array([row.tolist() for row in mat],
-                                                type=pa.list_(pa.float32()))})
-        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table, out_path, compression="zstd")
-        return {"n_users": len(uids), "dim": int(mat.shape[1]) if mat.size else self.model.config.dim,
-                "elapsed_sec": round(elapsed, 3), "users_per_sec": round(len(uids) / elapsed, 1),
+        return {"n_users": n_users, "dim": int(self.model.config.dim),
+                "elapsed_sec": round(elapsed, 3), "users_per_sec": round(n_users / elapsed, 1),
                 "out": str(out_path)}

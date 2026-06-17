@@ -1,4 +1,4 @@
-"""Triton python-backend model: native varlen pragmatiq embedder (Phase 7).
+"""Triton python-backend model: native varlen pragmatiq embedder.
 
 Requests carry a JSON array of plain user records (the same dicts accepted by
 ``PragmaModel.embed_records``); the response is the ``[n_users, dim]`` embedding
@@ -27,16 +27,19 @@ class TritonPythonModel:
 
         params = json.loads(args["model_config"]).get("parameters", {})
         run_dir = params.get("run_dir", {}).get("string_value", os.environ.get("PRAGMATIQ_RUN", "/models/run"))
-        # Respect Triton's assigned instance kind/device (a KIND_CPU instance must
-        # run on CPU even if a GPU is visible); fall back to availability if the
-        # runtime doesn't report a kind.
+        # Device selection. CPU-first (global rule 5): with nothing set the model
+        # runs on CPU even where a GPU is visible. Setting PRAGMATIQ_SERVE_GPU=1
+        # opts into CUDA serving when a GPU is actually present — this is the
+        # switch the deploy script sets so "serving on CUDA" is true end to end.
+        # A Triton-assigned GPU instance also pins to its device.
+        serve_gpu = os.environ.get("PRAGMATIQ_SERVE_GPU", "") == "1"
         kind = args.get("model_instance_kind", "")
         if kind == "GPU" and torch.cuda.is_available():
             self.device = f"cuda:{args.get('model_instance_device_id', '0')}"
-        elif kind == "CPU":
-            self.device = "cpu"
+        elif serve_gpu and torch.cuda.is_available():
+            self.device = "cuda"
         else:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = "cpu"
         self.model = PragmaModel.from_pretrained(run_dir, device=self.device)
 
     def execute(self, requests):

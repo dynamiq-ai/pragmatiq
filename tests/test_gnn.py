@@ -1,4 +1,4 @@
-"""Phase 6 tests: transfer-graph build, handcrafted features, GraphSAGE, ablation plumbing."""
+"""AML GNN tests: transfer-graph build, handcrafted features, GraphSAGE, ablation plumbing."""
 
 from __future__ import annotations
 
@@ -34,7 +34,7 @@ class TestSplitDiscipline:
 
 requires_pyg = pytest.mark.skipif(
     importlib.util.find_spec("torch_geometric") is None,
-    reason="install pragmatiq[gnn] for AML GNN model tests",
+    reason="torch-geometric is required for the AML GNN model tests",
 )
 
 
@@ -92,7 +92,7 @@ class TestHandcrafted:
         assert feats.shape[1] == 5
         assert np.isfinite(feats).all()
 
-    def test_mules_have_distinct_structure(self, dataset: Path) -> None:
+    def test_degree_is_not_a_mule_oracle(self, dataset: Path) -> None:
         import pyarrow.parquet as pq
         from sklearn.metrics import roc_auc_score
 
@@ -100,14 +100,18 @@ class TestHandcrafted:
         uids = aml["user_id"].tolist()
         y = aml["label"].to_numpy()
         feats = handcrafted_node_features(dataset / "transfers.parquet", uids)
-        # The ring leaves a structural footprint in the transfer graph that
-        # hand-crafted degree/volume features pick up — this is what GNN+handcrafted
-        # recovers and the isolated event-embedding (which never sees the ring legs)
-        # cannot. Assert the features carry real signal (robust to the exact stat).
+        # Mules are degree- and volume-matched to ordinary accounts: the ring's
+        # fan-in/layering/cash-out legs draw amounts from the same lognormal as
+        # organic P2P, senders are few, and the discriminative structure is the
+        # multi-hop layering chain — not any node's 1-hop degree. So no single
+        # hand-crafted degree/volume feature should separate mules well; if one
+        # did, degree would be a near-oracle and (c) would trivially dominate (b),
+        # collapsing the relational-recovery claim into a feature leak.
+        in_deg, out_deg = feats[:, 0], feats[:, 1]
         if y.sum() >= 5:
-            best = max(max(roc_auc_score(y, feats[:, j]), roc_auc_score(y, -feats[:, j]))
-                       for j in range(feats.shape[1]))
-            assert best > 0.6, f"mules structurally indistinct (max single-feature AUC {best:.3f})"
+            for name, f in (("in_deg", in_deg), ("out_deg", out_deg)):
+                auc = max(roc_auc_score(y, f), roc_auc_score(y, -f))
+                assert auc < 0.72, f"degree feature {name} too predictive (AUC {auc:.3f}): ring degree leaks"
 
 
 @requires_pyg

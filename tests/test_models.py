@@ -1,4 +1,4 @@
-"""Phase 4 model tests: shapes, param counts, masking, TimeRoPE grad, equivalence."""
+"""Model tests: shapes, param counts, masking, TimeRoPE grad, equivalence."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ class TestShapes:
         assert z.shape == (batch.n_users, model.config.dim)
 
     def test_mlm_head_is_literal_spec_transform(self, batch_and_vocab) -> None:
-        # SPEC Phase 4: the MLM head is exactly concat(3d) -> Linear(3d->d) ->
+        # The MLM head is exactly concat(3d) -> Linear(3d->d) ->
         # tied logits. No extra non-linearity or normalization.
         model = PragmaModel(ModelConfig.preset("small", batch_and_vocab[1]))
         head = MLMHead(model.config.dim)

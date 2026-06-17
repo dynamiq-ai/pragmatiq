@@ -216,21 +216,35 @@ class EpisodeInjector:
         return FraudEpisode(start_day=start_day, len_days=len_days,
                             n_drains=n_big, total_stolen=float(all_amt.sum()))
 
-    def inject_mule_atm(
+    def inject_mule_behavior(
         self, rng: np.random.Generator, user_idx: int, ccy: str,
         txn: SourceBuffer, cash: list[tuple[int, float]], mcc_code: dict[str, str],
         app: SourceBuffer | None = None, devices: list[str] | None = None,
-        os_name: str = "android_14",
+        os_name: str = "android_14", layer: int = 0, depth: int = 1,
     ) -> MuleEpisode | None:
-        """Cash-out burst during the ring window (the P2P legs are world-scheduled).
+        """Realize a mule's faint behavioural fingerprint during the ring window.
 
-        A mule extracts the received funds fast and in a distinctive way: a
-        cluster of near-limit ATM withdrawals plus crypto-exchange top-ups,
-        night-skewed and tightly grouped in time. This is a *behavioral*
-        signature in the event sequence (transaction types, amounts, rapid
-        cadence) that the PRAGMA-style encoder picks up — and that raw transfer-graph
-        degree statistics miss. It is what lets GNN+PRAGMA beat GNN+handcrafted
-        in the phase-6 ablation, not just the ring topology.
+        Laundering leaves a *subtle* trace in the mule's own event stream — the
+        in-app shadow of moving money on a schedule. Two always-on signals,
+        both drawn from the same pools as ordinary activity so no single token
+        is a tell, and weak enough that an isolated probe stays modest:
+
+        - **Forwarding-tempo app bursts.** A handful of short navigation bursts
+          that end on the ``transfers`` payments screen (where a mule manually
+          pushes funds on), clustered in the ring window. Screens, devices and
+          OS come from the user's own pools — only the *cadence and screen
+          mix* during the window differ from baseline, so the signal is a
+          conditional frequency shift, never a single-field tell.
+
+        The role in the chain (``layer`` of ``depth``) gently modulates the mix:
+        collectors skew toward inbound-checking screens, distributors toward
+        outbound transfers. This per-node signal is weak alone (the isolated
+        probe lands in the 0.55-0.65 band), but a graph-aware model that
+        aggregates a node's fingerprint with its chain-neighbours' fingerprints
+        amplifies it — the lift that lets GNN+pragmatiq beat both the isolated
+        probe and hand-crafted degree in the AML ablation. Setting
+        ``mule_behavior_strength`` > 0 adds a stronger, individually-visible
+        ATM/crypto cash-out on top.
         """
         ep = self.world.episodes
         cal = self.world.calendar
@@ -238,14 +252,59 @@ class EpisodeInjector:
         w0, w1 = int(ep.mule_window[user_idx, 0]), int(ep.mule_window[user_idx, 1])
         if w0 < 0:
             return None
+        # Always-on faint fingerprint (no RNG consumed by non-mules, so their
+        # streams are byte-identical). Role in the chain skews the screen mix.
+        is_distributor = depth <= 1 or layer >= depth - 1
+        if app is not None and devices:
+            w0_us = cal.start_us() + w0 * DAY_US
+            span_us = max(1, w1 - w0) * DAY_US
+            # A handful of short navigation bursts spread across the window. The
+            # count is small and overlaps ordinary app usage, so the per-node
+            # signal is weak; it is the conditional rate of transfers-ending bursts
+            # in the window — amplified across chain neighbours by message passing
+            # — that carries the AML lift, not any single burst.
+            n_burst = int(rng.integers(4, 9))
+            anchor = w0_us + (rng.random(n_burst) * span_us).astype(np.int64) + \
+                (rng.uniform(8, 23, size=n_burst) * HOUR_US).astype(np.int64)
+            n_nav = rng.integers(2, 5, size=n_burst)
+            total = int(n_nav.sum())
+            anchor_of_ev = np.repeat(anchor, n_nav)
+            order_in = np.concatenate([np.arange(k, 0, -1) for k in n_nav])
+            gap = (rng.uniform(15, 90, size=total) * order_in * 1_000_000).astype(np.int64)
+            burst_ts = anchor_of_ev - gap
+            last = order_in == 1
+            # Every burst ends on a money-movement screen: distributors push funds
+            # on (`transfers`); collectors mostly check an inbound credit
+            # (`payments`/`cards`) but still forward some (`transfers`). Every value
+            # occurs throughout ordinary app use — only the conditional frequency
+            # in the window shifts, so no screen is an AML marker on its own.
+            n_end = int(last.sum())
+            if is_distributor:
+                end_pool = np.array(["transfers"], dtype=object)
+                end_p = None
+            else:
+                end_pool = np.array(["payments", "transfers", "cards"], dtype=object)
+                end_p = np.array([0.45, 0.30, 0.25])
+            end_vals = end_pool[rng.choice(len(end_pool), size=n_end, p=end_p)]
+            screen = _SCREENS_ATO[rng.integers(0, len(_SCREENS_ATO), size=total)].astype(object)
+            screen[last] = end_vals
+            dev = np.array(devices, dtype=object)[rng.integers(0, len(devices), size=total)]
+            app.append(
+                burst_ts,
+                screen=screen,
+                action=np.where(rng.random(total) < 0.55, "view", "tap").astype(object),
+                device_id=dev,
+                os=np.full(total, os_name, dtype=object),
+                app_version=np.full(total, f"10.{rng.integers(0, 40)}", dtype=object),
+                geo_country=np.full(total, country, dtype=object),
+            )
+
         s = float(self.world.cfg.mule_behavior_strength)
         if s <= 0.0:
-            # Relational-AML regime: the mule has NO distinctive individual
-            # cash-out fingerprint. Its only trace is ring membership in the
-            # transfer graph (fan-in → layering → fan-out, time-dispersed to
-            # blend with normal P2P), so the signal is purely RELATIONAL —
-            # recoverable by a graph-aware model via the ring community and
-            # neighbour behaviour, not by an isolated per-user probe.
+            # Relational regime: only the faint fingerprint above. No stronger
+            # individual cash-out, so the isolated probe stays modest and the
+            # discriminative lift comes from the multi-hop chain + neighbour
+            # fingerprints that a graph-aware model aggregates.
             return MuleEpisode(window_start_day=w0, window_end_day=w1)
         # ATM cash-out: near-limit withdrawals clustered over 1-2 nights;
         # volume scales with mule_behavior_strength (the embedding-visible arm

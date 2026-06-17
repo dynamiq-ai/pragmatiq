@@ -1,4 +1,4 @@
-# PRAGMA medium (~100M params at ~28k vocab). Phase 4 size table.
+# PRAGMA medium (~100M params at ~28k vocab). Size table.
 size: medium
 dim: 512
 n_heads: 8

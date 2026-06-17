@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import torch
 import torch.nn as nn
 
 from pragmatiq import api
@@ -31,12 +32,23 @@ def test_finetune_early_stops_and_restores_best(ft_work: Path, monkeypatch) -> N
     model = PragmaModel(ModelConfig.preset("nano", tok.vocab_size))
     ft = LoRAFineTuner(model, FineTuneConfig(max_epochs=20, patience=2, lora_rank=4))
 
+    # A LoRA adapter tensor we stamp with the epoch index each training epoch, so
+    # we can assert the fitted model carries the BEST epoch's adapters — not the
+    # last (degraded) epoch's — after early stopping restores the best state.
+    lora_param = next(p for name, p in ft.model.named_parameters() if "lora" in name)
+
     # Controlled validation curve: peak at epoch 2 (0.92), then two declines →
     # early-stop fires at epoch 4 and the best (0.92) state is what we keep.
     seq = iter([0.90, 0.92, 0.88, 0.86, 0.85, 0.84, 0.83])
+    state = {"epoch": 0}
 
     def fake_epoch(dataset, users, label_of, opt, train):  # replaces the bound method
-        return 0.0 if train else next(seq)
+        if train:
+            state["epoch"] += 1
+            with torch.no_grad():
+                lora_param.fill_(float(state["epoch"]))
+            return 0.0
+        return next(seq)
 
     monkeypatch.setattr(ft, "_run_epoch", fake_epoch)
     ds = ShardDataset(ft_work / "tok")
@@ -45,6 +57,9 @@ def test_finetune_early_stops_and_restores_best(ft_work: Path, monkeypatch) -> N
     assert res["epochs_run"] == 4  # stopped `patience` epochs after the peak
     assert abs(res["best_val_auc"] - 0.92) < 1e-6
     assert res["n_adapted"] > 0  # LoRA adapters were injected
+    # the peak val_auc was at epoch 2, so the restored adapters must be epoch 2's
+    assert torch.allclose(lora_param, torch.full_like(lora_param, 2.0)), \
+        "fine-tuner must restore the best-epoch LoRA adapters, not the last epoch's"
 
 
 def test_custom_head_resolved_for_finetune() -> None:

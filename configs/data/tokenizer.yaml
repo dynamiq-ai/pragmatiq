@@ -1,4 +1,4 @@
-# Tokenizer configuration (Phase 2).
+# Tokenizer configuration.
 
 n_buckets: 64            # GUESS: percentile buckets per numeric key (+ zero bucket)
 categorical_threshold: 1000   # max distinct values for one-token-per-value fields

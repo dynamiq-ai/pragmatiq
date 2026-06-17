@@ -1,4 +1,4 @@
-# Triton serving image for the pragmatiq embedder (Phase 7).
+# Triton serving image for the pragmatiq embedder.
 #
 # The python-backend model (model_repository/pragmatiq_embedder/1/model.py) imports
 # `pragmatiq`, so the stock `tritonserver` image cannot serve it as-is — this image

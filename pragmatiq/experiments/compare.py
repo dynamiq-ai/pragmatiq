@@ -1,4 +1,4 @@
-"""Run comparison (Phase 5: ``pragmatiq runs list|compare``).
+"""Run comparison (``pragmatiq runs list|compare``).
 
 Pure functions over the ``runs/`` directory so the CLI stays a thin wrapper
 (global rule 1). ``list_runs`` lives in :mod:`pragmatiq.experiments.run`;

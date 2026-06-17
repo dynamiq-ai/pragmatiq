@@ -25,9 +25,10 @@ python3.11 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 ```
 
-Optional extras pull in focused tooling: `.[gnn]` for the AML graph, `.[serve]` for
-ONNX/Triton export, `.[nemotron]` for the frozen text embedder, `.[demo]` for the
-Streamlit app.
+The full pipeline (including the AML graph) works with the plain install. Optional
+extras add focused tooling: `.[serve]` for ONNX/Triton export, `.[extras]` for the
+frozen text embedder and experiment tracking, `.[demo]` for the Streamlit app, and
+`.[full]` for all of them.
 
 </Step>
 

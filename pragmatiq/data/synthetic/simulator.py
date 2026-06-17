@@ -163,13 +163,13 @@ def _nhpp_thinning(
 
 
 class UserSimulator:
-    """Simulates one user's full history month by month (Phase 1)."""
+    """Simulates one user's full history month by month."""
 
     def __init__(self, world: World) -> None:
         self.world = world
         self.cfg: WorldConfig = world.cfg
         # Per-transaction MCC base weights: catalog defaults, overridden where
-        # phase-1b calibration provides target category shares.
+        # calibration provides target category shares.
         base = np.array([row[6] for row in MCC_CATALOG], dtype=np.float64)
         if world.cfg.mcc_weights:
             for k, v in world.cfg.mcc_weights.items():
@@ -268,8 +268,10 @@ class UserSimulator:
             latent.fraud = injector.inject_fraud(rng, user_idx, ccy, txn, app, cash,
                                                  fraud_rows, MCC_CATALOG_CODE)
         if ep.mule_member[user_idx]:
-            latent.mule = injector.inject_mule_atm(rng, user_idx, ccy, txn, cash, MCC_CATALOG_CODE,
-                                                   app=app, devices=devices, os_name=os_name)
+            latent.mule = injector.inject_mule_behavior(
+                rng, user_idx, ccy, txn, cash, MCC_CATALOG_CODE,
+                app=app, devices=devices, os_name=os_name,
+                layer=int(ep.mule_layer[user_idx]), depth=int(ep.mule_depth[user_idx]))
 
         insolvency_day, min_bal, end_bal = self._balance(
             rng, income, txn, ccy, cash, signup_day, country
@@ -308,7 +310,7 @@ class UserSimulator:
             sign = 1.0 if txn_type in ("credit_transfer", "p2p_in", "refund") else -1.0
             # Bank-transfer legs (salary, rent, top-ups) are not card payments,
             # so they carry the no-MCC sentinel "0000" rather than a retail code
-            # — keeps per-MCC amount distributions clean (gate-1 realism check).
+            # — keeps per-MCC amount distributions clean (the realism check).
             mcc_code = "0000" if mcc_key == "income" else MCC_CATALOG_CODE.get(mcc_key, "0000")
             rows.append((ts, abs(amount), merchant, mcc_code,
                          txn_type, "direct_debit" if sign < 0 else "transfer"))
@@ -416,7 +418,7 @@ class UserSimulator:
         mu_shift = 0.35 * np.log1p(income / 2500.0)  # richer users spend more per txn
 
         # MCC mixture for this persona (tilts × stress-driven gambling boost).
-        # ``mcc_weights`` (set by phase-1b calibration) overrides the catalog's
+        # ``mcc_weights`` (set by calibration) overrides the catalog's
         # per-transaction category shares so the realized MCC mix matches the
         # target aggregate; persona tilts then perturb it.
         base_w = self._base_mcc_weights

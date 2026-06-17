@@ -1,4 +1,4 @@
-"""Phase 3 tests: shard round-trip, dynamic batching, resumability, padding-equivalence."""
+"""Sharding tests: shard round-trip, dynamic batching, resumability, padding-equivalence."""
 
 from __future__ import annotations
 
@@ -277,7 +277,7 @@ class TestDynamicSampler:
 
 
 class TestPaddingEquivalence:
-    """The gate-3 contract: varlen (packed) attention == padded attention."""
+    """The packing contract: varlen (packed) attention == padded attention."""
 
     def _mha(self, x: torch.Tensor, qkv_w: torch.Tensor, attn_mask: torch.Tensor,
              n_heads: int) -> torch.Tensor:
@@ -344,7 +344,7 @@ class TestPaddingEquivalence:
 
 
 class TestVarlenAttentionEquivalence:
-    """gate-3's 'critical' property on the PRODUCTION path: varlen_self_attention
+    """The 'critical' property on the PRODUCTION path: varlen_self_attention
     (the real SDPA scatter/gather code) == a naive padded per-segment attention."""
 
     def _ref_per_segment(self, q, k, v, cu, rope=None, rope_pos=None):

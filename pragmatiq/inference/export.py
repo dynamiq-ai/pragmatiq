@@ -1,4 +1,4 @@
-"""Model export (Phase 7).
+"""Model export.
 
 ``export_onnx`` exports a **dense reformulation** of the trained pragmatiq model:
 the same ``nn.Module`` weights run over static-rectangular padded tensors instead

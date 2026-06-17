@@ -9,7 +9,7 @@
 
 - [ ] `pytest tests/ -x -q`
 - [ ] `ruff check . && mypy pragmatiq`
-- [ ] Relevant gate: `bash scripts/gates/gate_<N>.sh`
+- [ ] Relevant acceptance check: `bash scripts/gates/gate_<N>.sh`
 
 ## Notes
 

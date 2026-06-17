@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Turnkey serving deploy + smoke check (Phase 7).
+# Turnkey serving deploy + smoke check.
 #
 # Builds the Triton image (with pragmatiq installed), boots tritonserver with a trained
 # run mounted, waits for readiness, then sends a real embedding request through the HTTP
@@ -52,7 +52,12 @@ if [ "$VARIANT" = "nemotron" ]; then EXTRAS="nemotron"; TAG="nemotron"; fi
 IMAGE="pragmatiq-triton:${TAG}"
 
 GPU_FLAG=""
-if command -v nvidia-smi >/dev/null 2>&1; then GPU_FLAG="--gpus all"; echo "GPU detected → serving on CUDA"; fi
+GPU_ENV=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_FLAG="--gpus all"
+  GPU_ENV="-e PRAGMATIQ_SERVE_GPU=1"
+  echo "GPU detected → serving on CUDA"
+fi
 
 echo "=== building $IMAGE (EXTRAS='${EXTRAS}') ==="
 docker build -f deploy/triton/Dockerfile --build-arg "EXTRAS=${EXTRAS}" -t "$IMAGE" .
@@ -63,7 +68,7 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "=== starting tritonserver ($NAME) ==="
 # shellcheck disable=SC2086
-docker run -d --rm --name "$NAME" $GPU_FLAG \
+docker run -d --rm --name "$NAME" $GPU_FLAG $GPU_ENV \
   -p "${PORT}:8000" -p "${METRICS_PORT}:8002" --shm-size 1g \
   -v "${REPO_ROOT}/deploy/triton/model_repository:/models/model_repository:ro" \
   -v "${RUN_ABS}:/models/run:ro" \

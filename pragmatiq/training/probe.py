@@ -1,12 +1,12 @@
-"""Frozen-embedding probe + embedding helpers (Phase 5).
+"""Frozen-embedding probe + embedding helpers.
 
 ``embed_users`` runs a (frozen) model over a shard dataset and returns user
 embeddings keyed by user_id. ``EmbeddingProbe`` fits a classifier on those
-embeddings against a label table — the cheap, backbone-frozen evaluation used by
-gate 5. The default classifier is gradient boosting (sklearn
+embeddings against a label table — the cheap, backbone-frozen evaluation of
+embedding quality. The default classifier is gradient boosting (sklearn
 ``HistGradientBoostingClassifier``), which models the non-linear interactions in a
 learned embedding better than a linear head; ``logistic`` stays selectable, and
-``lightgbm`` is an optional upgrade (the ``[gbdt]`` extra). Both ROC-AUC and PR-AUC
+``lightgbm`` is also selectable. Both ROC-AUC and PR-AUC
 are reported — PR-AUC is the honest headline on the low-prevalence risk tasks. The
 raw-count baseline uses the *same* classifier, so the probe-vs-baseline gap reflects
 the representation, not the model class.
@@ -14,6 +14,9 @@ the representation, not the model class.
 
 from __future__ import annotations
 
+import contextlib
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +31,24 @@ from ..data.dataset import DynamicBatchSampler, ShardDataset
 from ..data.tokenizer import truncate_record
 from ..models.pragmatiq import PragmaModel
 from ..progress import progress
+
+
+@contextlib.contextmanager
+def cpu_thread_cap(n: int | None = None) -> Iterator[None]:
+    """Pin torch CPU intra-op threads, restoring the caller's setting on exit.
+
+    The default of one thread per core oversubscribes the small forward passes
+    used for embedding on many-core hosts, and when several stages embed at once
+    it drives thread-pool contention. A small fixed count is faster there and
+    fixes the float reduction order so per-batch outputs are stable; the caller's
+    setting is restored so notebook and library users are unaffected elsewhere.
+    """
+    prev = torch.get_num_threads()
+    torch.set_num_threads(n or min(8, os.cpu_count() or 8))
+    try:
+        yield
+    finally:
+        torch.set_num_threads(prev)
 
 
 @torch.no_grad()
@@ -64,20 +85,21 @@ def embed_users(
         return model.embed_users(batch).float().cpu().numpy()
 
     out: dict[str, np.ndarray] = {}
-    for batch_idx in progress(sampler, total=len(sampler), desc="embed", unit="batch"):
-        uids = [order[i] for i in batch_idx]
+    with cpu_thread_cap():
+        for batch_idx in progress(sampler, total=len(sampler), desc="embed", unit="batch"):
+            uids = [order[i] for i in batch_idx]
 
-        def _embed_at(budget: int, uids: list[str] = uids) -> np.ndarray:
-            # On CUDA OOM run_with_oom_retry halves `budget`; smaller budget → more
-            # sub-batches of this batch's users, so a heavy history still fits.
-            n_groups = max(1, (token_budget + budget - 1) // budget)
-            size = max(1, (len(uids) + n_groups - 1) // n_groups)
-            parts = [_embed_chunk(uids[s:s + size]) for s in range(0, len(uids), size)]
-            return np.concatenate(parts, axis=0)
+            def _embed_at(budget: int, uids: list[str] = uids) -> np.ndarray:
+                # On CUDA OOM run_with_oom_retry halves `budget`; smaller budget → more
+                # sub-batches of this batch's users, so a heavy history still fits.
+                n_groups = max(1, (token_budget + budget - 1) // budget)
+                size = max(1, (len(uids) + n_groups - 1) // n_groups)
+                parts = [_embed_chunk(uids[s:s + size]) for s in range(0, len(uids), size)]
+                return np.concatenate(parts, axis=0)
 
-        z, _ = run_with_oom_retry(_embed_at, token_budget)
-        for i, uid in enumerate(uids):
-            out[uid] = z[i]
+            z, _ = run_with_oom_retry(_embed_at, token_budget)
+            for i, uid in enumerate(uids):
+                out[uid] = z[i]
     return out
 
 
@@ -122,20 +144,16 @@ def build_probe_classifier(model: str, seed: int, max_iter: int = 1000, C: float
     """Return ``(estimator, needs_scaling)`` for a probe/baseline classifier.
 
     ``gbdt`` (default) is sklearn's ``HistGradientBoostingClassifier``; ``logistic``
-    is ``LogisticRegression`` (lbfgs); ``lightgbm`` is the optional ``[gbdt]`` extra.
-    Tree models are scale-invariant, so only the linear model asks for standardization.
+    is ``LogisticRegression`` (lbfgs); ``lightgbm`` is also selectable. Tree models
+    are scale-invariant, so only the linear model asks for standardization.
     """
     if model == "gbdt":
         from sklearn.ensemble import HistGradientBoostingClassifier
 
         return HistGradientBoostingClassifier(random_state=seed), False
     if model == "lightgbm":
-        try:
-            from lightgbm import LGBMClassifier
-        except ImportError as e:  # pragma: no cover - exercised only without the extra
-            raise ImportError(
-                "probe_model='lightgbm' needs the 'gbdt' extra: pip install 'pragmatiq[gbdt]'."
-            ) from e
+        from lightgbm import LGBMClassifier
+
         return LGBMClassifier(random_state=seed, verbosity=-1), False
     if model == "logistic":
         from sklearn.linear_model import LogisticRegression
@@ -200,7 +218,7 @@ class EmbeddingProbe:
 
 
 class RawCountBaseline:
-    """Hand-made raw event-count features + the probe's classifier (gate-5 floor).
+    """Hand-made raw event-count features + the probe's classifier (the baseline floor).
 
     Uses the same ``model`` as :class:`EmbeddingProbe` so the probe-vs-baseline gap
     isolates the representation (learned embedding vs hand-crafted counts), not the

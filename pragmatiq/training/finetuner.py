@@ -1,4 +1,4 @@
-"""LoRA fine-tuner (Phase 5).
+"""LoRA fine-tuner.
 
 Freezes the pretrained backbone, injects LoRA adapters, attaches a
 :class:`ClassificationHead` on the user embedding ``z_h[USR]``, and trains with
@@ -101,7 +101,12 @@ class LoRAFineTuner:
                 if bad >= self.config.patience:
                     break
         if best_state is not None:
+            # Restore the best-validation epoch for BOTH the head and the LoRA
+            # adapters, so the model a caller serves (or ``merge_lora``s) matches
+            # the reported ``best_val_auc``. The saved LoRA tensors are a partial
+            # state dict over the adapter keys only, hence strict=False.
             self.head.load_state_dict(best_state["head"])
+            self.model.load_state_dict(best_state["lora"], strict=False)
         return {"best_val_auc": best_auc, "epochs_run": len(history), "n_adapted": self.n_adapted,
                 "val_auc_history": history}
 

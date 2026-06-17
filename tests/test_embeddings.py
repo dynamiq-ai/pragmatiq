@@ -1,4 +1,4 @@
-"""Isolation tests for the calendar embedding (Phase 4)."""
+"""Isolation tests for the calendar embedding."""
 
 from __future__ import annotations
 

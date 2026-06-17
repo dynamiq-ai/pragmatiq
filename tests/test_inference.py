@@ -1,4 +1,4 @@
-"""Phase 7 tests: batch embedder, event attribution, ONNX export."""
+"""Inference tests: batch embedder, event attribution, ONNX export."""
 
 from __future__ import annotations
 

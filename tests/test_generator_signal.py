@@ -1,6 +1,6 @@
 """AML signal-placement guarantees of the synthetic generator.
 
-The phase-6 ablation is only meaningful if the generator puts AML signal in
+The AML ablation is only meaningful if the generator puts AML signal in
 the right place: NOT in a single structural or field-level oracle (degree,
 occupation, an exclusive txn_type) but in behavior an embedding must learn.
 These pin the property that no single structural or field-level feature
@@ -54,7 +54,7 @@ class TestRelationalDesign:
     def test_aml_positives_are_persona_diverse(self) -> None:
         # Mules are ordinary recruited accounts drawn from the GENERAL population,
         # NOT a distinct "mule" persona — their only signal is ring membership in
-        # the transfer graph (the phase-6 relational regime). A single dominant
+        # the transfer graph (the relational regime). A single dominant
         # archetype would let an isolated embedding read membership off persona alone.
         world = World.build(WorldConfig(**CFG))
         members = np.nonzero(world.episodes.mule_member)[0]

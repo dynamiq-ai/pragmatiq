@@ -1,19 +1,19 @@
 ---
 title: Acceptance gates
-description: The eight phase gates that keep pragmatiq honest — what each asserts and how to run it.
+description: pragmatiq's acceptance gates — what each asserts and how to run it.
 ---
 
-pragmatiq is built in eight phases, each with an **acceptance gate** — an executable script
+pragmatiq ships an **acceptance gate** for each major component — an executable script
 under [`scripts/gates/`](https://github.com/dynamiq-ai/pragmatiq/tree/main/scripts/gates)
-that must pass before the next phase begins. Gates are the reproducible contract: they run
-the real pipeline and assert the property that phase promises.
+that runs the real pipeline and asserts the property that component promises. They are the
+reproducible contract: end-to-end integration checks you can run yourself.
 
 | Gate | Asserts |
 | --- | --- |
 | `gate_1` | Synthetic generator acceptance — realism + byte-identical determinism. |
 | `gate_2` | Key–value–time tokenizer — round-trip, `[UNK]` fallbacks, vocab range. |
 | `gate_3` | Sharding + varlen collation — packed (varlen) attention ≡ padded attention. |
-| `gate_4` | Model — the encoder stack and tied MLM head match the spec. |
+| `gate_4` | Model — the encoder stack and tied MLM head match the documented architecture. |
 | `gate_5` | End-to-end training — the probe beats the same-classifier raw-count baseline. |
 | `gate_6` | AML GNN ablation — a graph over transfers recovers signal an isolated probe misses. |
 | `gate_7` | Inference / serving / demo. |
@@ -30,7 +30,7 @@ Each gate is runnable standalone and honors `PRAGMATIQ_GATE_FULL=1` for full-sca
 The CI-scale defaults run on a CPU in minutes; the full-scale variants (50k–100k users) are
 intended for a GPU host — see [Pretrain (and scale)](/docs/tutorials/pretrain).
 
-<Callout type="warn" title="Never start phase N+1 with a red gate N">
-The gates are ordered. A red gate means the property it guards is broken; the fix comes
-before any new work on top of it.
+<Callout type="info" title="Gates are integration checks">
+Each gate runs the real pipeline for its area and asserts the property it guards. Run the
+relevant gate after a change to that area; a red gate means the guarded property is broken.
 </Callout>

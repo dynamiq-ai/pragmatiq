@@ -1,4 +1,4 @@
-"""Phase 5 uplift evaluation: Qini metric + end-to-end api.uplift."""
+"""Uplift evaluation: Qini metric + end-to-end api.uplift."""
 
 from __future__ import annotations
 

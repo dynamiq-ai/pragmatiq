@@ -1,6 +1,6 @@
 ---
 title: AML GNN ablation
-description: Run the three-way GraphSAGE ablation over the transfer graph and read the result.
+description: Run the four-arm GraphSAGE ablation over the transfer graph and read the result.
 ---
 
 This is the hands-on runbook for pragmatiq's [AML graph extension](/docs/concepts/aml-graph)
@@ -33,9 +33,10 @@ pragmatiq gnn data/aml/tok --run runs/aml \
   --epochs 150
 ```
 
-This trains GraphSAGE over three setups and reports held-out ROC-AUC (mean ± std over seeds):
+This trains four setups and reports held-out ROC-AUC (mean ± std over seeds):
 **(a)** a probe on isolated embeddings, **(b)** GraphSAGE + pragmatiq features, **(c)**
-GraphSAGE + hand-crafted features.
+GraphSAGE + hand-crafted features, **(d)** a logistic control on the hand-crafted features
+with no graph.
 
 </Step>
 
@@ -43,10 +44,13 @@ GraphSAGE + hand-crafted features.
 
 ### Read it
 
-The gated claim is **relational recovery — (c) > (a)** by a clear margin: the transfer graph
-carries AML signal an isolated per-user embedding cannot see. On the default synthetic book
-the mules are structurally distinctive (so hand-crafted degree is a strong baseline) — the
-honest caveats are documented on the [concept page](/docs/concepts/aml-graph) and in the
+The gated claim is **relational recovery — `(c) 0.670 ≫ (a) 0.498`** by a clear margin: the
+transfer graph carries multi-hop AML signal an isolated per-user embedding cannot see, and
+message passing adds over the same features without a graph (`(c) > (d) 0.604`). The honest
+limitation is that the learned per-user embedding adds only a little ((b) `0.554`) and does
+**not** beat hand-crafted features ((b) `< (c)`) — recovering the laundering signal in a learned
+representation is the open challenge. The full discussion is on the
+[concept page](/docs/concepts/aml-graph) and in the
 [`04_aml_gnn` notebook](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb).
 
 </Step>
