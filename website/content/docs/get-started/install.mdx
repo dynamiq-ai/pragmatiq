@@ -1,0 +1,52 @@
+---
+title: Install
+description: Get pragmatiq running locally — Python 3.11+, a virtual environment, and optional extras.
+---
+
+pragmatiq is **CPU-first**: everything runs on CPU (slower but correct), and CUDA / flash-attn
+are accelerations, not requirements.
+
+## Requirements
+
+- **Python 3.11+**
+- A virtual environment (recommended, so the install is isolated)
+- A GPU is optional
+
+## Install
+
+```bash
+git clone https://github.com/dynamiq-ai/pragmatiq.git
+cd pragmatiq
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+`.[dev]` adds the test/lint tooling (pytest, ruff, mypy). Run those dev commands from the
+virtual environment so they match CI.
+
+## Optional extras
+
+Install only what a given workflow needs:
+
+| Extra | For |
+| --- | --- |
+| `.[gnn]` | the AML transfer-graph GraphSAGE ablation (`torch-geometric`) |
+| `.[nemotron]` | the frozen-text-embedding variant (`transformers`) |
+| `.[serve]` | ONNX export + Triton client |
+| `.[gbdt]` | LightGBM as an optional probe head |
+| `.[demo]` | the Streamlit demo |
+| `.[wandb]` / `.[tb]` | experiment tracking |
+
+```bash
+pip install -e ".[dev,gnn,serve]"   # combine as needed
+```
+
+## Verify
+
+```bash
+pytest -q                 # the test suite
+ruff check . && mypy pragmatiq
+bash scripts/gates/gate_8.sh   # the CPU end-to-end pipeline smoke
+```
+
+Then run the [Quickstart](/docs/get-started/quickstart) to see the whole pipeline end to end.

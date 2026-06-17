@@ -1,0 +1,10 @@
+# Grafana dashboard provider: load any JSON dashboards dropped in this directory.
+apiVersion: 1
+providers:
+  - name: pragmatiq
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    options:
+      path: /etc/grafana/provisioning/dashboards

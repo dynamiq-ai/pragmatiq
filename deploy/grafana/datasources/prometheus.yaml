@@ -1,0 +1,10 @@
+# Grafana datasource provisioning: point Grafana at the Prometheus service so
+# the observability stack works out of the box (Phase 7).
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

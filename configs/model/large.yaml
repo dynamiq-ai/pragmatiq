@@ -1,0 +1,10 @@
+# PRAGMA large (~1B params at ~28k vocab). Phase 4 size table.
+size: large
+dim: 1024
+n_heads: 16
+depth_profile: 9
+depth_event: 45
+depth_history: 18
+dropout: 0.1
+rope_base: 10000.0   # GUESS
+max_position: 64

@@ -1,0 +1,67 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+@import 'katex/dist/katex.min.css';
+
+/*
+ * pragmatiq brand palette (matches docs/assets/pragmatiq mark): teal/green accents,
+ * navy ink, a single amber highlight. Applied to Fumadocs' CSS variables so the
+ * built-in dark/light themes + toggle pick it up. Brand tokens are also exposed for
+ * the custom interactive visualizers (see components/).
+ */
+:root {
+  --brand-teal: #0e8a8a;
+  --brand-green: #2bb673;
+  --brand-amber: #f5a623;
+  --brand-ink: #0f2536;
+
+  /* Fumadocs light theme: teal primary on a clean paper surface. */
+  --color-fd-primary: #0e8a8a;
+  --color-fd-ring: #0e8a8a;
+  --color-fd-accent: #e6f4f3;
+  --color-fd-accent-foreground: #0b3b3b;
+}
+
+.dark {
+  /* Black surfaces for a sharp, high-contrast look; brighter teal/green accents. */
+  --brand-teal: #2dd4bf;
+  --brand-green: #34d399;
+
+  --color-fd-background: #000000;
+  --color-fd-card: #0c0e12;
+  --color-fd-popover: #0c0e12;
+  --color-fd-secondary: #14171d;
+  --color-fd-primary: #2dd4bf;
+  --color-fd-ring: #2dd4bf;
+  --color-fd-accent: #14171d;
+  --color-fd-accent-foreground: #e6fffb;
+  --color-fd-muted: #14171d;
+  --color-fd-border: #20242c;
+}
+
+/* Tailwind v4's preflight resets buttons to cursor:default; restore the pointer on
+ * every interactive element (the sidebar nav toggles, theme switch, our chips, etc.). */
+@layer base {
+  button:not(:disabled),
+  [role='button']:not([aria-disabled='true']),
+  summary,
+  a[href] {
+    cursor: pointer;
+  }
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+/* KaTeX display math: let long equations scroll instead of overflowing the column. */
+.katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.25rem;
+}

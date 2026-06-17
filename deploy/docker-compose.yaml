@@ -1,0 +1,69 @@
+# pragmatiq serving stack (Phase 7): Triton + Prometheus + Grafana + demo.
+# A trained run is mounted at /models/run inside the Triton container.
+services:
+  triton:
+    # Built from deploy/triton/Dockerfile so pragmatiq is installed in Triton's Python
+    # (the stock tritonserver image cannot import the python-backend model). Build the
+    # Nemotron variant by setting PRAGMATIQ_TRITON_EXTRAS=nemotron (see the Dockerfile).
+    build:
+      context: ..
+      dockerfile: deploy/triton/Dockerfile
+      args:
+        EXTRAS: ${PRAGMATIQ_TRITON_EXTRAS:-}
+    image: pragmatiq-triton:${PRAGMATIQ_TRITON_TAG:-latest}
+    command: tritonserver --model-repository=/models/model_repository --metrics-port=8002
+    volumes:
+      - ./triton/model_repository:/models/model_repository:ro
+      - ${PRAGMATIQ_RUN:-../runs/quickstart/runs/quickstart}:/models/run:ro
+    ports:
+      - "8000:8000"   # HTTP
+      - "8001:8001"   # gRPC
+      - "8002:8002"   # Prometheus metrics
+    shm_size: "1g"
+    healthcheck:
+      # Triton reports readiness on the HTTP port once every model has loaded. Use Python
+      # (always present — the image installs pragmatiq) rather than curl, which the derived
+      # image does not install.
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/v2/health/ready', timeout=5)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    # CPU-first (global rule 5): no GPU reservation, so `docker compose up` boots
+    # on a CPU-only host (Triton runs the python-backend model on CPU). For GPU
+    # serving, add:
+    #   deploy: {resources: {reservations: {devices: [{capabilities: ["gpu"]}]}}}
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    volumes:
+      # provision a Prometheus datasource (+ dashboards dir) so Grafana isn't empty
+      - ./grafana:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+  demo:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command: streamlit run demo/app.py --server.port 8501 --server.address 0.0.0.0
+    environment:
+      - PRAGMATIQ_RUN=/models/run
+    volumes:
+      - ${PRAGMATIQ_RUN:-../runs/quickstart/runs/quickstart}:/models/run:ro
+    ports:
+      - "8501:8501"
+    depends_on:
+      - triton

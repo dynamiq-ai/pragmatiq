@@ -1,0 +1,61 @@
+---
+title: Generate & tokenize
+description: Produce a synthetic dataset (or bring your own) and fit the key–value–time tokenizer into training shards.
+---
+
+The first two stages turn raw histories into tokenized parquet shards the model trains on.
+
+<Steps>
+
+<Step>
+
+### Generate synthetic data
+
+```bash
+pragmatiq synth generate --out data/synth --config configs/data/synthetic.yaml
+# or inline:
+pragmatiq synth generate --out data/synth --n-users 50000 --seed 0 --n-workers 8
+```
+
+The generator is **deterministic**: the same seed produces byte-identical output for any
+worker count. It writes `events.parquet`, `profiles.parquet`, `transfers.parquet`, and
+`labels/*.parquet` (the [data contract](/docs/reference/data-contract)) plus a realism report.
+
+<Callout type="info" title="Fit to your bank's statistics, no raw data">
+`pragmatiq synth calibrate --stats configs/data/aggregates.example.yaml` fits the generator's
+priors to aggregate statistics a bank can share — so the synthetic book resembles yours
+without moving any raw records.
+</Callout>
+
+</Step>
+
+<Step>
+
+### Tokenize
+
+```bash
+pragmatiq tokenize data/synth --out data/tok --n-workers 8
+```
+
+This fits the key–value–time vocabulary (numeric percentile buckets, categorical ids, text
+BPE) in one streaming pass, then writes tokenized parquet shards plus an LMDB user-index.
+The tokenizer fit is **worker-count-invariant** — byte-identical regardless of `--n-workers`.
+
+Customize it with a config (see [Configuration](/docs/reference/configuration)):
+
+```bash
+pragmatiq tokenize data/synth --out data/tok --config configs/data/tokenizer.yaml
+```
+
+For the [PRAGMA+Nemotron variant](/docs/concepts/nemotron), tokenize with
+`configs/data/tokenizer_nemotron.yaml` instead.
+
+</Step>
+
+</Steps>
+
+## What you get
+
+`data/tok/` holds the shards + index + the saved tokenizer (with a content hash). The hash is
+embedded in every checkpoint; `from_pretrained` refuses to run a model against a mismatched
+tokenizer. Next: [Pretrain](/docs/tutorials/pretrain).

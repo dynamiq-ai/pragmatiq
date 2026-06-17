@@ -1,0 +1,45 @@
+name: Feature request
+description: Suggest an improvement or extension for pragmatiq.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea.
+
+        pragmatiq is an independent implementation inspired by the PRAGMA paper
+        (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow, research question, or user need would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the smallest useful version of the feature.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Synthetic data
+        - Tokenizer
+        - Model architecture
+        - Training or finetuning
+        - Inference or serving
+        - AML graph
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
