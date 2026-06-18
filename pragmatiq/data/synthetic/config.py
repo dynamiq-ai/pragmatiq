@@ -1,7 +1,7 @@
 """Configuration for the synthetic world generator.
 
 Every knob that shapes the simulated book lives here so that calibration
-(phase 1b) and tests can override behavior without touching simulator code.
+and tests can override behavior without touching simulator code.
 All randomness downstream derives from ``seed`` (global rule 2).
 """
 
@@ -38,9 +38,8 @@ DEFAULT_ARCHETYPE_MIX: dict[str, float] = {
 class WorldConfig:
     """Parameters of the simulated banking world.
 
-    Attributes mirror Phase 1. ``trait_noise`` injects
-    trait/behavior overlap so downstream tasks are realistically hard
-    (gate 1 requires credit GBDT AUC in ~[0.75, 0.85], not >0.95).
+    ``trait_noise`` injects trait/behavior overlap so downstream tasks are
+    realistically hard (credit GBDT AUC lands in ~[0.75, 0.85], not >0.95).
     """
 
     n_users: int = 10_000
@@ -55,7 +54,7 @@ class WorldConfig:
 
     archetype_mix: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ARCHETYPE_MIX))
 
-    # Realism / difficulty knobs (tuned at gate 1; see tests/baselines).
+    # Realism / difficulty knobs (see tests/baselines).
     trait_noise: float = 0.55  # 0 = labels fully determined by traits; 1 = mostly noise
     label_noise: float = 0.005  # random flip prob on binary user-level labels
     activity_scale: float = 1.0  # global multiplier on event volume
@@ -74,7 +73,7 @@ class WorldConfig:
     organic_degree_dispersion: float = 10.0  # mean extra stubs at sociability=1
     # 0.0 = relational regime: mules have NO distinctive individual cash-out
     # fingerprint, so AML signal lives purely in the transfer-graph ring (the
-    # phase-6 relational-recovery target). >0 adds an embedding-visible ATM/crypto
+    # relational-recovery target). >0 adds an embedding-visible ATM/crypto
     # cash-out burst scaled by the value (a behaviorally-mixed regime).
     mule_behavior_strength: float = 0.0  # 0 = graph-only AML signal
 
@@ -85,7 +84,7 @@ class WorldConfig:
     # Comms campaigns per month (each stores both potential outcomes for uplift).
     campaigns_per_month: float = 2.0
 
-    # Calibration overrides (phase 1b): replace catalog MCC mix / amount means.
+    # Calibration overrides: replace catalog MCC mix / amount means.
     # Keys are MCC catalog keys (e.g. "grocery"); validated at world build.
     mcc_weights: dict[str, float] | None = None
     mcc_amount_mean: dict[str, float] | None = None

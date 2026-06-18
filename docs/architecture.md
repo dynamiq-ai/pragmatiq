@@ -300,7 +300,7 @@ longest segment (`max_seqlen`) so the fallback can size its block.
 Because attention is **within-segment** in both paths, padding in the SDPA block
 is purely structural — the mask removes it entirely from the softmax. That is why
 the fp32 SDPA forward matches a naive padded per-segment forward to atol 1e-4
-(the gate-3 padding-equivalence guarantee). The flash-attn path runs in
+(the padding-equivalence guarantee). The flash-attn path runs in
 fp16/bf16 and matches the SDPA path only to bf16 precision (~1e-2). On CUDA,
 fp32 inference (no autocast) also takes the SDPA path, since flash kernels accept
 only half precision.

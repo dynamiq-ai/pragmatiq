@@ -3,7 +3,7 @@
     {
       "name": "synthesize",
       "signature": "synthesize(config: 'str | Path | dict[str, Any] | None' = None, out: 'str | Path' = 'data/synth', n_users: 'int | None' = None, seed: 'int | None' = None, n_workers: 'int' = 0, write_report: 'bool' = True, **overrides: 'Any') -> 'dict[str, Any]'",
-      "summary": "Generate a synthetic dataset (Phase 1)."
+      "summary": "Generate a synthetic dataset."
     },
     {
       "name": "tokenize",
@@ -13,7 +13,7 @@
     {
       "name": "pretrain",
       "signature": "pretrain(shard_dir: 'str | Path', run_name: 'str', model_size: 'str' = 'small', config: 'str | Path | dict[str, Any] | None' = None, runs_root: 'str | Path' = 'runs', resume: 'str | None' = None, **overrides: 'Any') -> 'dict[str, Any]'",
-      "summary": "Pretrain a pragmatiq model on tokenized shards (Phase 5)."
+      "summary": "Pretrain a pragmatiq model on tokenized shards."
     },
     {
       "name": "finetune",
@@ -33,51 +33,51 @@
     {
       "name": "uplift",
       "signature": "uplift(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', device: 'str' = 'auto', token_budget: 'int' = 16384, seed: 'int' = 0, learner: 'str' = 't') -> 'dict[str, Any]'",
-      "summary": "Evaluate communication-campaign uplift on a trained model (Phase 5)."
+      "summary": "Evaluate communication-campaign uplift on a trained model."
     },
     {
       "name": "gnn",
       "signature": "gnn(shard_dir: 'str | Path', run: 'str | Path', transfers_path: 'str | Path', aml_label_path: 'str | Path', seeds: 'tuple[int, ...]' = (0, 1, 2), device: 'str' = 'auto', epochs: 'int' = 150) -> 'dict[str, Any]'",
-      "summary": "Run the three-way AML GNN ablation (Phase 6)."
+      "summary": "Run the four-arm AML GNN ablation."
     },
     {
       "name": "quickstart",
       "signature": "quickstart(out: 'str | Path' = 'runs/quickstart', n_users: 'int' = 50000, seed: 'int' = 0, model_size: 'str' = 'small', max_steps: 'int' = 400, n_workers: 'int' = 0) -> 'dict[str, Any]'",
-      "summary": "End-to-end smoke: synth \u2192 tokenize \u2192 nano pretrain \u2192 probe (Phase 8)."
+      "summary": "End-to-end smoke: synth \u2192 tokenize \u2192 nano pretrain \u2192 probe."
     }
   ],
   "gates": [
     {
       "id": "gate_1",
-      "title": "Gate 1 \u2014 synthetic data generator acceptance (Phase 1)."
+      "title": ""
     },
     {
       "id": "gate_2",
-      "title": "Gate 2 \u2014 key-value-time tokenizer (Phase 2)."
+      "title": ""
     },
     {
       "id": "gate_3",
-      "title": "Gate 3 \u2014 sharding, dataset, varlen collation (Phase 3)."
+      "title": ""
     },
     {
       "id": "gate_4",
-      "title": "Gate 4 \u2014 model (Phase 4)."
+      "title": ""
     },
     {
       "id": "gate_5",
-      "title": "Gate 5 \u2014 end-to-end training (Phase 5)."
+      "title": ""
     },
     {
       "id": "gate_6",
-      "title": "Gate 6 \u2014 AML GNN ablation (Phase 6)."
+      "title": ""
     },
     {
       "id": "gate_7",
-      "title": "Gate 7 \u2014 inference, serving, demo (Phase 7)."
+      "title": ""
     },
     {
       "id": "gate_8",
-      "title": "Gate 8 \u2014 polish: nano end-to-end on CPU, validate, packaging (Phase 8)."
+      "title": ""
     }
   ],
   "model_sizes": [

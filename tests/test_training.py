@@ -1,4 +1,4 @@
-"""Phase 5 tests: optimizers, pretrainer checkpoint/resume/NaN, probe, fine-tune."""
+"""Training tests: optimizers, pretrainer checkpoint/resume/NaN, probe, fine-tune."""
 
 from __future__ import annotations
 
@@ -190,6 +190,20 @@ class TestPretrainer:
         # ~4e-4); genuine RNG/sampler divergence shows up as O(0.1+) diffs.
         tol = 5e-3 if torch.cuda.is_available() else 1e-4
         assert maxd < tol, f"resume not bit-exact: max loss diff {maxd:.2e}"
+
+    def test_api_resume_rebuilds_checkpoint_size(self, shards: Path) -> None:
+        # A run trained at one size must resume at that size even when the caller
+        # uses the default model_size: api.pretrain reads the run's run.yaml on
+        # resume and rebuilds the architecture, so the strict checkpoint load does
+        # not fail on a shape mismatch.
+        runs_root = shards / "resume_api_runs"
+        base = {"token_budget": 4096, "warmup_steps": 2, "log_every": 1, "max_steps": 6}
+        api.pretrain(shards / "tok", "rrt", model_size="nano", config=base, runs_root=runs_root)
+        assert Run.open("rrt", runs_root).read_config()["model_size"] == "nano"
+        # Default model_size is "small"; resume="auto" must rebuild nano (else the
+        # strict load raises). The max_steps kwarg extends the stored config.
+        api.pretrain(shards / "tok", "rrt", resume="auto", max_steps=9, runs_root=runs_root)
+        assert Run.open("rrt", runs_root).read_config()["model_size"] == "nano"
 
     def test_nan_loss_dumps_and_skips(self, shards: Path, monkeypatch) -> None:
         tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")

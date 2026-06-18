@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 4 — model (Phase 4).
+# Acceptance check — model.
 #
 #   1. shape tests across all three sizes (forward produces token/event/user reprs)
 #   2. param counts within 10% of 10M / 100M / 1B at the canonical ~28k vocab
@@ -7,16 +7,14 @@
 #   4. gradcheck on TimeRoPE
 #   5. per-user equivalence: a user's embedding is identical alone or batched
 #      (varlen attention has no cross-user contamination) + LoRA inject/merge
-#
-# Runnable outside Claude Code: bash scripts/gates/gate_4.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
 
-echo "=== gate 4.1-4.5: model shape / param / masking / rope / equivalence tests ==="
+echo "=== model shape / param / masking / rope / equivalence tests ==="
 $PY -m pytest tests/test_models.py -q
 
-echo "=== gate 4 summary: param counts at vocab=28000 ==="
+echo "=== summary: param counts at vocab=28000 ==="
 $PY - <<'EOF'
 import torch
 from pragmatiq.models import ModelConfig, PragmaModel, MLMHead
@@ -34,4 +32,4 @@ print("param counts OK")
 EOF
 
 echo ""
-echo "GATE 4 GREEN"
+echo "MODEL CHECKS GREEN"

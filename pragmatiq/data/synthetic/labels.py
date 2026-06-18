@@ -1,6 +1,6 @@
 """LabelOracle: turn simulated traces + latent logs into task label tables.
 
-Leakage rules (Phase 1):
+Leakage rules:
 
 - user-level labels (default_12m, churn_6m, ltv_positive) are computed ONLY
   from what happens strictly AFTER the task's eval point;
@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from ..schema import SOURCE_TXN
 from .config import WorldConfig
 from .simulator import UserTrace
 from .world import DAY_US, World
@@ -31,7 +32,7 @@ class LabelRows:
     churn_6m: list[tuple[str, int, int]] = field(default_factory=list)
     ltv_positive: list[tuple[str, int, int, float]] = field(default_factory=list)
     recurring: list[tuple[str, int, str, int]] = field(default_factory=list)  # (uid, ts, series, 1)
-    aml: list[tuple[str, int, int]] = field(default_factory=list)
+    aml: list[tuple[str, int, int]] = field(default_factory=list)  # (uid, observed_through, is_mule)
     comm_uplift: list[tuple[str, str, int, int, int, int]] = field(default_factory=list)
 
     def extend(self, other: LabelRows) -> None:
@@ -56,6 +57,12 @@ class LabelOracle:
         self.eval_short_day = int(cal.month_start_day[self.cfg.eval_month_short])
         self.eval_credit_us = cal.start_us() + self.eval_credit_day * DAY_US
         self.eval_short_us = cal.start_us() + self.eval_short_day * DAY_US
+        # End of the 12-month outcome window, taken at the month boundary 12
+        # months after the credit eval point. __post_init__ guarantees
+        # eval_month_credit + 12 <= months, so this stays inside the simulated
+        # horizon — the positive prevalence is a true 12-month outcome and is not
+        # biased low by a fixed day count overshooting the end of the simulation.
+        self.eval_credit_end_day = int(cal.month_start_day[self.cfg.eval_month_credit + 12])
 
     def label_user(self, trace: UserTrace, rng: np.random.Generator) -> LabelRows:
         """Produce this user's rows for every label table.
@@ -68,7 +75,7 @@ class LabelOracle:
         uid = trace.user_id
         noise = cfg.label_noise
 
-        txn_ts = trace.ts[trace.source == 0] if len(trace.ts) else np.zeros(0, dtype=np.int64)
+        txn_ts = trace.ts[trace.source == SOURCE_TXN] if len(trace.ts) else np.zeros(0, dtype=np.int64)
 
         # ---- default_12m: eligibility = active in the 90d before credit eval
         # AND not already insolvent at eval (banks don't score charged-off books);
@@ -79,7 +86,7 @@ class LabelOracle:
             y = 0
             if trace.insolvency_day >= 0:
                 d = trace.insolvency_day
-                if self.eval_credit_day < d <= self.eval_credit_day + 366:
+                if self.eval_credit_day < d <= self.eval_credit_end_day:
                     y = 1
             if rng.random() < noise:
                 y = 1 - y
@@ -137,7 +144,10 @@ class LabelOracle:
                 for t in rng.choice(non_rec, size=k, replace=False):
                     rows.recurring.append((uid, int(t), "", 0))
 
-        # ---- aml: mule ring membership, one row per user.
+        # ---- aml: full-observation mule-ring membership, one row per user. The
+        # label reflects the user's role over their whole observed history, so the
+        # time column records the horizon that history was observed through rather
+        # than a forecast cut-off.
         is_mule = bool(self.world.episodes.mule_member[trace.user_idx])
         rows.aml.append((uid, self.eval_short_us, int(is_mule)))
 

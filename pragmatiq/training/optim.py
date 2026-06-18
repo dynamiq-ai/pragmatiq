@@ -3,7 +3,7 @@
 Muon (MomentUm Orthogonalized by Newton-schulz) is vendored from Keller Jordan's
 reference implementation (https://github.com/KellerJordan/Muon, MIT) with light
 edits; it orthogonalizes each 2-D weight's momentum via a quintic Newton–Schulz
-iteration before the step. Per Phase 5, 2-D hidden weights use Muon
+iteration before the step. 2-D hidden weights use Muon
 while embeddings, norms and biases use AdamW.
 
 ``build_optimizers`` returns ``(muon, adamw)`` plus a combined cosine schedule

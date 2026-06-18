@@ -1,4 +1,4 @@
-"""Hands-off training sizing from the data + device (Phase 5).
+"""Hands-off training sizing from the data + device.
 
 A user pointing pragmatiq at 1M–26M tokenized records should not have to hand-tune the
 batch and schedule. :func:`autoconfigure` reads the shard index (user count, token

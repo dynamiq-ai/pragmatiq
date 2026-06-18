@@ -1,4 +1,4 @@
-# Nano pretraining for CPU/CI end-to-end (<10 min). Phase 8.
+# Nano pretraining for CPU/CI end-to-end (<10 min).
 max_steps: 60
 token_budget: 4096
 lr_muon: 0.003

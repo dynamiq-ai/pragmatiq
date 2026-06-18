@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Project gate-1 credit baseline: hand-crafted features + sklearn HGBT.
+"""Credit-risk baseline: hand-crafted features + sklearn HGBT.
 
 Reads a generated dataset directory, builds per-user features STRICTLY from
 events before each user's eval point (no leakage), trains a
 HistGradientBoostingClassifier on default_12m, and prints ROC-AUC.
 
-Gate 1 expects AUC in ~[0.75, 0.85] at full scale: lower means the generator
-carries no causal signal, higher means leakage / separability is unrealistic.
+The baseline AUC should land in ~[0.75, 0.85] at full scale: lower means the
+generator carries no causal signal, higher means leakage / separability is
+unrealistic.
 
 Usage:
     python tests/baselines/credit_gbdt.py --data /path/to/synth [--seed 0]

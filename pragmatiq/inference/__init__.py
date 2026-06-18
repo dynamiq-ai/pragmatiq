@@ -1,4 +1,4 @@
-"""Inference: batch embedding, attribution, export (Phase 7)."""
+"""Inference: batch embedding, attribution, export."""
 
 from .embedder import BatchEmbedder
 from .explain import EventAttribution, EventAttributor

@@ -52,7 +52,7 @@ def synthesize(
     write_report: bool = True,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Generate a synthetic dataset (Phase 1).
+    """Generate a synthetic dataset.
 
     Args:
         config: YAML path or dict of :class:`WorldConfig` fields; ``None`` uses
@@ -179,7 +179,7 @@ def pretrain(
     resume: str | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
-    """Pretrain a pragmatiq model on tokenized shards (Phase 5).
+    """Pretrain a pragmatiq model on tokenized shards.
 
     Returns a summary dict (run name, final step, last metrics).
     """
@@ -198,7 +198,7 @@ def pretrain(
     is_auto = isinstance(config, (str, Path)) and str(config) == "auto"
     if is_auto:
         # Size token_budget / grad_accum / schedule from the data + device so a user can
-        # point pretrain at 1M–26M records without tuning (Phase 5). Overrides
+        # point pretrain at 1M–26M records without tuning. Overrides
         # (incl. num_nodes/devices) still win and are folded in below.
         import logging
 
@@ -221,17 +221,36 @@ def pretrain(
     elif isinstance(config, dict):
         base = dict(config)
     base.update(overrides)
+    known = set(TrainConfig.__dataclass_fields__) | set(ModelConfig.__dataclass_fields__)
+    # Resuming rebuilds the model the checkpoint was trained with (read back from the
+    # run's run.yaml), so a run trained at one size resumes at that size rather than
+    # the caller's default model_size — otherwise the strict checkpoint load fails on
+    # a shape mismatch. The checkpoint's training config is authoritative too — batch
+    # sizing, step budget, and sampler position must stay consistent — so an
+    # auto-config plan is discarded on resume rather than allowed to re-size the run.
+    # Only explicit caller intent applies on top: the `overrides` kwargs always, and
+    # an explicitly passed `config` (path or dict) too — e.g. `max_steps=...` or
+    # `config={"max_steps": ...}` to extend training.
+    resuming = resume == "auto" and (Path(runs_root) / run_name).exists()
+    if resuming:
+        prev = Run.open(run_name, runs_root).read_config()
+        model_size = str(prev.get("model_size", model_size))
+        arch = set(ModelConfig.__dataclass_fields__) - {"vocab_size"}
+        explicit = dict(overrides) if config == "auto" else base
+        merged = {k: v for k, v in prev.items() if k in known}
+        merged.update(explicit)  # explicit caller intent wins for non-architecture knobs
+        merged.update({k: prev[k] for k in arch if k in prev})  # architecture stays the checkpoint's
+        base = merged
     # Reject unknown config keys so a mistyped option surfaces immediately as a
     # clear error. Recognized keys are TrainConfig or ModelConfig fields; `size`
     # (the model-size selector in configs/model/*.yaml) and the derived
     # `vocab_size` are also accepted.
-    known = set(TrainConfig.__dataclass_fields__) | set(ModelConfig.__dataclass_fields__)
     unknown = set(base) - known - {"vocab_size", "size"}
     if unknown:
         raise ValueError(f"unknown pretrain config key(s): {sorted(unknown)}; known: {sorted(known)}")
     tcfg = TrainConfig(**{k: v for k, v in base.items() if k in TrainConfig.__dataclass_fields__})
     # Architecture fields (rope_base, dropout, dim, ...) in the config tune the
-    # model on top of the size preset (the internal spec exposes the paper-silent knobs).
+    # model on top of the size preset (these are the paper-silent knobs the design notes expose).
     model_overrides = {k: v for k, v in base.items()
                        if k in ModelConfig.__dataclass_fields__ and k != "vocab_size"}
     # Hands-off PRAGMA+Nemotron wiring: a tokenizer built in embed mode implies the
@@ -251,7 +270,7 @@ def pretrain(
                    ("dim", "n_heads", "depth_profile", "depth_event", "depth_history",
                     "dropout", "rope_base", "max_position", "text_encoder", "text_encoder_dim")},
                 **dataclasses.asdict(tcfg)}
-    run = (Run.open(run_name, runs_root) if resume == "auto" and (Path(runs_root) / run_name).exists()
+    run = (Run.open(run_name, runs_root) if resuming
            else Run.create(run_name, resolved, tcfg.seed, tok.content_hash, runs_root,
                            tokenizer_src=shard_dir / "tokenizer"))
     logger = MetricLogger(run.dir, wandb=tcfg.wandb, wandb_project=tcfg.wandb_project,
@@ -379,7 +398,7 @@ def uplift(
     seed: int = 0,
     learner: str = "t",
 ) -> dict[str, Any]:
-    """Evaluate communication-campaign uplift on a trained model (Phase 5).
+    """Evaluate communication-campaign uplift on a trained model.
 
     Embeds users (truncated at each user's first campaign so no campaign-window
     activity leaks in), fits an uplift meta-learner (``learner='t'`` two-model or
@@ -464,7 +483,7 @@ def export(
     out: str | Path = "pragmatiq_embedder.onnx",
     device: str = "cpu",
 ) -> dict[str, Any]:
-    """Export the dense ONNX reformulation of the model from one example user (Phase 7).
+    """Export the dense ONNX reformulation of the model from one example user.
 
     ONNX export runs on CPU (the dense graph and its constants are built on CPU and
     validated against onnxruntime's CPU provider); ``device`` must be ``"cpu"``.
@@ -490,7 +509,7 @@ def benchmark(
     out: str | Path = "deploy/benchmarks/RESULTS.md",
     max_users: int | None = None,
 ) -> dict[str, Any]:
-    """Benchmark batch-embedding throughput and write RESULTS.md (Phase 7)."""
+    """Benchmark batch-embedding throughput and write RESULTS.md."""
     from pragmatiq.inference.benchmark import benchmark_batch_embed, write_results
     from pragmatiq.models.pragmatiq import PragmaModel
 
@@ -510,14 +529,16 @@ def gnn(
     device: str = "auto",
     epochs: int = 150,
 ) -> dict[str, Any]:
-    """Run the three-way AML GNN ablation (Phase 6).
+    """Run the four-arm AML GNN ablation.
 
     Embeds users with a trained model, builds the transfer graph, and compares
     (a) isolated embeddings, (b) GraphSAGE+PRAGMA, (c) GraphSAGE+handcrafted.
 
-    AML deliberately uses the FULL event horizon (no eval-point truncation):
-    the task is mule-ring membership detection over observed activity, not a
-    forecast — see MODEL_CARD.md.
+    AML is full-observation mule-ring membership detection, not a forecast: each
+    user is embedded from their entire observed history with no eval-point
+    truncation. The label table's ``observed_through`` column records the horizon
+    that history was observed through (not a point-in-time cut), so the embedding
+    timestamp is ignored here. See MODEL_CARD.md.
     """
     from pragmatiq.data.dataset import ShardDataset
     from pragmatiq.models.gnn import run_aml_ablation
@@ -535,7 +556,7 @@ def gnn(
 
 
 def validate(data_dir: str | Path) -> dict[str, Any]:
-    """Validate a raw dataset against the data contract (Phase 8)."""
+    """Validate a raw dataset against the data contract."""
     from pragmatiq.validate import validate_dataset
 
     report = validate_dataset(data_dir)
@@ -551,7 +572,7 @@ def quickstart(
     max_steps: int = 400,
     n_workers: int = 0,
 ) -> dict[str, Any]:
-    """End-to-end smoke: synth → tokenize → nano pretrain → probe (Phase 8).
+    """End-to-end smoke: synth → tokenize → nano pretrain → probe.
 
     CPU-capable and self-contained; ``max_steps``/``n_users`` are sized for a short run.
 
@@ -593,7 +614,7 @@ def calibrate(
     config: str | Path | dict[str, Any] | None = None,
     out: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Fit generator priors to bank-shareable aggregate statistics (Phase 1b).
+    """Fit generator priors to bank-shareable aggregate statistics.
 
     Returns the calibrated WorldConfig as a dict; if ``out`` is given, also
     writes it as YAML ready for ``pragmatiq synth --config``.

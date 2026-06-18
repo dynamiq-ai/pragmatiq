@@ -1,5 +1,5 @@
 """Hands-off training sizing: auto-config picks sane batch/schedule from data + device,
-and the multi-node/grad-accum surface is wired through TrainConfig (Phase 5)."""
+and the multi-node/grad-accum surface is wired through TrainConfig."""
 
 from __future__ import annotations
 

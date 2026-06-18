@@ -97,9 +97,11 @@ For development from a source checkout:
 pip install -e ".[dev]"
 ```
 
-Optional extras are available for focused workflows: install `.[gnn]` for AML
-graph experiments, `.[demo]` for Streamlit, `.[serve]` for export/serving,
-`.[tb]` for TensorBoard, and `.[wandb]` for experiment tracking.
+The full pipeline — including the gradient-boosting probe and the AML transfer-graph
+GraphSAGE ablation — works with the plain install. Optional extras add focused
+tooling: `.[serve]` for ONNX/Triton export and serving, `.[demo]` for the Streamlit
+demo, `.[extras]` for the frozen text embedder plus experiment tracking (Weights &
+Biases, TensorBoard), and `.[full]` for all of them.
 
 The same workflow is available from Python:
 
@@ -128,19 +130,11 @@ callers use the same library surface.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    A["Raw or synthetic banking data"] --> B["Validate schema"]
-    B --> C["Key-value-time tokenizer"]
-    C --> D["Token-budget batches<br/>parquet shards + LMDB index"]
-    D --> E["Profile encoder"]
-    D --> F["Event encoder"]
-    E --> G["History encoder"]
-    F --> G
-    G --> H["User embeddings"]
-    F --> I["MLM pretraining head"]
-    H --> J["Probe / LoRA / AML GNN / serve"]
-```
+<p align="center">
+  <img src="https://raw.githubusercontent.com/dynamiq-ai/pragmatiq/main/docs/assets/architecture.png" alt="pragmatiq architecture: raw or synthetic banking data is validated, run through the key-value-time tokenizer into token-budget batches (parquet shards + LMDB index), then profile, event, and history encoders produce user embeddings; the event encoder also feeds the MLM pretraining head, and user embeddings feed probe / LoRA / AML GNN / serving." width="900">
+</p>
+
+<!-- Diagram source: docs/assets/architecture.mmd (render with @mermaid-js/mermaid-cli). -->
 
 At a high level, pragmatiq follows the PRAGMA recipe:
 
@@ -155,7 +149,7 @@ At a high level, pragmatiq follows the PRAGMA recipe:
 - Registries let users customize heads, maskers, and value encoders without
   forking the library.
 
-See [`docs/architecture.md`](docs/architecture.md) for a teaching-grade walkthrough of
+See [`docs/architecture.md`](https://github.com/dynamiq-ai/pragmatiq/blob/main/docs/architecture.md) for a teaching-grade walkthrough of
 the encoders, temporal encoding, and objective, and [`MODEL_CARD.md`](MODEL_CARD.md) for the
 objective and limitations write-up.
 
@@ -271,7 +265,9 @@ paths, not this user-embedding probe.
 | churn_6m | 0.744 | 0.609 | +0.135 | 0.12 |
 | ltv_positive | 0.828 | 0.667 | +0.161 | 0.80 |
 
-<sub>provenance: n_users=50000, model=small, steps=2000, seed=0, commit=7353776</sub>
+<sub>Illustrative synthetic-benchmark run (reproducible config): n_users=50000,
+model=small, steps=2000, seed=0. Treat these as a pipeline check, not a
+performance claim.</sub>
 
 ## Using your own data
 
@@ -441,7 +437,7 @@ padded blocks built from `cu_seqlens` — the two paths agree to fp32 atol 1e-4
 
 ### Knobs that matter
 
-All defaults live in [`configs/pretrain.yaml`](configs/pretrain.yaml) and map
+All defaults live in [`configs/pretrain.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/configs/pretrain.yaml) and map
 1:1 onto `TrainConfig` in
 [`pragmatiq/training/pretrainer.py`](pragmatiq/training/pretrainer.py); any
 key can be overridden via `--config` or programmatically through
@@ -546,10 +542,10 @@ this with `grad_accum_steps` and `config: auto` (see
 effective batch without per-device OOM.
 
 As a reference point: the `small` model sustains roughly **79k tokens/s on a
-single A100** at `token_budget: 8192` (full-scale gate-5 run; throughput is
+single A100** at `token_budget: 8192` (measured on a full-scale run; throughput is
 logged per run in `runs/<name>/metrics.jsonl`, so measure on your own data).
 
-[`scripts/runpod_launch.py`](scripts/runpod_launch.py) is a turnkey path for
+[`scripts/runpod_launch.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/runpod_launch.py) is a turnkey path for
 validating on a rented A100/H100: it creates a RunPod pod via the REST API,
 syncs the repo over SSH (no GitHub required), installs, and runs the GPU
 end-to-end pipeline:
@@ -640,29 +636,32 @@ train/val/test splits shared across arms, over multiple seeds:
 | (c) | hand-crafted node stats (degree, volume) | GraphSAGE | What does a fraud analyst's baseline + a graph achieve? |
 | (d) | same hand-crafted stats | no — logistic control | Is the graph effect real, or just the features? |
 
-**Relational recovery** is the headline claim, and on the default synthetic data
-it holds: the graph-aware setup beats the isolated probe — `(c) > (a)` by a wide
-margin — so AML signal genuinely lives in the transfer structure that an isolated
-per-user embedding cannot see. Money mules are modeled as *ordinary recruited
-accounts* (no distinctive individual behavior), and the laundering legs are
-written to the transfer ledger (`transfers.parquet`), **not** the card-event
-stream — so an embedding built from events scores at chance (`(a) ≈ 0.5`) and
-only a model that reads the transfer graph recovers the rings.
+The synthetic mule rings are **multi-hop layered laundering chains**. Money mules
+are modeled as *ordinary recruited accounts* with no distinctive individual
+behavior, and their amounts and counterparty degree are drawn to **match ordinary
+accounts** — so 1-hop degree is *not* a trivial oracle (`(d)`, a degree-only
+logistic baseline, reaches only `0.604`). The laundering legs are written to the
+transfer ledger (`transfers.parquet`), **not** the card-event stream; the
+discriminative signal is the multi-hop layering chain in that ledger.
 
-Two limitations are reported in the verdict alongside the headline claim:
+**The gated claim — relational recovery (true and robust).** A GraphSAGE over the
+transfer graph recovers money-mule rings that a probe on the isolated per-user
+embedding cannot: `(c) 0.670 ≫ (a) 0.498`, so the AML signal lives in the
+multi-hop transfer structure an isolated embedding misses. Message passing adds
+over the same features without a graph (`(c) 0.670 > (d) 0.604`). This is what
+`gate_6` gates, at both CI and full scale.
 
-- The recovered signal is largely transfer-graph **degree**, a 1-hop relational
-  statistic. The `(d)` control (logistic regression on the same hand-crafted
-  degree/volume features, *no* graph) matches `(c)`, so on these synthetic rings
-  message passing adds little over the degree features themselves
-  (`message_passing_adds = (c) > (d)` is False).
-- pragmatiq's behavioral embeddings do **not** beat hand-crafted degree
-  (`(b) < (c)`): the mules are behaviorally ordinary by design, so the embedding
-  carries no isolated AML signal and the structural signal is best read off
-  degree. A regime where *learned* features beat hand-crafted ones needs a
-  **behaviorally-dominant** (multi-hop relational) laundering signal — the open
-  hard case, discussed in [`MODEL_CARD.md`](MODEL_CARD.md) and
-  [`notebooks/04_aml_gnn.ipynb`](notebooks/04_aml_gnn.ipynb).
+**Reported, not gated — the honest limitation.** The learned per-user embedding
+adds only a little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does
+**not** beat hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated
+embedding sits near chance, so the model does not capture the multi-hop laundering
+signal in the per-user representation; recovering it in a learned representation
+is the **open challenge**. This is consistent with the PRAGMA paper's own
+observation that AML is a setting where the model underperforms because it
+processes user histories in isolation — the GNN here is pragmatiq's honest
+extension that probes that gap, not a "the learned embedding wins" result. See
+[`MODEL_CARD.md`](MODEL_CARD.md) and
+[`notebooks/04_aml_gnn.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb).
 
 ### Running it
 
@@ -676,7 +675,7 @@ pragmatiq gnn data/tokenized --run runs/demo \
 
 The command embeds users with the trained run, builds the graph, fits each
 arm per seed, and prints per-arm mean ± std ROC-AUC plus a verdict dict.
-[`notebooks/04_aml_gnn.ipynb`](notebooks/04_aml_gnn.ipynb) is the interactive
+[`notebooks/04_aml_gnn.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb) is the interactive
 version of the same experiment.
 
 ### Latest results
@@ -692,14 +691,16 @@ CI-scale run can never masquerade as a full-scale result.
 
 | setup | ROC-AUC (mean ± std over seeds) |
 | --- | --- |
-| (a) probe on isolated pragmatiq embeddings | 0.501 ± 0.020 |
-| (b) GraphSAGE over transfers + pragmatiq features | 0.573 ± 0.037 |
-| (c) GraphSAGE + hand-crafted node features | 0.846 ± 0.006 |
-| (d) control: logistic regression on the same hand-crafted features, no graph | 0.842 ± 0.009 |
+| (a) probe on isolated pragmatiq embeddings | 0.498 ± 0.010 |
+| (b) GraphSAGE over transfers + pragmatiq features | 0.554 ± 0.026 |
+| (c) GraphSAGE + hand-crafted node features | 0.670 ± 0.014 |
+| (d) control: logistic regression on the same hand-crafted features, no graph | 0.604 ± 0.028 |
 
-**Relational recovery (gated): (c) > (a) = True** — a GraphSAGE over the transfer graph beats a probe on isolated pragmatiq embeddings. Message passing adds over the same features without a graph ((c) > (d)) = False. Reported, not gated: (b) > (a) = True; (b) > (c) = False — these synthetic mules are structurally distinctive, so hand-crafted degree is a strong baseline (see MODEL_CARD).
+**Relational recovery (gated): True** — a GraphSAGE over the transfer graph recovers money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = True), so the AML signal lives in the multi-hop transfer structure an isolated per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over the same features without a graph ((c) > (d) = True). The gate requires both.
 
-<sub>provenance: n_nodes=12000, n_edges=345810, n_mules=434, seeds=[0, 1, 2], epochs=150, commit=7353776</sub>
+**Reported, not gated:** the learned per-user embedding adds a little over the isolated probe ((b) > (a) = True) but does not beat hand-crafted features ((b) > (c) = False). The isolated embedding sits near chance, so on this synthetic book the model does not capture the multi-hop laundering signal on its own — recovering it in a learned per-user representation is the open challenge (see MODEL_CARD.md).
+
+<sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2], epochs=150, commit=a263737</sub>
 
 ## Model sizes
 
@@ -729,7 +730,7 @@ It is switchable from the data step alone. Tokenize in embed mode and `pretrain`
 auto-builds the matching frozen encoder and MSE reconstruction head — no model flags:
 
 ```bash
-pip install -e ".[nemotron]"   # adds transformers (the frozen embedder)
+pip install -e ".[extras]"   # adds transformers (the frozen embedder)
 pragmatiq tokenize data/synth --out data/tokenized --config configs/data/tokenizer_nemotron.yaml
 pragmatiq pretrain data/tokenized --name nemo --model-size medium   # text branch auto-wired
 ```
@@ -767,16 +768,16 @@ as defaults, exposes them in config, and marks source-level guesses with
 The production serving path is a **Triton python backend that runs the native
 varlen PyTorch model** — the exact no-padding forward used in training, not an
 approximation. The model repository lives at
-[`deploy/triton/model_repository/pragmatiq_embedder/`](deploy/triton/model_repository/pragmatiq_embedder/):
-[`config.pbtxt`](deploy/triton/model_repository/pragmatiq_embedder/config.pbtxt)
+[`deploy/triton/model_repository/pragmatiq_embedder/`](https://github.com/dynamiq-ai/pragmatiq/tree/main/deploy/triton/model_repository/pragmatiq_embedder):
+[`config.pbtxt`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/model_repository/pragmatiq_embedder/config.pbtxt)
 declares the interface and
-[`1/model.py`](deploy/triton/model_repository/pragmatiq_embedder/1/model.py)
+[`1/model.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/model_repository/pragmatiq_embedder/1/model.py)
 loads `PragmaModel.from_pretrained(run_dir)` once at startup and serves
 `embed_records` for every request.
 
 ### One-command deploy + smoke
 
-[`scripts/deploy_serving.sh`](scripts/deploy_serving.sh) is the turnkey path: it
+[`scripts/deploy_serving.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/deploy_serving.sh) is the turnkey path: it
 builds the serving image, boots tritonserver with your run mounted (the host GPU is
 used automatically when present), waits for readiness, then sends a real embedding
 request and verifies the `[n_users, dim]` response.
@@ -789,9 +790,9 @@ bash scripts/deploy_serving.sh --run runs/nemo --variant nemotron   # Nemotron v
 
 ### Bring the full stack up
 
-[`deploy/docker-compose.yaml`](deploy/docker-compose.yaml) starts four services:
+[`deploy/docker-compose.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/docker-compose.yaml) starts four services:
 Triton, Prometheus, Grafana, and the Streamlit demo. The Triton service **builds**
-from [`deploy/triton/Dockerfile`](deploy/triton/Dockerfile), which installs pragmatiq
+from [`deploy/triton/Dockerfile`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/Dockerfile), which installs pragmatiq
 into Triton's Python (the python backend imports it; the stock image cannot run the
 model) while leaving the image's CUDA build of torch untouched. Point `PRAGMATIQ_RUN`
 at a trained run directory — the one with `checkpoints/` and `tokenizer/` — mounted
@@ -809,7 +810,7 @@ default, add a GPU reservation (commented in the compose file) for GPU serving.
 | Service | Port | What it is |
 | --- | --- | --- |
 | Triton HTTP / gRPC | 8000 / 8001 | Inference endpoints |
-| Triton metrics | 8002 | Prometheus scrape target (5s interval, see [`deploy/prometheus/prometheus.yml`](deploy/prometheus/prometheus.yml)) |
+| Triton metrics | 8002 | Prometheus scrape target (5s interval, see [`deploy/prometheus/prometheus.yml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/prometheus/prometheus.yml)) |
 | Prometheus | 9090 | Metrics store |
 | Grafana | 3000 | Dashboards (anonymous admin enabled; Prometheus at `http://prometheus:9090`) |
 | Streamlit demo | 8501 | See [Streamlit demo](#streamlit-demo) |
@@ -889,7 +890,7 @@ PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run demo/app.py
 `PRAGMATIQ_RAW` (default `data/synth`) the generated dataset, and
 `PRAGMATIQ_SHARDS` (default `data/tokenized`) the tokenized shards. The demo
 also runs as the `demo` service in
-[`deploy/docker-compose.yaml`](deploy/docker-compose.yaml) on port 8501.
+[`deploy/docker-compose.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/docker-compose.yaml) on port 8501.
 
 ## Observability
 
@@ -908,10 +909,10 @@ of the tokenizer. On top of that:
   `tokenize --n-workers` fan out across processes but produce byte-identical
   output for any worker count (CI-enforced), so you can scale CPU phases
   freely without losing reproducibility.
-- **TensorBoard**: `pip install -e ".[tb]"`, then
+- **TensorBoard**: `pip install -e ".[extras]"`, then
   `tensorboard --logdir runs/<name>/tb`. The mirror is on whenever the
   `tensorboard` package is installed; otherwise it is a silent no-op.
-- **Weights & Biases**: `pip install -e ".[wandb]"`, then set `wandb: true`
+- **Weights & Biases**: `pip install -e ".[extras]"`, then set `wandb: true`
   (and optionally `wandb_project`) in the pretrain config, or pass `--wandb`
   to `pragmatiq pretrain`.
 
@@ -921,10 +922,10 @@ The notebooks are the guided tour; each one runs top to bottom on CPU.
 
 | Notebook | One line |
 | --- | --- |
-| [`01_quickstart_and_data.ipynb`](notebooks/01_quickstart_and_data.ipynb) | Generate a synthetic banking book with the causal agent-based simulator and explore why its labels are learnable without leakage. |
-| [`02_tokenize_and_embed.ipynb`](notebooks/02_tokenize_and_embed.ipynb) | Fit the key-value-time tokenizer, shard the book, and embed users from shards or from plain Python dicts. |
-| [`03_finetune_and_probe.ipynb`](notebooks/03_finetune_and_probe.ipynb) | Turn embeddings into task models two ways: a fast linear probe and a LoRA fine-tune. |
-| [`04_aml_gnn.ipynb`](notebooks/04_aml_gnn.ipynb) | Run the AML transfer-graph ablation and unpack the relational-recovery result, including its limitations. |
+| [`01_quickstart_and_data.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/01_quickstart_and_data.ipynb) | Generate a synthetic banking book with the causal agent-based simulator and explore why its labels are learnable without leakage. |
+| [`02_tokenize_and_embed.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/02_tokenize_and_embed.ipynb) | Fit the key-value-time tokenizer, shard the book, and embed users from shards or from plain Python dicts. |
+| [`03_finetune_and_probe.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/03_finetune_and_probe.ipynb) | Turn embeddings into task models two ways: a fast linear probe and a LoRA fine-tune. |
+| [`04_aml_gnn.ipynb`](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb) | Run the AML transfer-graph ablation and unpack the relational-recovery result, including its limitations. |
 
 ## Development
 
@@ -943,7 +944,7 @@ pytest tests/ -x -q
 Every change is gated by tests in CI (lint, types, full suite on Python 3.11
 and 3.12, plus an end-to-end CPU run). Maintainers can run the heavier
 full-validation orchestrator —
-[`scripts/gates/run_full_validation.sh`](scripts/gates/run_full_validation.sh)
+[`scripts/gates/run_full_validation.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/gates/run_full_validation.sh)
 — before releases; set `PRAGMATIQ_GATE_FULL=1` for full-scale runs. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 

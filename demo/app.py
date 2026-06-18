@@ -1,12 +1,14 @@
-"""pragmatiq demo (Phase 7).
+"""pragmatiq demo.
 
 Pick a synthetic user → see their event timeline → the model's user embedding
 (attach a fine-tuned head via ``pragmatiq finetune`` for calibrated
 fraud / credit / churn scores) → their ego transfer graph.
 
 Run:  streamlit run demo/app.py
-Env:  PRAGMATIQ_RUN   (trained run dir, default runs/quickstart)
-      PRAGMATIQ_SHARDS, PRAGMATIQ_RAW   (tokenized shards / raw data dirs)
+Env:  PRAGMATIQ_OUT   (quickstart output dir, default runs/quickstart) — set this to
+                      switch the whole layout: the demo reads the trained run from
+                      <out>/runs/quickstart and raw data from <out>/raw.
+      PRAGMATIQ_RUN / PRAGMATIQ_RAW   (override the run or the raw-data path on their own)
 
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
@@ -22,9 +24,18 @@ import pandas as pd
 import pyarrow.parquet as pq
 import streamlit as st
 
-RUN = Path(os.environ.get("PRAGMATIQ_RUN", "runs/quickstart"))
-SHARDS = Path(os.environ.get("PRAGMATIQ_SHARDS", "data/tokenized"))
-RAW = Path(os.environ.get("PRAGMATIQ_RAW", "data/synth"))
+# `pragmatiq quickstart --out <OUT>` lays its artifacts out as <OUT>/raw (raw data)
+# and <OUT>/runs/quickstart (the trained run), so the demo derives both from
+# PRAGMATIQ_OUT and works with no extra env after a default quickstart. Set
+# PRAGMATIQ_OUT to switch the whole layout, or override PRAGMATIQ_RUN (the run) and
+# PRAGMATIQ_RAW (the data) individually.
+OUT = Path(os.environ.get("PRAGMATIQ_OUT", "runs/quickstart"))
+# Prefer the quickstart layout (<OUT>/runs/quickstart); fall back to OUT itself so a
+# run trained straight into a directory (e.g. `pragmatiq pretrain --name quickstart`
+# under the default `runs/` root) is also found without setting PRAGMATIQ_RUN.
+_quickstart_run = OUT / "runs" / "quickstart"
+RUN = Path(os.environ.get("PRAGMATIQ_RUN") or (_quickstart_run if _quickstart_run.exists() else OUT))
+RAW = Path(os.environ.get("PRAGMATIQ_RAW", OUT / "raw"))
 
 
 @st.cache_resource

@@ -21,3 +21,16 @@ if ! "$PY" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] >= (3, 11)
   exit 1
 fi
 export PY
+
+# Bound CPU intra-op thread pools so gates that run concurrently (the full
+# validation orchestrator launches several at once) don't oversubscribe a
+# many-core host — each BLAS/OpenMP pool otherwise spawns one thread per core.
+# Only set when the caller hasn't, and never above the core count, so small CI
+# runners are unaffected. The library mirrors this cap around its own embedding
+# forward (see pragmatiq.training.probe.cpu_thread_cap).
+if [ -z "${OMP_NUM_THREADS:-}" ]; then
+  _ncpu="$( (nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4) )"
+  _cap=$(( _ncpu < 8 ? _ncpu : 8 ))
+  export OMP_NUM_THREADS="$_cap" MKL_NUM_THREADS="$_cap" \
+         OPENBLAS_NUM_THREADS="$_cap" NUMEXPR_NUM_THREADS="$_cap"
+fi

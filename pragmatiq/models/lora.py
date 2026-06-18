@@ -1,4 +1,4 @@
-"""LoRA adapters (Phase 4).
+"""LoRA adapters.
 
 ``inject_lora(model, rank, alpha, targets)`` swaps targeted ``nn.Linear`` layers
 for :class:`LoRALinear`, freezing the base weight and training only the low-rank

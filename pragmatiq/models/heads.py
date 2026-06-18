@@ -1,4 +1,4 @@
-"""Task heads (Phase 4).
+"""Task heads.
 
 - :class:`MLMHead` — the pretraining head: for each (masked) token it concatenates
   ``[ẑ_e(token), z_h(its event), z_h(USR)] ∈ R^{3d}``, projects ``3d → d`` and

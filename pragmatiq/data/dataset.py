@@ -1,10 +1,10 @@
-"""Shard dataset + dynamic token-budget batch sampler (Phase 3).
+"""Shard dataset + dynamic token-budget batch sampler.
 
 :class:`DynamicBatchSampler` greedily packs users into batches under a token
 budget, grouping by event-count band so batches are length-homogeneous. It is
 fully resumable: ``state_dict()`` / ``load_state_dict()`` capture the shuffle
 RNG, the epoch, and how many batches have been consumed, so a killed run
-resumes the exact same batch stream (used by the gate-5 resume test).
+resumes the exact same batch stream (used by the resume test).
 
 :class:`ShardDataset` lazily materializes :class:`TokenizedRecord` objects from
 the parquet shards by ``(band, shard, row)`` with a small LRU shard cache.

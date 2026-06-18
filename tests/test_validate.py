@@ -1,4 +1,4 @@
-"""Phase 8 tests: dataset validation with actionable errors."""
+"""Dataset-validation tests: actionable errors."""
 
 from __future__ import annotations
 

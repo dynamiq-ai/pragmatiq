@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Gate 5 — end-to-end training (Phase 5).
+# Acceptance check — end-to-end training.
 #
 #   1. unit tests: optim, pretrainer checkpoint/resume(bit-exact)/NaN, probe,
 #      fine-tune.
@@ -9,21 +9,19 @@
 #
 #   Default (CI): nano config on CPU. PRAGMATIQ_GATE_FULL=1 uses 50k users +
 #   a longer schedule (intended for a GPU box).
-#
-# Runnable outside Claude Code: bash scripts/gates/gate_5.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
 FULL=${PRAGMATIQ_GATE_FULL:-0}
 
 if [ "${PRAGMATIQ_GATE_SKIP_UNIT:-0}" != "1" ]; then
-  echo "=== gate 5.1: training unit tests (optim / pretrainer / probe / finetune) ==="
+  echo "=== training unit tests (optim / pretrainer / probe / finetune) ==="
   $PY -m pytest tests/test_training.py -q
 else
-  echo "=== gate 5.1: SKIPPED (PRAGMATIQ_GATE_SKIP_UNIT=1) ==="
+  echo "=== training unit tests: SKIPPED (PRAGMATIQ_GATE_SKIP_UNIT=1) ==="
 fi
 
-echo "=== gate 5.2: end-to-end synth -> tokenize -> pretrain -> probe ==="
+echo "=== end-to-end synth -> tokenize -> pretrain -> probe ==="
 $PY - "$FULL" <<'EOF'
 import os, sys, json, tempfile
 from pathlib import Path
@@ -56,17 +54,29 @@ print("per-masking-type losses decrease: OK")
 
 res = api.probe(work / "tok", summary["run_dir"], work / "raw" / "labels" / "default_12m.parquet")
 print(json.dumps(res, indent=2))
-# Full scale is the quality gate: the probe must beat the raw-count baseline.
-# The nano CI config trains only a handful of steps, so the credit probe is near
-# chance; on a tiny held-out set the gradient-boosting head (probe AND baseline) also
-# swings more than a linear one. So nano is purely a smoke check (the pipeline runs and
-# the embedding is not *catastrophically* worse than trivial counts) with a wide
-# tolerance; the strict probe-beats-baseline guarantee is enforced at full scale.
-tol = 0.02 if full else 0.15
-assert res["probe_auc"] >= res["baseline_auc"] - tol, \
-    f"probe AUC {res['probe_auc']:.3f} below raw-count baseline {res['baseline_auc']:.3f} by more than {tol}"
-print("probe vs raw-count baseline within tolerance: OK")
+if full:
+    # Full scale is the quality bar: the learned embedding must strictly beat the
+    # raw-count baseline on BOTH ranking metrics — ROC-AUC and PR-AUC — by a small
+    # positive margin. This is the real probe-beats-baseline guarantee.
+    margin = 0.005
+    assert res["probe_auc"] > res["baseline_auc"] + margin, \
+        f"probe ROC-AUC {res['probe_auc']:.3f} does not beat raw-count baseline " \
+        f"{res['baseline_auc']:.3f} by > {margin}"
+    assert res["probe_pr_auc"] > res["baseline_pr_auc"] + margin, \
+        f"probe PR-AUC {res['probe_pr_auc']:.3f} does not beat raw-count baseline " \
+        f"{res['baseline_pr_auc']:.3f} by > {margin}"
+    print("probe strictly beats raw-count baseline on ROC-AUC and PR-AUC: OK")
+else:
+    # The nano CI config trains only a handful of steps, so the credit probe is near
+    # chance; on a tiny held-out set the gradient-boosting head (probe AND baseline)
+    # also swings more than a linear one. So nano is purely a smoke check (the pipeline
+    # runs and the embedding is not *catastrophically* worse than trivial counts) with
+    # a wide tolerance. The strict probe>baseline guarantee is the full-scale gate above.
+    tol = 0.15
+    assert res["probe_auc"] >= res["baseline_auc"] - tol, \
+        f"probe AUC {res['probe_auc']:.3f} below raw-count baseline {res['baseline_auc']:.3f} by more than {tol}"
+    print("probe vs raw-count baseline within tolerance: OK")
 EOF
 
 echo ""
-echo "GATE 5 GREEN"
+echo "TRAINING CHECKS GREEN"

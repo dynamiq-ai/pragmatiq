@@ -3,9 +3,10 @@
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
 
-The single source of truth for what this project does is
-[`docs/SPEC.md`](docs/SPEC.md). Read the relevant phase section before
-changing anything; reviews are conducted against the spec, not preferences.
+Thanks for your interest in contributing. The [README](README.md) is the best
+overview of what the project does; [`docs/architecture.md`](docs/architecture.md)
+explains how the pieces fit together. Please read the relevant module before
+changing it — documentation and reviews focus on what the code actually does.
 
 ## Setup
 
@@ -13,8 +14,11 @@ Python 3.11+ required.
 
 ```bash
 pip install -e ".[dev]"        # editable install + test/lint/type deps
-pip install -e ".[dev,gnn]"    # + torch-geometric for the AML GNN work
 ```
+
+The full pipeline — including the gradient-boosting probe and the AML transfer-graph
+GraphSAGE work — installs with the line above; the optional extras (`serve`, `demo`,
+`extras`, `full`) add focused tooling.
 
 ## Tests, lint, types
 
@@ -25,64 +29,36 @@ ruff check . && mypy pragmatiq     # lint + types (CI-enforced)
 ```
 
 CI (`.github/workflows/ci.yml`) runs ruff + mypy + pytest on Python 3.11 and
-3.12, gates 1–4, and a nano CPU quickstart end to end. All of it must be green
-on a PR.
+3.12, the acceptance gates, and a nano CPU quickstart end to end. All of it must
+be green on a PR.
 
-## The phase + gate workflow
+## Acceptance gates
 
-Development proceeds phase by phase (synthetic data → tokenizer → sharding →
-model → training → AML GNN → serving → polish; see `docs/SPEC.md`). Each phase
-has an acceptance gate:
+`scripts/gates/gate_1.sh` … `gate_8.sh` are end-to-end integration checks for the
+synthetic generator, tokenizer, sharding, model, training, AML GNN, serving, and
+the packaged pipeline. They are plain bash and run locally:
 
 ```bash
-bash scripts/gates/gate_1.sh   # ... gate_2.sh .. gate_6.sh
+bash scripts/gates/gate_1.sh
 ```
 
-- Gates run at CI scale by default (small N, throughput extrapolation); set
-  `PRAGMATIQ_GATE_FULL=1` for full-scale runs (e.g. 100k users on 8 cores for
-  gate 1). They are plain bash — runnable outside Claude Code.
-- **Never start phase N+1 with a red gate N.** If your change breaks an
-  earlier phase's gate, fixing that comes first.
-- The current phase is tracked in `CLAUDE.md`; update it when a gate turns
-  green.
+Gates run at CI scale by default (small N with throughput extrapolation); set
+`PRAGMATIQ_GATE_FULL=1` for full-scale runs (for example 100k users on 8 cores
+for `gate_1.sh`). If a change affects one of these areas, run the corresponding
+gate script before opening a PR.
 
-## Commit messages
+## Commit messages and PRs
 
-Phase work is committed as:
+Use a concise, imperative subject line that describes the capability or change.
+Keep each PR focused, include tests for new behavior, and make sure the full
+suite, ruff, mypy, and any relevant gate pass before requesting review.
 
-```
-phase-N: <summary> [gate-N green]
-```
-
-Only claim `[gate-N green]` if you actually ran the gate script and it passed;
-note reviewer (spec-guardian) approval in the commit body for phase-final
-commits. Deferred WARNs need a written justification in the commit message.
-
-## The `.claude/` subagent workflow
-
-This repo is developed with Claude Code, and the workflow is checked in so any
-contributor's session inherits it:
-
-- `.claude/agents/` — subagent definitions: **spec-guardian** (reviews diffs
-  against `docs/SPEC.md`; read-only), **test-runner** (runs pytest/gate
-  scripts and triages failures), **paper-fidelity-reviewer** (checks
-  model/tokenizer/masking exactness at gates 2 and 4),
-  **data-realism-analyst** (statistically validates generator output at
-  gate 1), **docs-writer** (README/MODEL_CARD/docstrings; never edits library
-  code).
-- `.claude/commands/` — slash commands: `/phase N` starts a phase in plan mode
-  from the spec on disk; `/gate N` runs the full gate (test-runner, then
-  spec-guardian plus the phase's specialist reviewer in parallel, fix
-  BLOCKERs, repeat until clean, then commit).
-
-Subagents read `docs/SPEC.md` from disk — never trust chat context over the
-file. If you contribute without Claude Code, the same standards apply: run the
-gate script, self-review against the spec, keep the commit convention.
+Open pull requests against **`develop`** (the default branch); **`main`** is the
+release branch. Releases are cut by a `develop` → `main` pull request that bumps
+the version, which tags the commit and publishes to PyPI automatically — see
+[RELEASING.md](RELEASING.md).
 
 ## Code style and ground rules
-
-The non-negotiable rules live in `CLAUDE.md` and `docs/SPEC.md`; the ones that
-shape most reviews:
 
 - **No logic in `cli.py`.** The Typer CLI only parses arguments and calls
   `pragmatiq/api.py` functions. New functionality means a typed API function

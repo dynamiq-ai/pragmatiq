@@ -1,4 +1,4 @@
-"""Uplift (treatment-effect) evaluation on frozen user embeddings (Phase 5).
+"""Uplift (treatment-effect) evaluation on frozen user embeddings.
 
 The ``comm_uplift`` label table stores, per (user, campaign), the treatment flag
 plus *both* potential outcomes ``y0`` (had the user not been contacted) and

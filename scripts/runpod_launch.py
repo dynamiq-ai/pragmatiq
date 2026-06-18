@@ -6,16 +6,16 @@ it creates a pod via the RunPod REST API, waits for SSH, syncs this repo
 (no GitHub required — it tars and copies over SSH), installs, and runs the
 GPU end-to-end: synth -> tokenize -> pretrain -> embed -> gradient-boosting probe,
 plus the auto-config + gradient-accumulation path, the PRAGMA+Nemotron MSE variant,
-the Triton serving contract, and the full-scale gate-5 / gate-6 acceptance gates.
+the Triton serving contract, and the full-scale training and AML acceptance checks.
 
 Usage:
     export RUNPOD_API_KEY=...            # or put it in .env (gitignored)
     python scripts/runpod_launch.py --gpu "NVIDIA A100 80GB PCIe" --run-name a100-smoke
     python scripts/runpod_launch.py --terminate <pod_id>
 
-Requires outbound access to rest.runpod.io. Inside Claude Code's web sandbox
-this host may be blocked by the environment's network egress policy — run this
-from a machine with RunPod access, or add rest.runpod.io to the allow-list.
+Requires outbound access to rest.runpod.io. In a restricted/sandboxed network
+environment this host may be blocked by the environment's network egress policy —
+run this from a machine with RunPod access, or add rest.runpod.io to the allow-list.
 """
 
 from __future__ import annotations
@@ -33,8 +33,13 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 PIPELINE = r"""
 set -euo pipefail
 cd /workspace/pragmatiq
-pip install -q -e ".[dev,gnn]"
-python - <<'PY'
+# Bound the CPU thread pools so the sequential pipeline stages — the
+# gradient-boosting probe and the embedding pass especially — don't oversubscribe
+# a many-core host and stall on thread-pool contention.
+export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 NUMEXPR_NUM_THREADS=8
+export TOKENIZERS_PARALLELISM=false
+pip install -q -e ".[dev,serve]"
+python -X faulthandler -u - <<'PY'
 from pragmatiq import api
 m = api.synthesize({"n_users": 50000, "seed": 0}, out="data/synth", n_workers=8, write_report=True)
 print("synth:", m["n_events"], "events", m["users_per_sec"], "users/s")
@@ -53,7 +58,7 @@ sa = api.pretrain("data/tok", "gpu-auto", model_size="small", config="auto",
 print("auto-config + grad-accum pretrain:", sa["last_metrics"])
 
 # PRAGMA+Nemotron variant: embed-mode tokenization auto-wires the MSE text branch.
-# The `hash` stand-in keeps this leg fast; for the real embedder install ".[nemotron]"
+# The `hash` stand-in keeps this leg fast; for the real embedder install ".[extras]"
 # and set text_encoder="nemotron" (text_encoder_dim is read from the model).
 api.tokenize("data/synth", "data/tok_embed",
              config={"text_value_mode": "embed", "text_encoder": "hash"})
@@ -68,7 +73,7 @@ PY
 # request->response cycle on GPU. Full container serving: scripts/deploy_serving.sh.
 python -m pytest tests/test_inference.py::TestTritonServingContract -q
 
-# Full-scale acceptance gates (the quality gates; flash≡SDPA, probe>baseline, AML recovery)
+# Full-scale acceptance checks (the quality bar; flash≡SDPA, probe>baseline, AML recovery)
 PRAGMATIQ_GATE_FULL=1 PRAGMATIQ_GATE_SKIP_UNIT=1 bash scripts/gates/gate_5.sh
 PRAGMATIQ_GATE_FULL=1 bash scripts/gates/gate_6.sh
 """
@@ -130,7 +135,7 @@ def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
 
     ``gpu`` may be a comma-separated preference list, e.g.
     "NVIDIA A100 80GB PCIe,NVIDIA A100 SXM 80GB". ``min_vcpu`` is plumbed to
-    RunPod's ``minVCPUPerGPU`` filter (8 covers gate 1's 8-core throughput
+    RunPod's ``minVCPUPerGPU`` filter (8 covers the 8-core throughput
     benchmark; higher counts speed up the CPU-bound tokenize stages).
     """
     body = {
@@ -159,7 +164,7 @@ def main() -> None:
     ap.add_argument("--public-key-file", default=None,
                     help="SSH public key to inject into the pod (default: auto-detect ~/.ssh).")
     ap.add_argument("--min-vcpu", type=int, default=8,
-                    help="Minimum vCPUs per GPU (RunPod minVCPUPerGPU); 8 matches gate 1's "
+                    help="Minimum vCPUs per GPU (RunPod minVCPUPerGPU); 8 matches the "
                          "throughput benchmark, higher speeds CPU-bound tokenize stages.")
     ap.add_argument("--run-name", default="pragmatiq-smoke")
     ap.add_argument("--terminate", metavar="POD_ID", help="Terminate a pod and exit.")
@@ -201,12 +206,28 @@ def main() -> None:
         print(f"skip run; SSH: ssh {' '.join(id_opt)} root@{ip} -p {port}".replace("  ", " "))
         return
 
-    # Sync the repo over SSH (no GitHub needed) and run the pipeline.
-    tar = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=REPO_ROOT,
-                         capture_output=True, check=True).stdout
+    # Sync the repo (no GitHub needed): write a local tarball, copy it as a file,
+    # and verify the byte count survived before extracting. A streamed `tar -x`
+    # over SSH can truncate on a community-host network blip, so we copy a file
+    # and check its size rather than piping bytes through the connection.
+    import tempfile
+
     ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", *id_opt, "-p", str(port), f"root@{ip}"]
-    subprocess.run(ssh_base + ["mkdir -p /workspace/pragmatiq"], check=True)
-    subprocess.run(ssh_base + ["tar -x -C /workspace/pragmatiq"], input=tar, check=True)
+    scp_base = ["scp", "-o", "StrictHostKeyChecking=no", *id_opt, "-P", str(port)]
+    with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
+        subprocess.run(["git", "archive", "--format=tar", "-o", tf.name, "HEAD"],
+                       cwd=REPO_ROOT, check=True)
+        local_size = Path(tf.name).stat().st_size
+        subprocess.run(ssh_base + ["mkdir -p /workspace/pragmatiq"], check=True)
+        subprocess.run(scp_base + [tf.name, f"root@{ip}:/workspace/pragmatiq.tar"], check=True)
+        remote_size = int(subprocess.run(
+            ssh_base + ["stat -c %s /workspace/pragmatiq.tar"],
+            capture_output=True, text=True, check=True).stdout.strip())
+        if remote_size != local_size:
+            sys.exit(f"repo tarball truncated in transit ({remote_size} != {local_size} bytes); re-run")
+        subprocess.run(ssh_base + [
+            "tar -x -C /workspace/pragmatiq -f /workspace/pragmatiq.tar && rm /workspace/pragmatiq.tar"
+        ], check=True)
     print("repo synced; running pipeline (this trains on the GPU) ...")
     subprocess.run(ssh_base + [PIPELINE], check=True)
     print(f"done. terminate with: python scripts/runpod_launch.py --terminate {pod_id}")

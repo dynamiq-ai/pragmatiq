@@ -290,11 +290,21 @@ class MerchantUniverse:
 # --------------------------------------------------------------------------- transfer graph
 @dataclass
 class MuleRing:
-    """One injected mule ring: members fan-in then rapidly fan-out."""
+    """One injected mule ring as a multi-hop layering chain.
+
+    Members are arranged into ``depth`` ordered layers. Funds fan in from
+    ordinary senders onto the first (collector) layer, are forwarded hop by hop
+    through the intermediate layers (the *layering* that hides the trail), and
+    cash out from the last (distributor) layer. ``layer_of_member`` records each
+    member's 0-based layer; the discriminative structure therefore spans the full
+    chain depth, so it is recoverable by ≥2-hop message passing but only weakly
+    by any single node's 1-hop degree.
+    """
 
     ring_id: int
     members: np.ndarray  # user idx of the mules (labeled aml=1)
     senders: np.ndarray  # ordinary users who send the small credits
+    layer_of_member: np.ndarray  # int, 0..depth-1 position of each member in the chain
     window_start_day: int
     window_len_days: int
 
@@ -420,7 +430,13 @@ def _inject_mule_rings(
             "mule_ring_count=%d too large for n_users=%d; building %d rings",
             cfg.mule_ring_count, n, n_rings)
     for r in range(n_rings):
-        size = int(rng.integers(3, 9))
+        # A ring is a chain of ``depth`` layers (collectors → intermediaries →
+        # distributors). Each layer holds 1-3 members; deeper chains make the
+        # discriminative motif span more hops. The signal is the multi-hop
+        # layering path, not any node's local degree.
+        depth = int(rng.integers(3, 6))  # 3-5 layers
+        per_layer = rng.integers(1, 4, size=depth)  # 1-3 members per layer
+        size = int(per_layer.sum())
         # Draft ring members from the general population, keeping their original
         # personas. Real money mules are ordinary recruited accounts, so a mule's
         # own behaviour is statistically indistinguishable from a normal user's
@@ -434,6 +450,7 @@ def _inject_mule_rings(
                 f"cannot fill mule ring {r}: only {len(candidates)} un-drafted users remain "
                 f"(n_users={n}, mule_ring_count={cfg.mule_ring_count}); lower mule_ring_count")
         members = rng.choice(candidates, size=size, replace=False).astype(np.int64)
+        layer_of_member = np.repeat(np.arange(depth), per_layer).astype(np.int64)
         used.update(int(u) for u in members)
         # Window must start after every member is onboarded — ring activity can
         # never predate an account_opened milestone.
@@ -447,16 +464,24 @@ def _inject_mule_rings(
         # churn (no tight in-then-out burst) — the ring is visible in the transfer
         # GRAPH, not in any single member's behaviour.
         win_len = int(rng.integers(30, max(31, min(120, cal.n_days - w0 - 2))))
-        # Senders must already be active when the fan-in happens. Fan-in is kept
-        # modest (8-18) so a mule's in-degree blends with ordinary sociable
-        # users — detection must come from the ring community + behavior, not a
+        # Senders must already be active when the fan-in happens. Fan-in is sized
+        # so each collector's in-degree from the ring (≈ n_senders / collectors)
+        # matches an ordinary sociable user's organic counterparty count — the
+        # ring is NOT detectable from raw in-degree. Detection must come from the
+        # multi-hop chain plus the faint per-member behavioural fingerprint, not a
         # trivially high degree.
+        n_collectors = int(per_layer[0])
         eligible = np.nonzero(signup < w0)[0]
         eligible = eligible[~np.isin(eligible, members)]
-        n_senders = min(int(rng.integers(5, 11)), len(eligible))
+        # Few distinct senders per collector (2-3), each sending several credits
+        # over the window. This keeps a collector's distinct-counterparty count
+        # in the ordinary range, so even a hand-crafted distinct-in feature is
+        # only weakly predictive — the ring is not a high-fan-in oracle.
+        n_senders = min(int(rng.integers(2, 4)) * n_collectors, len(eligible))
         senders = rng.choice(eligible, size=n_senders, replace=False) if n_senders > 0 else np.zeros(0, np.int64)
         rings.append(
             MuleRing(ring_id=r, members=members, senders=senders.astype(np.int64),
+                     layer_of_member=layer_of_member,
                      window_start_day=w0, window_len_days=win_len)
         )
     return rings
@@ -471,74 +496,87 @@ def _schedule_ring_transfers(
     ts_l: list[np.ndarray] = []
     a_l: list[np.ndarray] = []
     leg_l: list[np.ndarray] = []
+
+    def organic_amt(k: int) -> np.ndarray:
+        # Laundering legs draw amounts from the SAME lognormal as organic P2P
+        # (simulator ``_p2p`` uses lognormal(3.4, 0.9) clipped to [1, 2500]). So
+        # the per-node amount/volume statistics of a mule are indistinguishable
+        # from an ordinary sociable user's — hand-crafted volume features carry
+        # no ring signal. The ring is encoded in the multi-hop *topology* and the
+        # faint behavioural fingerprint, not in transfer magnitudes.
+        return np.round(np.clip(rng.lognormal(3.4, 0.9, size=k), 1.0, 2500.0), 2)
+
     for ring in rings:
         if len(ring.members) == 0 or len(ring.senders) == 0:
             continue
+        members = ring.members
+        layer = ring.layer_of_member
+        depth = int(layer.max()) + 1
+        members_by_layer = [members[layer == d] for d in range(depth)]
         w0_us = cal.start_us() + ring.window_start_day * DAY_US
         span_us = ring.window_len_days * DAY_US
-        # Fan-in: each sender sends 1–2 small credits to a random member.
+
+        # Fan-in: ordinary senders credit the COLLECTOR layer only (layer 0). Few
+        # senders, each sending 1-2 credits, so both a collector's in-degree and
+        # its distinct-counterparty count stay in the ordinary range — raw degree
+        # is not a ring oracle.
+        collectors = members_by_layer[0]
         n_in = rng.integers(1, 3, size=len(ring.senders))
         tot_in = int(n_in.sum())
         s_idx = np.repeat(ring.senders, n_in)
-        m_idx = ring.members[rng.integers(0, len(ring.members), size=tot_in)]
+        m_idx = collectors[rng.integers(0, len(collectors), size=tot_in)]
         ts_in = w0_us + (rng.random(tot_in) * span_us).astype(np.int64)  # over the whole (long) window
-        amt_in = np.round(rng.uniform(40, 280, size=tot_in), 2)
+        amt_in = organic_amt(tot_in)
         f_l.append(s_idx)
         t_l.append(m_idx)
         ts_l.append(ts_in)
         a_l.append(amt_in)
         leg_l.append(np.ones(tot_in, dtype=np.int8))
-        # Layering (member -> member): mules forward funds AMONG THEMSELVES
-        # before cashing out, hiding the trail. These intra-ring edges make the
-        # ring a connected community — the relational signal that message
-        # passing over user embeddings recovers but isolated embeddings and raw
-        # per-node degree statistics miss (the phase-6 ablation hinges on this).
-        members = ring.members
-        if len(members) >= 2:
-            # Sparse intra-ring layering: enough to connect the ring into a
-            # community for message passing, but not a dense clique that raw
-            # degree statistics trivially flag.
-            n_layer = int(rng.integers(1, len(members) + 1))
-            src_m = members[rng.integers(0, len(members), size=n_layer)]
-            dst_m = members[rng.integers(0, len(members), size=n_layer)]
-            keep = src_m != dst_m
-            src_m, dst_m = src_m[keep], dst_m[keep]
-            n_layer = len(src_m)
-            if n_layer:
-                ts_layer = w0_us + (rng.random(n_layer) * span_us).astype(np.int64)
-                amt_layer = np.round(rng.uniform(50, 350, size=n_layer), 2)  # blends with normal P2P
-                f_l.append(src_m.astype(np.int64))
-                t_l.append(dst_m.astype(np.int64))
-                ts_l.append(ts_layer)
-                a_l.append(amt_layer)
-                leg_l.append(np.full(n_layer, 3, dtype=np.int8))  # 3 = layering leg
-        # Fan-out: each member forwards ~92% of received within 4–48h, split
-        # 2–4 ways to accounts onboarded before the forward time.
-        for m in ring.members:
-            got = amt_in[m_idx == m]
-            if len(got) == 0:
+
+        # Layering chain: each layer forwards to the NEXT layer (hop by hop). This
+        # directed multi-hop path is the discriminative motif — a collector's
+        # 1-hop neighbourhood looks like ordinary P2P, but the length-``depth``
+        # source→…→sink chain is recoverable only by ≥2-hop message passing over
+        # informative node features. Each forwarding member sends to 1-2 members
+        # of the next layer, so no node accrues anomalous out-degree.
+        for d in range(depth - 1):
+            src_layer = members_by_layer[d]
+            dst_layer = members_by_layer[d + 1]
+            if len(src_layer) == 0 or len(dst_layer) == 0:
                 continue
-            last_in = int(ts_in[m_idx == m].max())
-            n_out = int(rng.integers(2, 5))
-            # Forward a partial, dispersed share (not ~all-at-once): blends the
-            # fan-out with ordinary outgoing P2P so it is not individually obvious
-            # that "money in == money out within hours".
-            shares = rng.dirichlet(np.ones(n_out)) * float(got.sum()) * 0.7
-            fwd_day = (last_in - cal.start_us()) // DAY_US
-            ready = np.nonzero(signup <= fwd_day)[0]
-            # Fan out only to ALREADY-ONBOARDED accounts (a transfer can never
-            # predate the recipient's account). Fall back to onboarded ring
-            # members rather than a random (possibly un-onboarded) user.
+            fan = rng.integers(1, 3, size=len(src_layer))  # 1-2 forwards each
+            src_m = np.repeat(src_layer, fan)
+            dst_m = dst_layer[rng.integers(0, len(dst_layer), size=int(fan.sum()))]
+            k = len(src_m)
+            # Each forward happens after the funds have had time to arrive (the
+            # window is long and dispersed), so the chain never time-travels.
+            ts_layer = w0_us + (0.2 + 0.6 * rng.random(k)) * span_us
+            f_l.append(src_m.astype(np.int64))
+            t_l.append(dst_m.astype(np.int64))
+            ts_l.append(ts_layer.astype(np.int64))
+            a_l.append(organic_amt(k))
+            leg_l.append(np.full(k, 3, dtype=np.int8))  # 3 = layering leg
+
+        # Cash-out: the DISTRIBUTOR layer (last) forwards to ordinary onboarded
+        # accounts. Each distributor sends 1-2 legs of organic-sized amounts —
+        # degree and volume match an ordinary user, so the cash-out is invisible
+        # to hand-crafted node statistics.
+        distributors = members_by_layer[-1]
+        fwd_day = ring.window_start_day + ring.window_len_days
+        ready = np.nonzero(signup <= fwd_day)[0]
+        ready = ready[~np.isin(ready, members)]
+        for m in distributors:
+            n_out = int(rng.integers(1, 3))
             if len(ready):
                 dests = rng.choice(ready, size=n_out)
             else:
                 pool = members[members != m]
                 dests = rng.choice(pool if len(pool) else members, size=n_out)
-            delays = (rng.uniform(1, 30, size=n_out) * DAY_US).astype(np.int64)  # days-to-weeks, not hours
+            ts_out = w0_us + (0.6 + 0.4 * rng.random(n_out)) * span_us
             f_l.append(np.full(n_out, m, dtype=np.int64))
             t_l.append(dests.astype(np.int64))
-            ts_l.append(last_in + np.sort(delays))
-            a_l.append(np.round(shares, 2))
+            ts_l.append(ts_out.astype(np.int64))
+            a_l.append(organic_amt(n_out))
             leg_l.append(np.full(n_out, 2, dtype=np.int8))
     if not f_l:
         z = np.zeros(0)
@@ -605,6 +643,8 @@ class EpisodeAssignment:
     stress_severity: np.ndarray  # float64 in [0.35, 1]
     mule_member: np.ndarray  # bool[n_users] (aml ground truth)
     mule_window: np.ndarray  # int32[n_users, 2] day window (start, end), -1 if none
+    mule_layer: np.ndarray  # int8[n_users] chain layer of a mule (-1 if none)
+    mule_depth: np.ndarray  # int8[n_users] chain depth of the mule's ring (0 if none)
 
     @classmethod
     def build(
@@ -661,15 +701,20 @@ class EpisodeAssignment:
 
         mule_member = np.zeros(n, dtype=bool)
         mule_window = np.full((n, 2), -1, dtype=np.int32)
+        mule_layer = np.full(n, -1, dtype=np.int8)
+        mule_depth = np.zeros(n, dtype=np.int8)
         for ring in rings:
             mule_member[ring.members] = True
             mule_window[ring.members, 0] = ring.window_start_day
             mule_window[ring.members, 1] = ring.window_start_day + ring.window_len_days + 3
+            mule_layer[ring.members] = ring.layer_of_member.astype(np.int8)
+            mule_depth[ring.members] = np.int8(int(ring.layer_of_member.max()) + 1)
         return cls(
             fraud_user=fraud_user, fraud_start_day=fraud_start, fraud_len_days=fraud_len,
             stress_user=stress_user, stress_start_month=stress_start,
             stress_len_months=stress_len, stress_severity=stress_sev,
             mule_member=mule_member, mule_window=mule_window,
+            mule_layer=mule_layer, mule_depth=mule_depth,
         )
 
 

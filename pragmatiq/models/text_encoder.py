@@ -1,4 +1,4 @@
-"""Frozen text-embedding encoders for the Nemotron variant (the internal spec + paper §Nemotron).
+"""Frozen text-embedding encoders for the Nemotron variant (see the design notes + paper §Nemotron).
 
 In the paper's PRAGMA+Nemotron variant, high-cardinality text field values are not
 tokenised with BPE; instead a *frozen* pre-trained text model maps each value's full
@@ -12,7 +12,7 @@ Two implementations:
   to a fixed vector). Not semantic; it exists so the variant is fully exercisable in
   CI and on CPU without downloading a multi-GB model.
 - ``nemotron`` — the paper's frozen ``Nemotron`` text embedder via 🤗 ``transformers``
-  (the ``[nemotron]`` extra). Mean-pooled last hidden state, no gradients.
+  (the ``[extras]`` extra). Mean-pooled last hidden state, no gradients.
 
 Encoders are frozen and deterministic: ``encode(list[str]) -> Tensor[n, dim]``.
 """
@@ -62,7 +62,7 @@ class HashTextEncoder:
 
 @register_text_encoder("nemotron")
 class NemotronTextEncoder:
-    """Frozen Nemotron text embedder (paper's variant); needs the ``[nemotron]`` extra.
+    """Frozen Nemotron text embedder (paper's variant); needs the ``[extras]`` extra.
 
     Loads a 🤗 ``transformers`` causal/encoder model once, runs it under ``no_grad`` in
     eval mode, and mean-pools the last hidden state over non-pad tokens. The model is
@@ -76,7 +76,7 @@ class NemotronTextEncoder:
         except ImportError as e:  # pragma: no cover - exercised only without the extra
             raise ImportError(
                 "the Nemotron text encoder needs the 'nemotron' extra: "
-                "pip install 'pragmatiq[nemotron]' (installs transformers)."
+                "pip install 'pragmatiq[extras]' (installs transformers)."
             ) from e
         self.device = device
         self.max_length = max_length

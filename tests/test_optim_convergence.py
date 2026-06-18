@@ -1,4 +1,4 @@
-"""Muon optimizer behavior beyond a single step (Phase 5)."""
+"""Muon optimizer behavior beyond a single step."""
 
 from __future__ import annotations
 

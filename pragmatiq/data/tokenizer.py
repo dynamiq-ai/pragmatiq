@@ -1,4 +1,4 @@
-"""Key–value–time tokenizer (Phase 2).
+"""Key–value–time tokenizer.
 
 Scheme:
 
@@ -8,7 +8,7 @@ Scheme:
 - string values: cardinality ≤ ``categorical_threshold`` → one categorical
   token per value; else textual → byte-level BPE (HF ``tokenizers``), vocab
   sized so the total lands ≈ ``target_vocab``;
-- per token: ``key_id``, ``value_id`` (one shared vocab space, phase-4 shares
+- per token: ``key_id``, ``value_id`` (one shared vocab space, the model shares
   one embedding table), within-field ``position`` (0..n for BPE pieces);
 - time: per event ``8·ln(1+Δt/8)`` log-seconds to the most recent event +
   calendar features (hour, day-of-week, day-of-month); profile lifelong items
@@ -227,6 +227,14 @@ def truncate_record(rec: TokenizedRecord, cutoff_us: int) -> TokenizedRecord:
     Truncation requires the ``prof_ts`` column so lifelong milestones can be cut
     at the eval point; a shard without it raises (re-tokenize to add prof_ts).
     """
+    # searchsorted is only correct on an ascending array. encode() sorts events
+    # by time, so shard-built records always satisfy this; the guard catches a
+    # hand-built TokenizedRecord whose events are out of order (which would
+    # otherwise truncate at a silently wrong position rather than raising).
+    if rec.event_ts.size > 1 and not bool((np.diff(rec.event_ts) >= 0).all()):
+        raise ValueError(
+            f"truncate_record requires ascending event_ts for user {rec.user_id!r}"
+        )
     n_keep = int(np.searchsorted(rec.event_ts, cutoff_us, side="left"))
     tok_end = int(rec.event_offsets[n_keep])
     ts = rec.event_ts[:n_keep]

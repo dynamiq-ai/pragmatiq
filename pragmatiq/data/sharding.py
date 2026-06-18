@@ -1,4 +1,4 @@
-"""Shard writer + LMDB user index for tokenized records (Phase 3).
+"""Shard writer + LMDB user index for tokenized records.
 
 ``ShardWriter`` streams :class:`TokenizedRecord` objects to parquet shards
 partitioned by event-count band (so a batch sampler can pack users of similar
@@ -158,7 +158,7 @@ class ShardWriter:
 
         ``profile`` (raw attributes + lifelong + as_of) is stored verbatim in the
         LMDB index so notebooks/serving can fetch a user's profile blob without
-        opening a shard (Phase 3: "user_id -> profile blob + token stats").
+        opening a shard ("user_id -> profile blob + token stats").
         """
         b = band_of(rec.n_events, self.bands)
         self._buffers[b].append(_record_to_arrays(rec))

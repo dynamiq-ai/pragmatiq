@@ -1,0 +1,12 @@
+%%{init: {'theme':'base', 'themeVariables': {'primaryColor':'#0e8a8a','primaryTextColor':'#ffffff','primaryBorderColor':'#0b6e6e','lineColor':'#5b6b73','secondaryColor':'#e6f4f4','tertiaryColor':'#f3f7f8','fontSize':'15px'}}}%%
+flowchart LR
+    A["Raw or synthetic<br/>banking data"] --> B["Validate schema"]
+    B --> C["Key-value-time<br/>tokenizer"]
+    C --> D["Token-budget batches<br/>parquet shards + LMDB index"]
+    D --> E["Profile encoder"]
+    D --> F["Event encoder"]
+    E --> G["History encoder"]
+    F --> G
+    G --> H["User embeddings"]
+    F --> I["MLM pretraining head"]
+    H --> J["Probe / LoRA /<br/>AML GNN / serve"]

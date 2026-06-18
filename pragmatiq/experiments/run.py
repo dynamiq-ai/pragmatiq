@@ -1,4 +1,4 @@
-"""Run directories: reproducible bookkeeping for a training run (Phase 5).
+"""Run directories: reproducible bookkeeping for a training run.
 
 A run lives under ``runs/{name}/`` and contains:
 

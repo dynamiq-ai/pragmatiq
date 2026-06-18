@@ -1,4 +1,4 @@
-# Tokenizer configuration for the PRAGMA+Nemotron variant (Phase 2).
+# Tokenizer configuration for the PRAGMA+Nemotron variant.
 #
 # High-cardinality text fields (merchant names, device ids, free-text memos) are NOT
 # split into BPE pieces here. Instead each text field emits one sentinel token whose
@@ -6,7 +6,7 @@
 # with MSE. pretrain() detects text_value_mode=="embed" on the loaded tokenizer and
 # builds the model's text branch with the matching encoder + width automatically.
 #
-# Requires the optional dependency:  pip install -e ".[nemotron]"
+# Requires the optional dependency:  pip install -e ".[extras]"
 
 n_buckets: 64
 categorical_threshold: 1000   # text fields above this stay textual → frozen embedding

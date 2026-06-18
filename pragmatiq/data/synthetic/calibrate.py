@@ -1,4 +1,4 @@
-"""Phase 1b: calibrate generator priors to bank-shareable aggregates.
+"""Calibrate generator priors to bank-shareable aggregates.
 
 Banks never share raw data. ``calibrate_config`` takes a YAML of aggregate
 statistics (see ``configs/data/aggregates.example.yaml``) and produces a

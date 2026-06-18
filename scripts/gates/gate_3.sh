@@ -1,21 +1,19 @@
 #!/usr/bin/env bash
-# Gate 3 — sharding, dataset, varlen collation (Phase 3).
+# Acceptance check — sharding, dataset, varlen collation.
 #
 #   1. unit tests: shard round-trip, dynamic batching, resumability
 #   2. padding-equivalence: packed (block-diagonal) attention == padded
-#      per-event attention (atol 1e-4, fp32) — the critical Phase-3 property
+#      per-event attention (atol 1e-4, fp32) — the critical property
 #   3. end-to-end smoke: synth -> tokenize -> shard -> dataloader yields
 #      padding-free PackedBatches covering every user exactly once
-#
-# Runnable outside Claude Code: bash scripts/gates/gate_3.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
 
-echo "=== gate 3.1-3.2: sharding / dataset / padding-equivalence tests ==="
+echo "=== sharding / dataset / padding-equivalence tests ==="
 $PY -m pytest tests/test_sharding_dataset.py -q
 
-echo "=== gate 3.3: synth -> tokenize -> shard -> dataloader smoke ==="
+echo "=== synth -> tokenize -> shard -> dataloader smoke ==="
 $PY - <<'EOF'
 import tempfile
 from pathlib import Path
@@ -45,4 +43,4 @@ print(f"smoke OK: vocab={m['vocab_size']} users={m['n_users']} "
 EOF
 
 echo ""
-echo "GATE 3 GREEN"
+echo "SHARDING CHECKS GREEN"

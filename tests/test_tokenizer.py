@@ -1,4 +1,4 @@
-"""Tokenizer tests (Phase 2 / Gate 2).
+"""Tokenizer tests.
 
 Round-trip property tests, unseen key/value → [UNK] + warning, vocab-size
 range, time encoding, save/load with content-hash verification.

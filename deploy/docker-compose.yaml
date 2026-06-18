@@ -1,5 +1,10 @@
-# pragmatiq serving stack (Phase 7): Triton + Prometheus + Grafana + demo.
-# A trained run is mounted at /models/run inside the Triton container.
+# pragmatiq serving stack: Triton + Prometheus + Grafana + demo.
+#
+# Both services read from a single `pragmatiq quickstart` output directory, set via
+# PRAGMATIQ_OUT (default ../runs/quickstart). That directory holds <out>/raw (raw
+# data), <out>/tok (tokenized shards) and <out>/runs/quickstart (the trained run).
+# It is mounted at /models/quickstart in each container; Triton loads the run from
+# <out>/runs/quickstart and the demo derives raw/shards/run from the same base.
 services:
   triton:
     # Built from deploy/triton/Dockerfile so pragmatiq is installed in Triton's Python
@@ -14,7 +19,10 @@ services:
     command: tritonserver --model-repository=/models/model_repository --metrics-port=8002
     volumes:
       - ./triton/model_repository:/models/model_repository:ro
-      - ${PRAGMATIQ_RUN:-../runs/quickstart/runs/quickstart}:/models/run:ro
+      # Mount the trained run where config.pbtxt expects it (/models/run):
+      # PRAGMATIQ_RUN points at a specific run directory; otherwise it defaults to
+      # <PRAGMATIQ_OUT>/runs/quickstart so a plain `pragmatiq quickstart` just works.
+      - ${PRAGMATIQ_RUN:-${PRAGMATIQ_OUT:-../runs/quickstart}/runs/quickstart}:/models/run:ro
     ports:
       - "8000:8000"   # HTTP
       - "8001:8001"   # gRPC
@@ -60,9 +68,10 @@ services:
       dockerfile: deploy/Dockerfile
     command: streamlit run demo/app.py --server.port 8501 --server.address 0.0.0.0
     environment:
-      - PRAGMATIQ_RUN=/models/run
+      # The demo derives raw data, tokenized shards and the trained run from this base.
+      - PRAGMATIQ_OUT=/models/quickstart
     volumes:
-      - ${PRAGMATIQ_RUN:-../runs/quickstart/runs/quickstart}:/models/run:ro
+      - ${PRAGMATIQ_OUT:-../runs/quickstart}:/models/quickstart:ro
     ports:
       - "8501:8501"
     depends_on:

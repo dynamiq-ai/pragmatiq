@@ -41,5 +41,5 @@ secrets/
 .idea/
 .vscode/
 
-# Internal spec — kept locally, not published
+# Local-only design spec
 docs/SPEC.md

@@ -102,20 +102,30 @@ class TestTransferGraph:
         assert np.all(tg.from_idx != tg.to_idx) or len(tg.from_idx) == 0
         assert tg.amount.min() > 0
 
-    def test_mule_rings_fan_in_fan_out(self, world: World) -> None:
+    def test_mule_rings_are_multi_hop_chains(self, world: World) -> None:
         tg = world.transfers
         assert len(tg.rings) == 2
-        fan_in = tg.is_mule_leg == 1
-        fan_out = tg.is_mule_leg == 2
-        assert fan_in.sum() > 0 and fan_out.sum() > 0
+        fan_in = tg.is_mule_leg == 1  # senders -> collectors
+        cash_out = tg.is_mule_leg == 2  # distributors -> external
+        layering = tg.is_mule_leg == 3  # layer L -> layer L+1
+        assert fan_in.sum() > 0 and cash_out.sum() > 0 and layering.sum() > 0
         ring = tg.rings[0]
-        member = int(ring.members[0])
-        got = tg.amount[fan_in & (tg.to_idx == member)].sum()
-        sent = tg.amount[fan_out & (tg.from_idx == member)].sum()
-        if got > 0:
-            # mules forward a partial share (0.7), dispersed in time, so the
-            # fan-out blends with ordinary outgoing P2P (relational-AML regime)
-            assert sent == pytest.approx(0.70 * got, rel=0.05)
+        # The chain spans >= 3 layers, so the discriminative motif is multi-hop.
+        assert int(ring.layer_of_member.max()) + 1 >= 3
+        members = set(int(m) for m in ring.members)
+        collectors = set(int(m) for m in ring.members[ring.layer_of_member == 0])
+        distributors = set(int(m) for m in
+                           ring.members[ring.layer_of_member == ring.layer_of_member.max()])
+        # Restrict to legs touching ring[0]'s members (legs aggregate all rings).
+        # Fan-in lands only on collectors; cash-out leaves only from distributors;
+        # layering edges connect ring members to ring members (the internal chain).
+        fi_dst = set(int(t) for t in tg.to_idx[fan_in]) & members
+        assert fi_dst <= collectors
+        co_src = set(int(f) for f in tg.from_idx[cash_out]) & members
+        assert co_src <= distributors
+        lay_src = set(int(f) for f in tg.from_idx[layering]) & members
+        lay_dst = set(int(t) for t in tg.to_idx[layering]) & members
+        assert lay_src <= members and lay_dst <= members and len(lay_src) > 0
 
     def test_ring_legs_clamped_to_horizon(self) -> None:
         from pragmatiq.data.synthetic.world import DAY_US

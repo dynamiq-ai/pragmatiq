@@ -1,4 +1,4 @@
-"""Event attribution via integrated gradients (Phase 7).
+"""Event attribution via integrated gradients.
 
 ``EventAttributor`` computes integrated gradients of a scalar prediction (e.g. a
 classification-head logit, or the norm of the user embedding) with respect to

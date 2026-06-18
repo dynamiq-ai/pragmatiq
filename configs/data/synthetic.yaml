@@ -1,4 +1,4 @@
-# WorldConfig for the synthetic generator (Phase 1).
+# WorldConfig for the synthetic generator.
 # Any field of pragmatiq.data.synthetic.WorldConfig may appear here.
 
 n_users: 100_000
@@ -31,7 +31,7 @@ archetype_mix:
   mule: 0.01
   fraud_victim: 0.04
 
-# Difficulty/realism knobs (tuned at gate 1; see tests/baselines/credit_gbdt.py)
+# Difficulty/realism knobs (see tests/baselines/credit_gbdt.py)
 trait_noise: 0.55
 label_noise: 0.005
 activity_scale: 1.0

@@ -1,4 +1,4 @@
-"""Synthetic banking-world generator (Phase 1).
+"""Synthetic banking-world generator.
 
 Public surface: ``WorldConfig`` + ``generate`` (also exposed via
 ``pragmatiq.api.synthesize``).

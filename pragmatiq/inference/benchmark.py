@@ -1,4 +1,4 @@
-"""Serving + batch-embed benchmarks (Phase 7).
+"""Serving + batch-embed benchmarks.
 
 ``benchmark_batch_embed`` measures local batch-embedding throughput and a cost
 table; ``write_results`` renders ``deploy/benchmarks/RESULTS.md``. The Triton
@@ -31,6 +31,12 @@ def benchmark_batch_embed(
     sampler.set_epoch(0)
     loader = ShardDataLoader(ds, sampler)
     n_users = n_tokens = 0
+    # CUDA kernels launch asynchronously, so the wall clock must bracket a
+    # synchronize on each side — otherwise the loop returns before the GPU has
+    # finished and the measured throughput is overstated.
+    is_cuda = str(device).startswith("cuda")
+    if is_cuda:
+        torch.cuda.synchronize()
     t0 = time.time()
     for batch in loader:
         batch = batch.to(device)
@@ -39,6 +45,8 @@ def benchmark_batch_embed(
         n_tokens += batch.n_tokens
         if max_users is not None and n_users >= max_users:
             break
+    if is_cuda:
+        torch.cuda.synchronize()
     elapsed = max(time.time() - t0, 1e-6)
     ds.close()
     return {

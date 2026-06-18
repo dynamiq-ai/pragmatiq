@@ -1,4 +1,4 @@
-"""Input embeddings (Phase 4).
+"""Input embeddings.
 
 - :class:`TokenEmbedding` — one shared table ``E`` for keys and values; a token
   vector is ``E(key) + E(value) + sinusoidal(within-field position)``.
@@ -8,7 +8,7 @@
   through a 2-layer MLP to ``d``.
 
 The embedding table is shared with the MLM output projection (tied weights,
-Phase 4 ``MLMHead``).
+``MLMHead``).
 """
 
 from __future__ import annotations

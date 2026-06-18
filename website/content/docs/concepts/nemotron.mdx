@@ -28,7 +28,7 @@ It is switchable from the **data step alone** — tokenize in embed mode and `pr
 the matching frozen encoder and reconstruction head automatically:
 
 ```bash
-pip install -e ".[nemotron]"   # adds transformers (the frozen embedder)
+pip install -e ".[extras]"   # adds transformers (the frozen embedder)
 pragmatiq tokenize data/synth --out data/tok --config configs/data/tokenizer_nemotron.yaml
 pragmatiq pretrain data/tok --name nemo --model-size medium   # text branch auto-wired
 ```

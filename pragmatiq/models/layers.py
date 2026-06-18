@@ -1,7 +1,7 @@
 """Transformer building blocks with varlen (no-padding) attention.
 
 All encoders are **bidirectional, pre-norm**, with a **GELU MLP (ffn = 4d)** and
-**dropout 0.1** (Phase 4).
+**dropout 0.1**.
 
 Attention is varlen: tokens are flat and ``cu_seqlens`` give the segment
 boundaries. On CUDA with flash-attn installed we use ``flash_attn_varlen_func``;

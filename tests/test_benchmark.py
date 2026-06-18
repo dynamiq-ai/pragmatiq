@@ -1,4 +1,4 @@
-"""Serving-benchmark reporting helpers (Phase 7)."""
+"""Serving-benchmark reporting helpers."""
 
 from __future__ import annotations
 

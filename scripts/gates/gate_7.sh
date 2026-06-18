@@ -1,24 +1,22 @@
 #!/usr/bin/env bash
-# Gate 7 — inference, serving, demo (Phase 7).
+# Acceptance check — inference, serving, demo.
 #
-#   The SPEC gate is "docker-compose up serves an embedding request end to end;
-#   demo runs against a bundled tiny checkpoint." Docker isn't available in CI,
-#   so this gate validates the exact code paths the containers run:
+#   The serving requirement is "docker-compose up serves an embedding request end
+#   to end; demo runs against a bundled tiny checkpoint." Docker isn't available in
+#   CI, so this check validates the exact code paths the containers run:
 #     1. inference unit tests (embedder, attribution, benchmark, ONNX)
 #     2. the Triton python-backend request path (PragmaModel.embed_records on
 #        plain dicts) end to end against a freshly trained nano checkpoint
 #     3. deploy manifests are well-formed (compose services, Triton config)
 #     4. demo/app.py imports/compiles
-#
-# Runnable outside Claude Code: bash scripts/gates/gate_7.sh
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
 
-echo "=== gate 7.1: inference unit tests ==="
+echo "=== inference unit tests ==="
 $PY -m pytest tests/test_inference.py -q
 
-echo "=== gate 7.2: serving request path (Triton backend's embed_records) ==="
+echo "=== serving request path (Triton backend's embed_records) ==="
 $PY - <<'EOF'
 import json, tempfile
 from pathlib import Path
@@ -61,7 +59,7 @@ print(f"  embed_records OK: {emb.shape}; unseen-key request handled -> {emb2.sha
 print("serving request path OK")
 EOF
 
-echo "=== gate 7.3: deploy manifests well-formed ==="
+echo "=== deploy manifests well-formed ==="
 $PY - <<'EOF'
 from pathlib import Path
 import yaml
@@ -78,8 +76,8 @@ print(f"  compose services: {sorted(services)}")
 print("deploy manifests OK")
 EOF
 
-echo "=== gate 7.4: demo compiles ==="
+echo "=== demo compiles ==="
 $PY -m py_compile demo/app.py && echo "  demo/app.py compiles OK"
 
 echo ""
-echo "GATE 7 GREEN"
+echo "INFERENCE CHECKS GREEN"
