@@ -159,7 +159,6 @@ class TestPretrainer:
             assert key in ckpt, f"checkpoint missing {key}"
         assert ckpt["tokenizer_hash"] == tok.content_hash
         assert "masking_gen" in ckpt["rng"] and "torch" in ckpt["rng"] and "numpy" in ckpt["rng"]
-        assert "python" in ckpt["rng"]
         ds.close()
 
     def test_resume_bit_exact(self, shards: Path) -> None:

@@ -104,6 +104,8 @@ class TestApiTokenizerCompatibility:
 
     @pytest.fixture()
     def stale_manifest_tok(self, trained, tmp_path: Path) -> Path:
+        """Shards whose tokenizer/ still matches the run but whose shard_manifest.json
+        records a different tokenizer_hash."""
         work, _run_dir = trained
         dst = tmp_path / "tok_stale_manifest"
         shutil.copytree(work / "tok", dst)
@@ -116,6 +118,9 @@ class TestApiTokenizerCompatibility:
     def test_embed_uses_live_tokenizer_hash_not_stale_manifest(
         self, trained, stale_manifest_tok: Path, monkeypatch
     ) -> None:
+        # Regression guard: the shard/run tokenizer match reads the on-disk
+        # tokenizer's content hash, NOT shard_manifest.json — so a stale manifest
+        # must not reject a shard/run pair whose tokenizers actually agree.
         _work, run_dir = trained
 
         def fake_embed_users(model, dataset, **kwargs):  # noqa: ANN001, ANN003

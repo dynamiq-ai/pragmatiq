@@ -19,31 +19,27 @@ Mule-ring (money-laundering) detection is **relational**: a launderer is defined
 transact with* — fan-in of small credits, layering among the ring, rapid fan-out — not just
 their own behavior. A per-user embedding, however good, cannot by construction see a
 counterparty pattern that spans accounts. So we build a directed transfer graph from
-`transfers.parquet` and run a five-arm comparison.
+`transfers.parquet` and run a four-arm comparison.
 
-## The five-arm ablation
+## The four-arm ablation
 
 `api.gnn(...)` trains a 2–3 layer GraphSAGE and reports held-out ROC-AUC,
-mean ± std over seeds:
+mean ± std over seeds, for (full-scale benchmark: 12k accounts × 3 seeds, small model):
 
-- **(a) isolated pragmatiq embeddings** — a probe on each user's embedding alone, no graph.
+- **(a) isolated pragmatiq embeddings** — a probe on each user's embedding alone, no graph. `0.498`
 - **(b) GraphSAGE + pragmatiq features** — message passing over the transfer graph with
-  pragmatiq embeddings as node features.
+  pragmatiq embeddings as node features. `0.554`
 - **(c) GraphSAGE + hand-crafted features** — the same graph, with generic structural node
-  features (degree, volume) plus edge amount/recency attributes.
-- **(d) logistic control** — the same hand-crafted features, no graph.
-- **(e) topology-only GraphSAGE control** — the hand-crafted graph arm without transfer
-  amount/recency edge attributes.
+  features (degree, volume, counterparties). `0.670`
+- **(d) logistic control** — the same hand-crafted features, no graph. `0.604`
 
 The synthetic mule rings are **multi-hop layered laundering chains**: mule amounts and
 counterparty degree are drawn to *match ordinary accounts*, so 1-hop degree is not a trivial
-oracle. The gated result is **relational
+oracle (the degree-only control (d) reaches only `0.604`). The gated result is **relational
 recovery**: a GraphSAGE over the transfer graph recovers rings that a probe on the isolated
-embedding cannot — `(c) > (a)` — so the AML signal lives in the multi-hop transfer
-structure an isolated embedding misses.
-The no-graph and topology-only controls report whether message passing and edge amount/recency
-attributes add beyond node features and adjacency (`message_passing_adds = (c) > (d)`,
-`edge_attributes_add = (c) > (e)`).
+embedding cannot — `(c) 0.670 ≫ (a) 0.498` — so the AML signal lives in the multi-hop transfer
+structure an isolated embedding misses, and message passing adds over the same features without
+a graph (`(c) > (d)`).
 
 ```bash
 pip install -e .
@@ -54,10 +50,10 @@ pragmatiq gnn data/tok --run runs/aml \
 
 ## The honest limitation
 
-The learned per-user embedding ordering, no-graph control, and edge-attribute contribution are
-reported rather than gated. The isolated embedding is expected to be weak on this relational
-task, so recovering the multi-hop laundering signal in a learned per-user representation is the
-**open challenge**.
+The learned per-user embedding adds only a little over the isolated probe (`(b) 0.554 > (a)
+0.498`) and does **not** beat hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated
+embedding sits near chance, so the model does not capture the multi-hop laundering signal in the
+per-user representation; recovering it in a learned representation is the **open challenge**.
 This is consistent with the PRAGMA paper's own observation that AML is a setting where the model
 underperforms because it processes user histories in isolation — the GNN here is pragmatiq's
 honest extension that probes that gap, not a "the learned embedding wins" result.

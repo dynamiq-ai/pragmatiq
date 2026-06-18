@@ -47,6 +47,12 @@ is the *why*. Source-level guesses are marked `# GUESS` in the code.
   alternative="Token-only masking — simpler, but misses the event- and key-level structure that makes the objective informative for whole-field prediction."
 />
 
+<DecisionCard
+  title="The AML gate scores relational recovery, not a learned-embedding win"
+  why="On synthetic money-mule rings whose transfer amounts and counterparty degree are matched to ordinary accounts, the discriminative signal is the multi-hop transfer structure, not any per-user feature. Gate 6 therefore requires that a GraphSAGE over the transfer graph beats a probe on the isolated embedding (c > a) and beats the same hand-crafted features without a graph (c > d) — i.e. message passing recovers relational signal. The learned per-user embedding sits near chance on its own and does not beat hand-crafted features, so 'the embedding beats hand-crafted features' (b > c) is reported, not gated — consistent with the paper's observation that AML is where a per-history model underperforms."
+  alternative="Gating the aspirational headline b > c — but it is not achievable on degree/volume-matched synthetic mules, and gating it would either fail honest runs or invite weakening the benchmark to make it pass."
+/>
+
 For the larger architectural choices (continuous-time RoPE, the zero bucket, the Nemotron
 default-off), see the [Architecture](/docs/concepts/architecture) and
 [Nemotron](/docs/concepts/nemotron) pages, which carry their own decision cards inline.

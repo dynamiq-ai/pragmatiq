@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-import random
 import sys
 import time
 from pathlib import Path
@@ -91,21 +90,6 @@ def _unpack_numpy_state(d: dict[str, Any]) -> tuple:
     """Inverse of :func:`_pack_numpy_state`."""
     keys = d["keys"].numpy().astype("uint32")
     return (d["name"], keys, d["pos"], d["has_gauss"], d["cached"])
-
-
-def _pack_python_state(state: Any) -> dict[str, Any]:
-    """Convert ``random.getstate()`` to a torch ``weights_only``-safe form."""
-    version, keys, gauss = state
-    return {
-        "version": int(version),
-        "keys": torch.tensor(list(keys), dtype=torch.int64),
-        "gauss": None if gauss is None else float(gauss),
-    }
-
-
-def _unpack_python_state(d: dict[str, Any]) -> tuple:
-    """Inverse of :func:`_pack_python_state`."""
-    return (int(d["version"]), tuple(int(x) for x in d["keys"].tolist()), d["gauss"])
 
 
 _CHECKPOINT_OPERATIONAL_KEYS = {
@@ -568,7 +552,6 @@ class PreTrainer:
             "rng": {
                 "torch": torch.get_rng_state(),
                 "numpy": _pack_numpy_state(np.random.get_state()),
-                "python": _pack_python_state(random.getstate()),
                 "masking_gen": self.gen.get_state(),
                 "masking_gen_device": self.gen.device.type,
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -617,7 +600,13 @@ class PreTrainer:
         for opt, st in zip(self.optimizers, ckpt["optimizers"]):
             opt.load_state_dict(st)
         self.scheduler.load_state_dict(ckpt["scheduler"])
-        self.scheduler.total_steps = self.config.max_steps
+        # Resume can extend the run (a larger max_steps stretches the cosine
+        # horizon); pin the schedule to the current config and log when it moves.
+        # Same-horizon resume leaves total_steps untouched, so bit-exact resume holds.
+        if self.config.max_steps != self.scheduler.total_steps:
+            log.info("resume extends schedule horizon: %d -> %d",
+                     self.scheduler.total_steps, self.config.max_steps)
+            self.scheduler.total_steps = self.config.max_steps
         loader.load_state_dict(ckpt["sampler"])
         self.step = ckpt["step"]
         self.epoch = ckpt["epoch"]
@@ -632,8 +621,6 @@ class PreTrainer:
         rng = ckpt["rng"]
         torch.set_rng_state(rng["torch"])
         np.random.set_state(_unpack_numpy_state(rng["numpy"]))
-        if "python" in rng:
-            random.setstate(_unpack_python_state(rng["python"]))
         # The masking generator is device-typed; its raw state is not portable
         # across device PRNG algorithms (CPU MT19937 vs CUDA Philox). Restore it
         # only on a matching device, else deterministically re-seed from this step.

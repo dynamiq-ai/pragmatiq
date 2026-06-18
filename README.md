@@ -624,40 +624,38 @@ recovers. The AML GNN path is part of the core install.
   classification (with residual conv layers), because without it the stack
   over-smooths and loses the per-user signal an isolated probe already has.
 
-### The five-arm ablation
+### The four-arm ablation
 
-`pragmatiq gnn` (and `api.gnn`) runs five setups on identical, stratified
+`pragmatiq gnn` (and `api.gnn`) runs four setups on identical, stratified
 train/val/test splits shared across arms, over multiple seeds:
 
 | Arm | Features | Graph? | Question it answers |
 | --- | --- | --- | --- |
 | (a) | pragmatiq embeddings | no — logistic probe | How far does a per-user embedding get alone? |
 | (b) | pragmatiq embeddings | GraphSAGE | Does the transfer graph add to rich learned features? |
-| (c) | hand-crafted node stats (degree, volume) | GraphSAGE + edge attributes | What does a fraud analyst's baseline + a graph achieve? |
+| (c) | hand-crafted node stats (degree, volume) | GraphSAGE | What does a fraud analyst's baseline + a graph achieve? |
 | (d) | same hand-crafted stats | no — logistic control | Is the graph effect real, or just the features? |
-| (e) | same hand-crafted stats | topology-only GraphSAGE | Do transfer amount/recency attributes add beyond adjacency? |
 
 The synthetic mule rings are **multi-hop layered laundering chains**. Money mules
 are modeled as *ordinary recruited accounts* with no distinctive individual
 behavior, and their amounts and counterparty degree are drawn to **match ordinary
-accounts** — so 1-hop degree is *not* a trivial oracle. The laundering legs are written to the
+accounts** — so 1-hop degree is *not* a trivial oracle (`(d)`, a degree-only
+logistic baseline, reaches only `0.604`). The laundering legs are written to the
 transfer ledger (`transfers.parquet`), **not** the card-event stream; the
 discriminative signal is the multi-hop layering chain in that ledger.
 
-**The gated claim — relational recovery (true and robust).** A GraphSAGE over the
+**The gated claim — relational recovery.** A GraphSAGE over the
 transfer graph recovers money-mule rings that a probe on the isolated per-user
-embedding cannot: `(c) > (a)`, so the AML signal lives in the
-multi-hop transfer structure an isolated embedding misses. This is what `gate_6`
-gates, at both CI and full scale.
-
-The `(e)` topology-only control is reported separately so transfer amount/recency
-attributes have their own measured contribution beyond adjacency and message
-passing (`edge_attributes_add = (c) > (e)`).
+embedding cannot: `(c) 0.670 ≫ (a) 0.498`, so the AML signal lives in the
+multi-hop transfer structure an isolated embedding misses. Message passing adds
+over the same features without a graph (`(c) 0.670 > (d) 0.604`). This is what
+`gate_6` gates, at both CI and full scale.
 
 **Reported, not gated — the honest limitation.** The learned per-user embedding
-ordering, no-graph control, and edge-attribute contribution are reported rather
-than gated. The isolated embedding is expected to be weak on this relational
-task, so recovering the multi-hop laundering signal in a learned representation
+adds only a little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does
+**not** beat hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated
+embedding sits near chance, so the model does not capture the multi-hop laundering
+signal in the per-user representation; recovering it in a learned representation
 is the **open challenge**. This is consistent with the PRAGMA paper's own
 observation that AML is a setting where the model underperforms because it
 processes user histories in isolation — the GNN here is pragmatiq's honest
@@ -683,17 +681,26 @@ version of the same experiment.
 ### Latest results
 
 The table below is **auto-written** by `write_aml_report` in
-[`pragmatiq/models/gnn.py`](pragmatiq/models/gnn.py) on a passing full Gate 6 run.
-Generated tables carry a provenance
+[`pragmatiq/models/gnn.py`](pragmatiq/models/gnn.py) on a passing full run
+(opt-in via `PRAGMATIQ_WRITE_RESULTS=1`). Generated tables carry a provenance
 stamp (node/edge/mule counts, seeds, epochs, git commit), and the writer
 refuses to overwrite a larger-scale result with a smaller-scale one — a
-CI-scale run can never masquerade as a full-scale result. Set
-`PRAGMATIQ_WRITE_RESULTS=1` to capture a CI-scale diagnostic table explicitly.
+CI-scale run can never masquerade as a full-scale result.
 
 <!-- AML_ABLATION_RESULTS -->
 
-Run a full Gate 6 validation to populate this section with the five-arm table
-and provenance stamp.
+| setup | ROC-AUC (mean ± std over seeds) |
+| --- | --- |
+| (a) probe on isolated pragmatiq embeddings | 0.498 ± 0.010 |
+| (b) GraphSAGE over transfers + pragmatiq features | 0.554 ± 0.026 |
+| (c) GraphSAGE + hand-crafted node features | 0.670 ± 0.014 |
+| (d) control: logistic regression on the same hand-crafted features, no graph | 0.604 ± 0.028 |
+
+**Relational recovery (gated): True** — a GraphSAGE over the transfer graph recovers money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = True), so the AML signal lives in the multi-hop transfer structure an isolated per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over the same features without a graph ((c) > (d) = True). The gate requires both.
+
+**Reported, not gated:** the learned per-user embedding adds a little over the isolated probe ((b) > (a) = True) but does not beat hand-crafted features ((b) > (c) = False). The isolated embedding sits near chance, so on this synthetic book the model does not capture the multi-hop laundering signal on its own — recovering it in a learned per-user representation is the open challenge (see MODEL_CARD.md).
+
+<sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2], epochs=150, commit=a263737</sub>
 
 ## Model sizes
 

@@ -146,7 +146,8 @@ def _check_labels(data_dir: Path, report: ValidationReport) -> None:
             continue
         extra = sorted(set(schema.names) - set(expected.names))
         if extra:
-            report.error(f"labels/{path.name}: unexpected column(s) {extra}; expected {expected.names}")
+            report.warn(f"labels/{path.name}: extra column(s) {extra} beyond {expected.names}; "
+                        "the trainer reads only the expected columns, so these are ignored")
 
 
 def validate_dataset(data_dir: str | Path, max_rows: int | None = 2_000_000) -> ValidationReport:

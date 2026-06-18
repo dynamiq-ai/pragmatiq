@@ -212,7 +212,7 @@ def gnn_cmd(
     epochs: int = typer.Option(150, help="GraphSAGE epochs."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
-    """Run the five-arm AML GNN ablation over transfer-graph controls."""
+    """Run the four-arm AML GNN ablation (isolated vs GNN+PRAGMA vs GNN+handcrafted vs no-graph control)."""
     from pragmatiq import api
 
     seed_tuple = tuple(int(s) for s in seeds.split(","))

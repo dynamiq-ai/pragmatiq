@@ -591,12 +591,10 @@ def gnn(
     device: str = "auto",
     epochs: int = 150,
 ) -> dict[str, Any]:
-    """Run the five-arm AML GNN ablation.
+    """Run the four-arm AML GNN ablation.
 
     Embeds users with a trained model, builds the transfer graph, and compares
-    isolated embeddings, graph-aware pragmatiq features, graph-aware
-    hand-crafted features, a no-graph hand-crafted control, and a topology-only
-    graph control.
+    (a) isolated embeddings, (b) GraphSAGE+PRAGMA, (c) GraphSAGE+handcrafted.
 
     AML is full-observation mule-ring membership detection, not a forecast: each
     user is embedded from their entire observed history with no eval-point

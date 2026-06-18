@@ -53,7 +53,11 @@ assert pragmatiq.__version__ == pyproject_version, (pragmatiq.__version__, pypro
 from pragmatiq.cli import app  # CLI entrypoint resolves
 need = "not affiliated with or endorsed by Revolut"
 assert (Path(pragmatiq.__file__).parent / "py.typed").exists(), "py.typed missing"
-docs = [Path("README.md"), Path("MODEL_CARD.md"), *Path("website/content/docs").rglob("*.mdx")]
+mdx_files = sorted(Path("website/content/docs").rglob("*.mdx"))
+# Fail loud if the docs glob comes up (near-)empty: an empty match would make the
+# per-file attribution loop pass vacuously, turning this check into a silent no-op.
+assert len(mdx_files) >= 10, "website docs missing — attribution check would be a no-op"
+docs = [Path("README.md"), Path("MODEL_CARD.md"), *mdx_files]
 for doc in docs:
     assert need in doc.read_text(), f"{doc} missing attribution line"
 print(f"  version {pragmatiq.__version__}; attribution present in public docs")

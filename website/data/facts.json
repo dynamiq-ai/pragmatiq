@@ -38,7 +38,7 @@
     {
       "name": "gnn",
       "signature": "gnn(shard_dir: 'str | Path', run: 'str | Path', transfers_path: 'str | Path', aml_label_path: 'str | Path', seeds: 'tuple[int, ...]' = (0, 1, 2), device: 'str' = 'auto', epochs: 'int' = 150) -> 'dict[str, Any]'",
-      "summary": "Run the five-arm AML GNN ablation."
+      "summary": "Run the four-arm AML GNN ablation."
     },
     {
       "name": "quickstart",
@@ -69,7 +69,7 @@
     },
     {
       "id": "gate_6",
-      "title": "AML GNN ablation \u2014 relational recovery over the transfer graph."
+      "title": "AML GNN ablation \u2014 does the learned embedding + transfer graph recover money-"
     },
     {
       "id": "gate_7",

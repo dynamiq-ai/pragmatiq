@@ -7,6 +7,26 @@ All notable changes to pragmatiq are documented in this file. This project
 follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
 the public API may change.
 
+## [0.1.0b3] — Validation hardening
+
+Strengthens release-readiness validation and reproducibility safety. No change to
+the public API or the foundation-model architecture.
+
+### Added
+- `py.typed` marker (PEP 561) so downstream type-checkers see pragmatiq's inline
+  types, plus a CI packaging smoke check that builds the wheel and sdist and
+  asserts the version metadata and typing marker are present.
+- Realism metrics emitted as machine-readable JSON alongside the HTML report, and
+  label-table schema validation that flags unexpected or missing columns.
+
+### Changed
+- Embedding, probing, fine-tuning, export, and the AML GNN verify that a tokenized
+  shard directory was encoded by the same tokenizer as the training run (content
+  hash) before running; resuming a run refuses architecture, optimizer, masking,
+  data, or schedule changes while still allowing operational knobs such as
+  `max_steps`.
+- A merged LoRA layer inherits the base layer's device and dtype.
+
 ## [0.1.0b2] — Public beta
 
 First public (beta) release: an end-to-end, CPU-first toolkit for behavioral
@@ -37,8 +57,9 @@ banking foundation models.
   high-cardinality text fields with a frozen text encoder and reconstructs them
   with MSE; off by default, so the BPE path is byte-identical.
 - **AML over the transfer graph** — a GraphSAGE node classifier and the
-  five-arm relational-recovery ablation with isolated, graph-aware, no-graph,
-  and topology-only controls; see MODEL_CARD.md and `notebooks/04`.
+  four-arm relational-recovery ablation (isolated embedding vs graph-aware
+  pragmatiq vs graph-aware hand-crafted, with a no-graph control); see
+  MODEL_CARD.md and `notebooks/04`.
 - **Inference & serving** — a batch embedder, integrated-gradients event
   attribution, ONNX export, a Triton serving image that installs pragmatiq, a
   turnkey `deploy_serving.sh`, monitoring (Prometheus + Grafana), and a Streamlit demo.

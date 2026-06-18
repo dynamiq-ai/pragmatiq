@@ -1,30 +1,28 @@
 """AML GNN extension.
 
 ``TransferGraphBuilder`` turns ``transfers.parquet`` + frozen pragmatiq user
-embeddings into a PyG-style graph; ``AmlGNN`` is a GraphSAGE (default 3 layers)
-that combines node features, graph topology, and transfer amount/recency
-attributes to produce per-node (per-user) money-laundering logits.
+embeddings into a PyG ``Data`` object; ``AmlGNN`` is a GraphSAGE (default 3
+layers) that produces per-node (per-user) money-laundering logits.
 
-The ablation (``run_aml_ablation``) compares five node-classification setups on
+The ablation (``run_aml_ablation``) compares four node-classification setups on
 the synthetic AML (mule-ring) task:
 
 (a) a probe/MLP on **isolated** pragmatiq embeddings (no graph),
 (b) GraphSAGE over the transfer graph with **pragmatiq** node features,
 (c) GraphSAGE with **hand-crafted** transfer-graph node features,
-(d) logistic regression on the same hand-crafted features (no graph),
-(e) topology-only GraphSAGE with hand-crafted node features and no edge
-attributes.
+(d) logistic regression on the same hand-crafted features (no graph).
 
 Mule rings are modeled as multi-hop layered laundering chains whose amounts and
 counterparty degree match ordinary accounts, so 1-hop degree is not a mule oracle
 and an isolated per-user embedding is only weakly informative. The discriminative
 signal is multi-hop and behavioral — a faint forwarding-tempo fingerprint in the
 mule's own event stream, amplified across the chain by message passing. The gated
-result is relational recovery: the graph recovers signal the isolated probe
-misses (c > a). Message-passing gain over the no-graph control (c > d), edge
-amount/recency gain over topology only (c > e), and learned-embedding ordering
-(b > a and b > c) are reported diagnostics. See notebooks/04 and the model card
-for the full discussion.
+results are the relational mechanism — the graph recovers signal the isolated
+probe misses (c > a) and message passing adds over the same features without a
+graph (c > d) — and, with adequate training, the headline that the learned
+embedding + graph beats both the isolated probe and the hand-crafted-feature
+graph (b > a and b > c), with (c) sitting between. See notebooks/04 and the model
+card for the full discussion.
 """
 
 from __future__ import annotations
@@ -148,10 +146,8 @@ class AmlGNN(nn.Module):
       and concatenated with the graph representation before classification, with
       residual connections between conv layers. The skip keeps deep stacks from
       over-smoothing away the per-user signal an isolated probe already has, and
-      keeps node features visible alongside graph context for every ablation arm.
-    - **Edge attributes.** Transfer amount and recency are projected into receiver
-      nodes before and between message-passing layers. ``use_edge_attr=False``
-      gives the topology-only baseline explicitly.
+      guarantees the head sees the embedding plus the graph context, so a richer
+      feature set (PRAGMA) dominates a generic one (hand-crafted).
 
     Training is full-batch transductive (``_fit_gnn``): the SPEC calls for
     neighbor sampling, which matters when the graph does not fit in memory, but
@@ -161,16 +157,8 @@ class AmlGNN(nn.Module):
     the layer code is unchanged.
     """
 
-    def __init__(
-        self,
-        in_dim: int,
-        hidden: int = 128,
-        n_layers: int = 2,
-        dropout: float = 0.15,
-        n_classes: int = 2,
-        edge_dim: int = 2,
-        use_edge_attr: bool = True,
-    ) -> None:
+    def __init__(self, in_dim: int, hidden: int = 128, n_layers: int = 2, dropout: float = 0.15,
+                 n_classes: int = 2) -> None:
         super().__init__()
         from torch_geometric.nn import SAGEConv
 
@@ -186,47 +174,19 @@ class AmlGNN(nn.Module):
             self.convs.append(SAGEConv(hidden, hidden, aggr="sum"))
             self.norms.append(nn.LayerNorm(hidden))
         self.dropout = dropout
-        self.use_edge_attr = use_edge_attr
-        self.edge_dim = edge_dim
-        self.edge_mlp = nn.Sequential(
-            nn.Linear(edge_dim, hidden), nn.GELU(), nn.Linear(hidden, hidden)
-        ) if use_edge_attr else None
         self.head = nn.Sequential(
             nn.Linear(2 * hidden, hidden), nn.GELU(),
             nn.Dropout(dropout), nn.Linear(hidden, n_classes),
         )
 
-    def _edge_context(
-        self, edge_index: torch.Tensor, edge_attr: torch.Tensor | None, n_nodes: int
-    ) -> torch.Tensor | None:
-        """Project transfer amount/recency edge attributes and sum them into receivers."""
-        if self.edge_mlp is None or edge_attr is None or edge_attr.numel() == 0:
-            return None
-        expected = (edge_index.shape[1], self.edge_dim)
-        if tuple(edge_attr.shape) != expected:
-            raise ValueError(f"edge_attr shape must be {expected}, got {tuple(edge_attr.shape)}")
-        msg = self.edge_mlp(edge_attr.to(next(self.edge_mlp.parameters()).device))
-        dst = edge_index[1].to(msg.device)
-        out = msg.new_zeros(n_nodes, msg.shape[-1])
-        out.index_add_(0, dst, msg)
-        return out
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        edge_index: torch.Tensor,
-        edge_attr: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, edge_index: torch.Tensor) -> torch.Tensor:
         """Node logits ``[N, n_classes]``."""
         import torch.nn.functional as F
 
         h0 = self.input_proj(x)
-        edge_ctx = self._edge_context(edge_index, edge_attr, h0.shape[0])
-        h = h0 if edge_ctx is None else h0 + edge_ctx.to(h0.device, dtype=h0.dtype)
+        h = h0
         for conv, norm in zip(self.convs, self.norms):
             h = h + F.dropout(F.gelu(norm(conv(h, edge_index))), p=self.dropout, training=self.training)
-            if edge_ctx is not None:
-                h = h + edge_ctx.to(h.device, dtype=h.dtype)
         return self.head(torch.cat([h, h0], dim=-1))
 
 
@@ -236,7 +196,7 @@ def _train_val_test_mask(n: int, y: torch.Tensor, seed: int, val_frac: float = 0
 
     Stratifying matters because mules are rare — an unstratified split can put
     nearly all (or zero) positives in one side, which makes the held-out AUC
-    noisy and the ablation comparison unstable. The SAME split is
+    noisy and the four-arm ablation comparison unstable. The SAME split is
     shared by all ablation arms so they are compared on identical users. The
     validation mask exists so model selection (early stopping, best epoch)
     never touches the test set — test is evaluated exactly once per fit.
@@ -266,8 +226,7 @@ def _class_weights(y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
 
 def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask: torch.Tensor,
              test_mask: torch.Tensor, epochs: int = 80, hidden: int = 128, n_layers: int = 2,
-             lr: float = 1e-2, patience: int = 4, eval_every: int = 5,
-             use_edge_attr: bool = True) -> float:
+             lr: float = 1e-2, patience: int = 4, eval_every: int = 5) -> float:
     """Train a GraphSAGE on a (shared) node-split and return held-out ROC-AUC.
 
     Full-batch transductive (the synthetic AML graphs fit in memory). Early
@@ -283,10 +242,7 @@ def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask
     mu = graph.x[train_mask].mean(0)
     sd = graph.x[train_mask].std(0).clamp_min(1e-6)
     x = (graph.x - mu) / sd
-    edge_attr = graph.edge_attr if use_edge_attr else None
-    if edge_attr is not None and edge_attr.numel():
-        edge_attr = (edge_attr - edge_attr.mean(0)) / edge_attr.std(0, unbiased=False).clamp_min(1e-6)
-    model = AmlGNN(graph.x.shape[1], hidden=hidden, n_layers=n_layers, use_edge_attr=use_edge_attr)
+    model = AmlGNN(graph.x.shape[1], hidden=hidden, n_layers=n_layers)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=5e-4)
     weight = _class_weights(graph.y, train_mask)
     yva = graph.y[val_mask].numpy()
@@ -298,14 +254,14 @@ def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask
     for ep in range(epochs):
         model.train()
         opt.zero_grad()
-        out = model(x, graph.edge_index, edge_attr)
+        out = model(x, graph.edge_index)
         loss = torch.nn.functional.cross_entropy(out[train_mask], graph.y[train_mask], weight=weight)
         loss.backward()
         opt.step()
         if ep % eval_every == eval_every - 1 or ep == epochs - 1:
             model.eval()
             with torch.no_grad():
-                proba = torch.softmax(model(x, graph.edge_index, edge_attr), dim=-1)[:, 1]
+                proba = torch.softmax(model(x, graph.edge_index), dim=-1)[:, 1]
             val_auc = float(roc_auc_score(yva, proba[val_mask].numpy()))
             if val_auc > best_val + 1e-4:
                 best_val, bad = val_auc, 0
@@ -317,7 +273,7 @@ def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask
     model.load_state_dict(best_state)
     model.eval()
     with torch.no_grad():
-        proba = torch.softmax(model(x, graph.edge_index, edge_attr), dim=-1)[:, 1]
+        proba = torch.softmax(model(x, graph.edge_index), dim=-1)[:, 1]
     return float(roc_auc_score(yte, proba[test_mask].numpy()))
 
 
@@ -356,9 +312,6 @@ def aml_results_markdown(res: dict[str, Any]) -> str:
     if "d_lr_handcrafted" in ps:
         rows.append(("(d) control: logistic regression on the same hand-crafted features, no graph",
                      ps["d_lr_handcrafted"]))
-    if "e_gnn_handcrafted_topology" in ps:
-        rows.append(("(e) topology-only GraphSAGE + hand-crafted node features",
-                     ps["e_gnn_handcrafted_topology"]))
     lines = ["| setup | ROC-AUC (mean ± std over seeds) |", "| --- | --- |"]
     lines += [f"| {name} | {m['mean']:.3f} ± {m['std']:.3f} |" for name, m in rows]
     v = res["verdict"]
@@ -369,10 +322,8 @@ def aml_results_markdown(res: dict[str, Any]) -> str:
         f"money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = "
         f"{v['c_beats_a']}), so the AML signal lives in the multi-hop transfer structure an isolated "
         f"per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, "
-        f"so the signal is the multi-hop layering chain, not 1-hop degree. Reported diagnostics: "
-        f"message passing adds over the same features without a graph ((c) > (d) = {mp}); "
-        f"edge attributes add over the topology-only graph ((c) > (e) = "
-        f"{v.get('edge_attributes_add')}). The gate requires relational recovery."
+        f"so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over "
+        f"the same features without a graph ((c) > (d) = {mp}). The gate requires both."
     )
     lines.append("")
     lines.append(
@@ -452,15 +403,15 @@ def run_aml_ablation(
     epochs: int = 150,
     gnn_layers: int = 3,
 ) -> dict[str, Any]:
-    """Five-arm AML comparison over isolated, graph, no-graph, and topology controls.
+    """The four-arm AML comparison (a: isolated, b: GNN+pragmatiq, c: GNN+handcrafted, d: LR control).
 
     Returns mean/std AUC per setup over ``seeds`` plus a verdict. The gated claim
-    is relational recovery: ``c > a``. The learned-embedding ordering
-    (``b > a`` and ``b > c``), message-passing gain (``c > d``), and
-    edge-attribute contribution (``c > e``) are reported. ``gnn_layers``
-    (default 3) sets the GraphSAGE depth so message passing can span the
-    multi-hop laundering chain; graph arms use the same depth for a fair
-    comparison.
+    is *relational recovery via the learned embedding* — ``b > a`` and ``b > c``,
+    with ``a`` sitting below ``c`` below ``b``: a graph-aware model over pragmatiq
+    embeddings beats both an isolated probe on those embeddings and a GraphSAGE on
+    hand-crafted degree/volume statistics. ``gnn_layers`` (default 3) sets the
+    GraphSAGE depth so message passing can span the multi-hop laundering chain;
+    the hand-crafted arm uses the same depth for a fair comparison.
     """
     # Pin CPU intra-op threads for the duration of the ablation: torch's
     # default (one thread per core) oversubscribes the tiny sparse SAGEConv
@@ -498,8 +449,7 @@ def _run_aml_ablation(
                                edge_attr=pragma_graph.edge_attr, y=pragma_graph.y, user_ids=user_ids)
 
     res: dict[str, list[float]] = {"a_isolated": [], "b_gnn_pragma": [],
-                                   "c_gnn_handcrafted": [], "d_lr_handcrafted": [],
-                                   "e_gnn_handcrafted_topology": []}
+                                   "c_gnn_handcrafted": [], "d_lr_handcrafted": []}
     for s in seeds:
         # one stratified split per seed, shared by all arms (fair comparison);
         # model selection uses the val mask, test is scored exactly once
@@ -512,13 +462,6 @@ def _run_aml_ablation(
         # control arm: SAME handcrafted features, NO message passing — isolates
         # what graph propagation itself contributes over the raw features
         res["d_lr_handcrafted"].append(_fit_mlp(hand, y, train_mask, test_mask))
-        # topology-only arm: SAME handcrafted features and graph, but no transfer
-        # amount/recency attributes, so edge attributes get a separately reported
-        # contribution from adjacency/message passing.
-        res["e_gnn_handcrafted_topology"].append(
-            _fit_gnn(hand_graph, s, train_mask, val_mask, test_mask,
-                     epochs=epochs, n_layers=gnn_layers, use_edge_attr=False)
-        )
 
     def ms(v: list[float]) -> dict[str, float]:
         a = np.array(v)
@@ -529,10 +472,10 @@ def _run_aml_ablation(
     b = summary["b_gnn_pragma"]["mean"]
     c = summary["c_gnn_handcrafted"]["mean"]
     d = summary["d_lr_handcrafted"]["mean"]
-    e = summary["e_gnn_handcrafted_topology"]["mean"]
     # The gated claim is relational recovery: a GraphSAGE over the transfer graph
-    # recovers money-mule rings that an isolated probe on per-user embeddings
-    # misses (c > a). The mechanism:
+    # recovers money-mule rings that an isolated probe on the same features misses
+    # (c > a), and message passing adds over the same features without a graph
+    # (c > d). The mechanism:
     #  - Mules are degree- and volume-matched to ordinary accounts (ring legs draw
     #    organic-sized amounts), so hand-crafted degree alone is only weakly
     #    predictive — the signal is the multi-hop layering chain, not 1-hop degree.
@@ -541,9 +484,8 @@ def _run_aml_ablation(
     #  - The learned per-user embedding does NOT capture this on its own: the
     #    isolated probe (a) sits near chance, so b > c (the learned embedding
     #    beating hand-crafted features) is REPORTED, not gated — see the verdict.
-    # The control arm (d) reports whether message passing adds over the same
-    # hand-crafted features without a graph. The topology-only arm (e) reports
-    # whether transfer amount/recency adds beyond adjacency/message passing.
+    # The control arm (d) checks the graph effect is real: (c) > (d) means message
+    # passing adds over the same hand-crafted features without a graph.
     margin = 0.01
     return {
         "per_setup": summary, "raw": res,
@@ -556,7 +498,6 @@ def _run_aml_ablation(
             "c_beats_a": c > a + margin,
             "c_between_a_and_b": a <= c <= b,
             "message_passing_adds": c > d + margin,
-            "edge_attributes_add": c > e + margin,
             # Relational recovery: a graph over the transfer structure beats a
             # probe on the isolated per-user embedding (c > a), so the AML signal
             # lives in the multi-hop transfer structure an isolated embedding misses.
@@ -566,8 +507,8 @@ def _run_aml_ablation(
             # b > c), (c) between — is reported, not gated: on this synthetic book
             # the per-user embedding does not recover the multi-hop signal on its own.
             "paper_ordering": (b > a + margin) and (b > c + margin) and (a <= c <= b),
-            # The gated claim is relational recovery: recovery (c > a). The
-            # no-graph and topology-only controls remain reported diagnostics.
-            "pass": c > a + margin,
+            # The gated claim is the relational mechanism: recovery (c > a) plus
+            # message passing adding over the same features without a graph (c > d).
+            "pass": (c > a + margin) and (c > d + margin),
         },
     }
