@@ -6,8 +6,8 @@
 #      target < 10 min; smoke test: asserts the pipeline runs and returns a
 #      finite probe metric (the training check is the performance bar, not this
 #      nano run)
-#   3. packaging sanity: version tracks the package metadata, CLI entrypoint resolves, docs carry
-#      the required attribution line
+#   3. packaging sanity: version tracks the package metadata, CLI entrypoint resolves,
+#      the PEP 561 marker is present, and docs carry the required attribution line
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
@@ -41,17 +41,22 @@ EOF
 echo "=== packaging + attribution ==="
 $PY - <<'EOF'
 import pragmatiq
+import tomllib
 from importlib.metadata import version as _dist_version
-# __version__ tracks the installed distribution metadata (single source of truth), so any
-# valid release or pre-release (e.g. a public beta) passes — no fixed literal to bump.
+from pathlib import Path
+# __version__ tracks the installed distribution metadata, and both must match
+# pyproject.toml so stale editable installs and release-metadata drift fail loud.
 assert pragmatiq.__version__, "empty package version"
 assert pragmatiq.__version__ == _dist_version("pragmatiq"), pragmatiq.__version__
+pyproject_version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+assert pragmatiq.__version__ == pyproject_version, (pragmatiq.__version__, pyproject_version)
 from pragmatiq.cli import app  # CLI entrypoint resolves
-from pathlib import Path
 need = "not affiliated with or endorsed by Revolut"
-for doc in ("README.md", "MODEL_CARD.md"):
-    assert need in Path(doc).read_text(), f"{doc} missing attribution line"
-print(f"  version {pragmatiq.__version__}; attribution present in README + MODEL_CARD")
+assert (Path(pragmatiq.__file__).parent / "py.typed").exists(), "py.typed missing"
+docs = [Path("README.md"), Path("MODEL_CARD.md"), *Path("website/content/docs").rglob("*.mdx")]
+for doc in docs:
+    assert need in doc.read_text(), f"{doc} missing attribution line"
+print(f"  version {pragmatiq.__version__}; attribution present in public docs")
 print("packaging OK")
 EOF
 

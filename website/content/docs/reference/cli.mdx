@@ -3,6 +3,9 @@ title: CLI
 description: The pragmatiq command-line interface — a thin wrapper over the Python API.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 The CLI is intentionally thin: each command parses arguments and calls a function in
 [`pragmatiq/api.py`](/docs/reference/api), so the CLI, notebooks, and production callers all
 use the same library surface. Run any command with `--help` for its full options.

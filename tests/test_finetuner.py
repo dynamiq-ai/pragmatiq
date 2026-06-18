@@ -11,6 +11,7 @@ import torch.nn as nn
 from pragmatiq import api
 from pragmatiq.data.dataset import ShardDataset
 from pragmatiq.data.tokenizer import PragmaTokenizer
+from pragmatiq.models.lora import LoRALinear
 from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
 from pragmatiq.registry import register_head
 from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
@@ -60,6 +61,56 @@ def test_finetune_early_stops_and_restores_best(ft_work: Path, monkeypatch) -> N
     # the peak val_auc was at epoch 2, so the restored adapters must be epoch 2's
     assert torch.allclose(lora_param, torch.full_like(lora_param, 2.0)), \
         "fine-tuner must restore the best-epoch LoRA adapters, not the last epoch's"
+
+
+def test_finetune_restores_best_lora_adapters(ft_work: Path, monkeypatch) -> None:
+    tok = PragmaTokenizer.load(ft_work / "tok" / "tokenizer")
+    model = PragmaModel(ModelConfig.preset("nano", tok.vocab_size))
+    ft = LoRAFineTuner(model, FineTuneConfig(max_epochs=3, patience=2, lora_rank=4))
+    seq = iter([0.80, 0.70, 0.60])
+    snapshots: list[dict[str, torch.Tensor]] = []
+    head_snapshots: list[dict[str, torch.Tensor]] = []
+
+    def fake_epoch(dataset, users, label_of, opt, train):  # replaces the bound method
+        if train:
+            with torch.no_grad():
+                for name, param in ft.model.named_parameters():
+                    if "lora" in name:
+                        param.add_(len(snapshots) + 1.0)
+                for param in ft.head.parameters():
+                    param.add_(len(head_snapshots) + 1.0)
+            snapshots.append({
+                k: v.detach().clone()
+                for k, v in ft.model.state_dict().items()
+                if "lora" in k
+            })
+            head_snapshots.append({k: v.detach().clone() for k, v in ft.head.state_dict().items()})
+            return 0.0
+        return next(seq)
+
+    monkeypatch.setattr(ft, "_run_epoch", fake_epoch)
+    ds = ShardDataset(ft_work / "tok")
+    ft.fit(ds, ft_work / "raw" / "labels" / "default_12m.parquet")
+    ds.close()
+    current = {k: v.detach() for k, v in ft.model.state_dict().items() if "lora" in k}
+    assert snapshots, "test setup did not mutate LoRA adapters"
+    for name, expected in snapshots[0].items():
+        assert torch.equal(current[name], expected), f"{name} was not restored to the best epoch"
+    for name, expected in head_snapshots[0].items():
+        assert torch.equal(ft.head.state_dict()[name], expected), f"{name} head was not restored"
+
+
+def test_lora_merge_preserves_base_dtype_and_device() -> None:
+    base = nn.Linear(5, 3).to(dtype=torch.bfloat16)
+    layer = LoRALinear(base, rank=2, alpha=2.0)
+    with torch.no_grad():
+        layer.lora_b.fill_(0.25)
+    merged = layer.merged_linear()
+    assert merged.weight.dtype == base.weight.dtype
+    assert merged.weight.device == base.weight.device
+    if merged.bias is not None:
+        assert merged.bias.dtype == base.weight.dtype
+        assert merged.bias.device == base.weight.device
 
 
 def test_custom_head_resolved_for_finetune() -> None:

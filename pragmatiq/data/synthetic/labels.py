@@ -57,6 +57,7 @@ class LabelOracle:
         self.eval_short_day = int(cal.month_start_day[self.cfg.eval_month_short])
         self.eval_credit_us = cal.start_us() + self.eval_credit_day * DAY_US
         self.eval_short_us = cal.start_us() + self.eval_short_day * DAY_US
+        self.observed_through_us = cal.start_us() + cal.n_days * DAY_US
         # End of the 12-month outcome window, taken at the month boundary 12
         # months after the credit eval point. __post_init__ guarantees
         # eval_month_credit + 12 <= months, so this stays inside the simulated
@@ -149,7 +150,7 @@ class LabelOracle:
         # time column records the horizon that history was observed through rather
         # than a forecast cut-off.
         is_mule = bool(self.world.episodes.mule_member[trace.user_idx])
-        rows.aml.append((uid, self.eval_short_us, int(is_mule)))
+        rows.aml.append((uid, self.observed_through_us, int(is_mule)))
 
         # ---- comm_uplift: both potential outcomes per (user, campaign).
         for cid, ts, treated, y0, y1 in trace.comm_rows:

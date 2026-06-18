@@ -27,12 +27,20 @@ from pragmatiq.data.synthetic import WorldConfig, generate
 work = Path(sys.argv[1])
 kw = dict(n_users=300, months=16, n_merchants=1500, mule_ring_count=1, seed=77,
           eval_month_credit=4, eval_month_short=9)
-generate(WorldConfig(**kw), work/"a", n_workers=0, write_report=False)
-generate(WorldConfig(**kw), work/"b", n_workers=2, write_report=False)
+generate(WorldConfig(**kw), work/"a", n_workers=0, write_report=True)
+generate(WorldConfig(**kw), work/"b", n_workers=2, write_report=True)
 def sha(p):
     return hashlib.sha256(p.read_bytes()).hexdigest()
-for rel in ("events.parquet", "profiles.parquet", "transfers.parquet",
-            "labels/default_12m.parquet"):
+rels = [
+    "events.parquet",
+    "profiles.parquet",
+    "transfers.parquet",
+    "manifest.json",
+    "realism_report.html",
+    "realism_report.json",
+]
+rels.extend(str(p.relative_to(work/"a")) for p in sorted((work/"a"/"labels").glob("*.parquet")))
+for rel in rels:
     assert sha(work/"a"/rel) == sha(work/"b"/rel), f"non-deterministic: {rel}"
 print("determinism OK (seed-stable, worker-count invariant)")
 EOF

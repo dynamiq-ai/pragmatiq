@@ -3,6 +3,9 @@ title: PRAGMA+Nemotron variant
 description: Embedding high-cardinality text with a frozen text model and reconstructing it with MSE — switchable, off by default.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 The paper describes a variant in which high-cardinality **text** fields (merchant names,
 device ids, free-text memos) are not split into BPE pieces. Instead a *frozen* text model
 maps each value's full string to a single vector, and the MLM objective reconstructs that

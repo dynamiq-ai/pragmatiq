@@ -9,7 +9,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-from pragmatiq.data.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, TRANSFERS_SCHEMA
+from pragmatiq.data.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, TRANSFERS_SCHEMA, label_schema
 from pragmatiq.data.synthetic import WorldConfig, generate
 
 CFG_KW = dict(
@@ -26,6 +26,20 @@ def _sha(path: Path) -> str:
     return h.hexdigest()
 
 
+def _deterministic_artifacts(root: Path) -> list[Path]:
+    labels = sorted((root / "labels").glob("*.parquet"))
+    rels = [
+        root / "events.parquet",
+        root / "profiles.parquet",
+        root / "transfers.parquet",
+        root / "manifest.json",
+        root / "realism_report.html",
+        root / "realism_report.json",
+        *labels,
+    ]
+    return [p for p in rels if p.exists()]
+
+
 @pytest.fixture(scope="module")
 def dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
     out = tmp_path_factory.mktemp("synth")
@@ -36,16 +50,17 @@ def dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
 class TestDeterminism:
     def test_same_seed_byte_identical(self, dataset: Path, tmp_path: Path) -> None:
         out2 = tmp_path / "again"
-        generate(WorldConfig(**CFG_KW), out2, n_workers=0, write_report=False)
-        for rel in ("events.parquet", "profiles.parquet", "transfers.parquet",
-                    "labels/default_12m.parquet", "labels/fraud.parquet"):
-            assert _sha(dataset / rel) == _sha(out2 / rel), f"{rel} differs across runs"
+        generate(WorldConfig(**CFG_KW), out2, n_workers=0, write_report=True)
+        for path in _deterministic_artifacts(dataset):
+            rel = path.relative_to(dataset)
+            assert _sha(path) == _sha(out2 / rel), f"{rel} differs across runs"
 
     def test_worker_count_invariant(self, dataset: Path, tmp_path: Path) -> None:
         out2 = tmp_path / "workers2"
-        generate(WorldConfig(**CFG_KW), out2, n_workers=2, write_report=False)
-        assert _sha(dataset / "events.parquet") == _sha(out2 / "events.parquet")
-        assert _sha(dataset / "labels/default_12m.parquet") == _sha(out2 / "labels/default_12m.parquet")
+        generate(WorldConfig(**CFG_KW), out2, n_workers=2, write_report=True)
+        for path in _deterministic_artifacts(dataset):
+            rel = path.relative_to(dataset)
+            assert _sha(path) == _sha(out2 / rel), f"{rel} differs across worker counts"
 
     def test_different_seed_differs(self, dataset: Path, tmp_path: Path) -> None:
         out2 = tmp_path / "seed2"
@@ -59,10 +74,10 @@ class TestDeterminism:
 
         monkeypatch.setattr(multiprocessing, "get_all_start_methods", lambda: ["spawn"])
         out2 = tmp_path / "spawn"
-        generate(WorldConfig(**CFG_KW), out2, n_workers=2, write_report=False)
-        for rel in ("events.parquet", "profiles.parquet", "transfers.parquet",
-                    "labels/default_12m.parquet"):
-            assert _sha(dataset / rel) == _sha(out2 / rel), f"{rel} differs under spawn"
+        generate(WorldConfig(**CFG_KW), out2, n_workers=2, write_report=True)
+        for path in _deterministic_artifacts(dataset):
+            rel = path.relative_to(dataset)
+            assert _sha(path) == _sha(out2 / rel), f"{rel} differs under spawn"
 
 
 class TestMissingFieldRate:
@@ -149,10 +164,30 @@ class TestSchema:
         for task in LABEL_TASKS:
             t = pq.read_table(dataset / "labels" / f"{task}.parquet")
             assert t.num_columns >= 2, task
+            assert t.schema.equals(label_schema(task)), task
 
     def test_report_and_manifest(self, dataset: Path) -> None:
+        import json
+
         html = (dataset / "realism_report.html").read_text()
         assert "Hour of day" in html and "base64" in html
+        metrics = json.loads((dataset / "realism_report.json").read_text())
+        assert metrics["checks"]["events_per_user_long_tail"]["pass"] is True
+        assert metrics["checks"]["hour_day_night_structure"]["pass"] is True
+        assert set(metrics["checks"]) == {
+            "events_per_user_long_tail",
+            "hour_day_night_structure",
+            "merchant_zipf_concentration",
+            "amounts_differ_by_mcc",
+            "calibration_default_rate_residual",
+            "calibration_fraud_user_rate_residual",
+        }
+        assert "label_prevalence" in metrics
+        assert "calibration_residuals" in metrics
+        for key in ("default_rate", "fraud_user_rate"):
+            assert set(metrics["calibration_residuals"][key]) == {
+                "actual", "target", "residual", "abs_residual"
+            }
         assert (dataset / "manifest.json").exists()
 
 
@@ -187,10 +222,11 @@ class TestLabelSanity:
     def test_aml_covers_all_users_and_matches_rings(self, dataset: Path) -> None:
         aml = pq.read_table(dataset / "labels" / "aml.parquet").to_pandas()
         assert len(aml) == CFG_KW["n_users"]
+        assert list(aml.columns) == ["user_id", "observed_through", "label"]
         assert aml["label"].sum() >= 2
 
     def test_no_label_leakage_in_time(self, dataset: Path) -> None:
-        """User-level labels carry eval_ts; fraud/recurring rows reference real events."""
+        """Forecast labels carry eval_ts; fraud/recurring rows reference real events."""
         for task in ("default_12m", "churn_6m", "ltv_positive"):
             t = pq.read_table(dataset / "labels" / f"{task}.parquet").to_pandas()
             if t.empty:

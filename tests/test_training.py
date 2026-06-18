@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -158,6 +159,7 @@ class TestPretrainer:
             assert key in ckpt, f"checkpoint missing {key}"
         assert ckpt["tokenizer_hash"] == tok.content_hash
         assert "masking_gen" in ckpt["rng"] and "torch" in ckpt["rng"] and "numpy" in ckpt["rng"]
+        assert "python" in ckpt["rng"]
         ds.close()
 
     def test_resume_bit_exact(self, shards: Path) -> None:
@@ -246,6 +248,62 @@ class TestPretrainer:
             trainer2.load_checkpoint(run.last_checkpoint(), loader2)
         ds.close()
         ds2.close()
+
+    def test_checkpoint_train_config_mismatch_refused(self, shards: Path) -> None:
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create(
+            "traincfg",
+            {},
+            0,
+            tok.content_hash,
+            shards / "runs",
+            tokenizer_src=shards / "tok" / "tokenizer",
+        )
+        trainer, loader, ds = _nano(tok.content_hash, 5, run, tok.vocab_size, shards, p_token=0.15)
+        trainer.fit(loader)
+        trainer2, loader2, ds2 = _nano(tok.content_hash, 10, run, tok.vocab_size, shards, p_token=0.35)
+        with pytest.raises(ValueError, match="checkpoint train_config mismatch"):
+            trainer2.load_checkpoint(run.last_checkpoint(), loader2)
+        ds.close()
+        ds2.close()
+
+    def test_checkpoint_model_config_mismatch_refused(self, shards: Path) -> None:
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create(
+            "modelcfg",
+            {},
+            0,
+            tok.content_hash,
+            shards / "runs",
+            tokenizer_src=shards / "tok" / "tokenizer",
+        )
+        trainer, loader, ds = _nano(tok.content_hash, 5, run, tok.vocab_size, shards)
+        trainer.fit(loader)
+        trainer2, loader2, ds2 = _nano(tok.content_hash, 10, run, tok.vocab_size + 7, shards)
+        with pytest.raises(ValueError, match="checkpoint model_config mismatch"):
+            trainer2.load_checkpoint(run.last_checkpoint(), loader2)
+        ds.close()
+        ds2.close()
+
+    def test_api_resume_refuses_mismatched_resolved_config(self, shards: Path) -> None:
+        api.pretrain(
+            shards / "tok",
+            "api_resume_guard",
+            model_size="nano",
+            config={"max_steps": 2, "token_budget": 4096, "warmup_steps": 1,
+                    "checkpoint_every_min": 1000.0, "p_token": 0.15},
+            runs_root=shards / "runs",
+        )
+        with pytest.raises(ValueError, match="resolved config mismatch"):
+            api.pretrain(
+                shards / "tok",
+                "api_resume_guard",
+                model_size="nano",
+                config={"max_steps": 2, "token_budget": 4096, "warmup_steps": 1,
+                        "checkpoint_every_min": 1000.0, "p_token": 0.35},
+                runs_root=shards / "runs",
+                resume="auto",
+            )
 
     def test_consecutive_skips_abort(self, shards: Path, monkeypatch) -> None:
         # A sustained non-finite streak is divergence: it must fail loud, not
@@ -414,6 +472,12 @@ class TestDeterminism:
         finally:
             self._restore()
             ds.close()
+
+    def test_seed_everything_resets_python_random(self) -> None:
+        seed_everything(123)
+        a = random.random()
+        seed_everything(123)
+        assert random.random() == a
 
 
 # ---------------------------------------------------------------- gradient accumulation

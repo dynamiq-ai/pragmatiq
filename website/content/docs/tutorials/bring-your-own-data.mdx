@@ -3,6 +3,9 @@ title: Bring your own data
 description: Point pragmatiq at real bank records — produce the parquet contract, validate, then run the same pipeline.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 pragmatiq trains on the same [parquet contract](/docs/reference/data-contract) whether the
 data is synthetic or yours. The only new work is producing those four files; everything
 downstream is identical.
@@ -24,7 +27,7 @@ import pyarrow as pa, pyarrow.parquet as pq
 events = pa.table({
     "user_id": [...],
     "ts": pa.array([...], type=pa.timestamp("us")),
-    "source": [...],                      # e.g. "transaction", "app", "transfer"
+    "source": [...],                      # e.g. "transaction", "app", "trading"
     "fields": [...],                      # list of {str: str}
 })
 pq.write_table(events, "data/mybank/events.parquet")
@@ -56,8 +59,9 @@ keep heavy-tailed histories tractable (see [Pretrain](/docs/tutorials/pretrain))
   if your timestamps are UTC instants but day/night and payday structure is local.
 - **Unseen values at inference** map to `[UNK]` with a logged warning — never a `KeyError`.
   Refit the tokenizer when your value distribution shifts materially.
-- **Labels** need an `eval_ts` per user so histories are truncated before embedding (forecast,
-  not hindcast).
+- **Forecast labels** need an `eval_ts` per user so histories are truncated before embedding
+  (forecast, not hindcast). AML membership labels use `user_id`, `observed_through`,
+  and `label`.
 
 <Callout title="Data never leaves your environment">
 Everything runs on CPU first and locally. The synthetic generator and

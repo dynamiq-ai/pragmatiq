@@ -105,10 +105,12 @@ def _trace_block_aggregates(traces: list[UserTrace], rows: LabelRows) -> ReportA
                             lst.append(float(am))
         agg.label_n["fraud_users"] += 1
         agg.label_pos["fraud_users"] += int(len(tr.fraud_rows) > 0)
-    for task in ("default_12m", "churn_6m", "ltv_positive", "aml"):
+    for task in ("default_12m", "churn_6m", "ltv_positive"):
         rws = getattr(rows, task)
         agg.label_n[task] += len(rws)
         agg.label_pos[task] += sum(r[2] for r in rws)
+    agg.label_n["aml"] += len(rows.aml)
+    agg.label_pos["aml"] += sum(r[2] for r in rows.aml)
     return agg
 
 
@@ -303,10 +305,13 @@ def _label_tables(rows: LabelRows) -> dict[str, pa.Table]:
     def col(rws: list, i: int) -> list:
         return [x[i] for x in rws]
 
-    for task in ("default_12m", "churn_6m", "aml"):
+    for task in ("default_12m", "churn_6m"):
         rws = getattr(rows, task)
         out[task] = tbl(task, [pa.array(col(rws, 0), pa.string()), ts_arr(col(rws, 1)),
                                pa.array(col(rws, 2), pa.int8())])
+    aml = rows.aml
+    out["aml"] = tbl("aml", [pa.array(col(aml, 0), pa.string()), ts_arr(col(aml, 1)),
+                             pa.array(col(aml, 2), pa.int8())])
     ltv = rows.ltv_positive
     out["ltv_positive"] = tbl("ltv_positive", [pa.array(col(ltv, 0), pa.string()), ts_arr(col(ltv, 1)),
                                                pa.array(col(ltv, 2), pa.int8()), pa.array(col(ltv, 3), pa.float64())])
@@ -349,7 +354,8 @@ def generate(
 
     ``n_workers <= 1`` runs inline (no pool). Output bytes are independent of
     ``n_workers``. Files written: events.parquet, profiles.parquet,
-    transfers.parquet, labels/*.parquet, manifest.json, realism_report.html.
+    transfers.parquet, labels/*.parquet, manifest.json, and optional
+    realism_report.html/json.
     """
     t0 = time.time()
     out = Path(out_dir)
@@ -428,5 +434,5 @@ def generate(
     if write_report:
         from .report import write_realism_report
 
-        write_realism_report(agg, {**manifest, **timing}, out / "realism_report.html")
+        write_realism_report(agg, manifest, out / "realism_report.html")
     return {**manifest, **timing}

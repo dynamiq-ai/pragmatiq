@@ -46,7 +46,13 @@ class LoRALinear(nn.Module):
 
     def merged_linear(self) -> nn.Linear:
         """Return a plain ``nn.Linear`` with the LoRA update folded in."""
-        merged = nn.Linear(self.in_features, self.out_features, bias=self.base.bias is not None)
+        merged = nn.Linear(
+            self.in_features,
+            self.out_features,
+            bias=self.base.bias is not None,
+            device=self.base.weight.device,
+            dtype=self.base.weight.dtype,
+        )
         with torch.no_grad():
             merged.weight.copy_(self.base.weight + self.scaling * (self.lora_b @ self.lora_a))
             if self.base.bias is not None:

@@ -140,29 +140,27 @@ With it on:
 - Episode templates are stylized: real fraud, laundering, and financial
   distress are more varied than the injected account-takeover / mule-ring /
   stress-arc patterns.
-- **AML ablation finding.** The four-arm ablation (full-scale benchmark: 12k
-  accounts × 3 seeds, small model, A100) reports, on identical splits:
-  **(a)** probe on isolated pragmatiq embeddings `0.498` (chance); **(b)**
-  GraphSAGE over transfers + pragmatiq features `0.554`; **(c)** GraphSAGE +
-  hand-crafted node features `0.670`; **(d)** logistic regression on the same
-  hand-crafted features, no graph, `0.604`. The synthetic mules are multi-hop
-  layered laundering chains: their amounts and counterparty degree are drawn to
-  *match ordinary accounts*, so 1-hop degree is not a trivial oracle ((d) is only
-  moderate at `0.604`), and the discriminative signal is the multi-hop layering
-  chain. The **gated claim** is *relational recovery*: a GraphSAGE over the
-  transfer graph recovers money-mule rings a probe on the isolated per-user
-  embedding cannot — `(c) 0.670 ≫ (a) 0.498` — so the AML signal lives in the
-  multi-hop transfer structure an isolated embedding misses, and message passing
-  adds over the same features without a graph (`(c) > (d)`). The **honest
-  limitation, reported not gated:** the learned per-user embedding adds only a
-  little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does **not** beat
-  hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated embedding sits
-  near chance, so the model does not capture the multi-hop laundering signal in
-  the per-user representation; recovering it in a learned representation is the
-  **open challenge**. This is consistent with the PRAGMA paper's own observation
-  that AML is a setting where the model underperforms because it processes user
-  histories in isolation — the GNN is pragmatiq's honest extension that probes
-  that gap. See `notebooks/04_aml_gnn.ipynb`.
+- **AML ablation finding.** The AML benchmark reports five arms on identical
+  splits: **(a)** a probe on isolated pragmatiq embeddings; **(b)** GraphSAGE
+  over transfers with pragmatiq node features; **(c)** GraphSAGE with
+  hand-crafted node features and transfer edge attributes; **(d)** logistic
+  regression on the same hand-crafted node features without a graph; and **(e)**
+  GraphSAGE with the hand-crafted node features and topology only. The synthetic
+  mules are multi-hop layered laundering chains: their amounts and counterparty
+  degree are drawn to *match ordinary accounts*, so 1-hop degree is not a trivial
+  oracle, and the discriminative signal is the multi-hop layering chain. The
+  **gated claim** is *relational recovery*: a GraphSAGE over the transfer graph
+  recovers money-mule rings a probe on the isolated per-user embedding cannot,
+  so the AML signal lives in the multi-hop transfer structure an isolated
+  embedding misses. The learned per-user embedding, no-graph control, and
+  edge-attribute contribution are reported, not gated. The isolated embedding is
+  expected to be weak on this relational task, so recovering the multi-hop
+  laundering signal in a learned per-user representation remains the open
+  challenge. This is
+  consistent with the PRAGMA paper's own observation that AML is a setting where
+  the model underperforms because it processes user histories in isolation; the
+  GNN is pragmatiq's standalone extension that probes that gap. See
+  `notebooks/04_aml_gnn.ipynb`.
 - **Serving path.** ONNX export (`pragmatiq export`) emits a faithful **dense
   reformulation** of the model: the same weights run over padded tensors, so the
   exported graph reproduces the native embeddings (validated against onnxruntime

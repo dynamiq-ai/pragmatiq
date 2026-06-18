@@ -14,7 +14,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .data.schema import EVENTS_SCHEMA, PROFILES_SCHEMA, SOURCES, TRANSFERS_SCHEMA
+from .data.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, SOURCES, TRANSFERS_SCHEMA, label_schema
 
 
 @dataclass
@@ -129,6 +129,26 @@ def _check_transfers(data_dir: Path, report: ValidationReport) -> None:
         report.warn(f"transfers.parquet: {self_loops} self-loop edges (from_user == to_user)")
 
 
+def _check_labels(data_dir: Path, report: ValidationReport) -> None:
+    """Validate known label tables under labels/ against their task schemas."""
+    labels_dir = data_dir / "labels"
+    if not labels_dir.exists():
+        return
+    known = set(LABEL_TASKS)
+    for path in sorted(labels_dir.glob("*.parquet")):
+        task = path.stem
+        if task not in known:
+            report.warn(f"labels/{path.name}: unknown label task — validate schema manually")
+            continue
+        expected = label_schema(task)
+        schema = _check_schema(path, expected, report)
+        if schema is None:
+            continue
+        extra = sorted(set(schema.names) - set(expected.names))
+        if extra:
+            report.error(f"labels/{path.name}: unexpected column(s) {extra}; expected {expected.names}")
+
+
 def validate_dataset(data_dir: str | Path, max_rows: int | None = 2_000_000) -> ValidationReport:
     """Validate a raw dataset directory; returns a :class:`ValidationReport`."""
     data_dir = Path(data_dir)
@@ -198,5 +218,6 @@ def validate_dataset(data_dir: str | Path, max_rows: int | None = 2_000_000) -> 
 
     _check_field_cardinality(data_dir, r)
     _check_transfers(data_dir, r)
+    _check_labels(data_dir, r)
 
     return r

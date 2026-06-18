@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import random
 import sys
 import time
 from pathlib import Path
@@ -90,6 +91,53 @@ def _unpack_numpy_state(d: dict[str, Any]) -> tuple:
     """Inverse of :func:`_pack_numpy_state`."""
     keys = d["keys"].numpy().astype("uint32")
     return (d["name"], keys, d["pos"], d["has_gauss"], d["cached"])
+
+
+def _pack_python_state(state: Any) -> dict[str, Any]:
+    """Convert ``random.getstate()`` to a torch ``weights_only``-safe form."""
+    version, keys, gauss = state
+    return {
+        "version": int(version),
+        "keys": torch.tensor(list(keys), dtype=torch.int64),
+        "gauss": None if gauss is None else float(gauss),
+    }
+
+
+def _unpack_python_state(d: dict[str, Any]) -> tuple:
+    """Inverse of :func:`_pack_python_state`."""
+    return (int(d["version"]), tuple(int(x) for x in d["keys"].tolist()), d["gauss"])
+
+
+_CHECKPOINT_OPERATIONAL_KEYS = {
+    "max_steps",
+    "log_every",
+    "checkpoint_every_min",
+    "verbose",
+    "wandb",
+    "wandb_project",
+}
+
+
+def _require_matching_config(
+    name: str,
+    saved: dict[str, Any] | None,
+    current: dict[str, Any],
+    *,
+    ignored: set[str] | None = None,
+) -> None:
+    """Validate checkpoint-embedded config against the current object config."""
+    if saved is None:
+        raise ValueError(f"checkpoint missing {name}")
+    ignored = ignored or set()
+    mismatches = []
+    for key in sorted((set(saved) | set(current)) - ignored):
+        if saved.get(key) != current.get(key):
+            mismatches.append(f"{key}: checkpoint={saved.get(key)!r} current={current.get(key)!r}")
+    if mismatches:
+        shown = "; ".join(mismatches[:8])
+        if len(mismatches) > 8:
+            shown += f"; ... +{len(mismatches) - 8} more"
+        raise ValueError(f"checkpoint {name} mismatch: {shown}")
 
 
 @dataclasses.dataclass
@@ -520,6 +568,7 @@ class PreTrainer:
             "rng": {
                 "torch": torch.get_rng_state(),
                 "numpy": _pack_numpy_state(np.random.get_state()),
+                "python": _pack_python_state(random.getstate()),
                 "masking_gen": self.gen.get_state(),
                 "masking_gen_device": self.gen.device.type,
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -556,11 +605,19 @@ class PreTrainer:
                 f"tokenizer hash mismatch: checkpoint {ckpt.get('tokenizer_hash')!r} != "
                 f"current {self.tokenizer_hash!r}. Refusing to resume with a different tokenizer."
             )
+        _require_matching_config("model_config", ckpt.get("model_config"), dataclasses.asdict(self.model.config))
+        _require_matching_config(
+            "train_config",
+            ckpt.get("train_config"),
+            dataclasses.asdict(self.config),
+            ignored=_CHECKPOINT_OPERATIONAL_KEYS,
+        )
         self.model.load_state_dict(ckpt["model"])
         self.head.load_state_dict(ckpt["head"])
         for opt, st in zip(self.optimizers, ckpt["optimizers"]):
             opt.load_state_dict(st)
         self.scheduler.load_state_dict(ckpt["scheduler"])
+        self.scheduler.total_steps = self.config.max_steps
         loader.load_state_dict(ckpt["sampler"])
         self.step = ckpt["step"]
         self.epoch = ckpt["epoch"]
@@ -575,6 +632,8 @@ class PreTrainer:
         rng = ckpt["rng"]
         torch.set_rng_state(rng["torch"])
         np.random.set_state(_unpack_numpy_state(rng["numpy"]))
+        if "python" in rng:
+            random.setstate(_unpack_python_state(rng["python"]))
         # The masking generator is device-typed; its raw state is not portable
         # across device PRNG algorithms (CPU MT19937 vs CUDA Philox). Restore it
         # only on a matching device, else deterministically re-seed from this step.

@@ -38,46 +38,46 @@
     {
       "name": "gnn",
       "signature": "gnn(shard_dir: 'str | Path', run: 'str | Path', transfers_path: 'str | Path', aml_label_path: 'str | Path', seeds: 'tuple[int, ...]' = (0, 1, 2), device: 'str' = 'auto', epochs: 'int' = 150) -> 'dict[str, Any]'",
-      "summary": "Run the four-arm AML GNN ablation."
+      "summary": "Run the five-arm AML GNN ablation."
     },
     {
       "name": "quickstart",
-      "signature": "quickstart(out: 'str | Path' = 'runs/quickstart', n_users: 'int' = 50000, seed: 'int' = 0, model_size: 'str' = 'small', max_steps: 'int' = 400, n_workers: 'int' = 0) -> 'dict[str, Any]'",
+      "signature": "quickstart(out: 'str | Path' = 'runs/quickstart', n_users: 'int' = 50000, seed: 'int' = 0, model_size: 'str' = 'nano', max_steps: 'int' = 400, n_workers: 'int' = 0) -> 'dict[str, Any]'",
       "summary": "End-to-end smoke: synth \u2192 tokenize \u2192 nano pretrain \u2192 probe."
     }
   ],
   "gates": [
     {
       "id": "gate_1",
-      "title": ""
+      "title": "Acceptance check \u2014 synthetic data generator."
     },
     {
       "id": "gate_2",
-      "title": ""
+      "title": "Acceptance check \u2014 key-value-time tokenizer."
     },
     {
       "id": "gate_3",
-      "title": ""
+      "title": "Acceptance check \u2014 sharding, dataset, varlen collation."
     },
     {
       "id": "gate_4",
-      "title": ""
+      "title": "Acceptance check \u2014 model."
     },
     {
       "id": "gate_5",
-      "title": ""
+      "title": "Acceptance check \u2014 end-to-end training."
     },
     {
       "id": "gate_6",
-      "title": ""
+      "title": "AML GNN ablation \u2014 relational recovery over the transfer graph."
     },
     {
       "id": "gate_7",
-      "title": ""
+      "title": "Acceptance check \u2014 inference, serving, demo."
     },
     {
       "id": "gate_8",
-      "title": ""
+      "title": "Acceptance check \u2014 nano end-to-end on CPU, validate, packaging."
     }
   ],
   "model_sizes": [

@@ -43,6 +43,60 @@ def _resolve_device(device: str) -> str:
     return device
 
 
+def _read_shard_tokenizer_hash(shard_dir: str | Path) -> str:
+    """Load the live tokenizer hash from a tokenized shard directory."""
+    from pragmatiq.data.tokenizer import PragmaTokenizer
+
+    tok_dir = Path(shard_dir) / "tokenizer"
+    if not tok_dir.exists():
+        raise ValueError(f"{shard_dir!r} is missing tokenizer/; run pragmatiq tokenize first")
+    return PragmaTokenizer.load(tok_dir).content_hash
+
+
+def _run_tokenizer_hash(run: str | Path) -> str:
+    """Load the tokenizer hash copied into a training run."""
+    from pragmatiq.data.tokenizer import PragmaTokenizer
+
+    return PragmaTokenizer.load(Path(run) / "tokenizer").content_hash
+
+
+def _ensure_shard_tokenizer_matches_run(shard_dir: str | Path, run: str | Path) -> None:
+    """Refuse to combine shards encoded by a different tokenizer than ``run``."""
+    shard_hash = _read_shard_tokenizer_hash(shard_dir)
+    run_hash = _run_tokenizer_hash(run)
+    if shard_hash != run_hash:
+        raise ValueError(
+            f"tokenizer hash mismatch: shard_dir {shard_hash!r} != run {run_hash!r}. "
+            "Re-tokenize with the run tokenizer or use the matching training run."
+        )
+
+
+_RESUME_OPERATIONAL_KEYS = {
+    "max_steps",
+    "log_every",
+    "checkpoint_every_min",
+    "verbose",
+    "wandb",
+    "wandb_project",
+}
+
+
+def _enforce_resume_config(saved: dict[str, Any], current: dict[str, Any]) -> None:
+    """Validate that a resumed run keeps architecture/objective config fixed."""
+    mismatches = []
+    for key in sorted((set(saved) | set(current)) - _RESUME_OPERATIONAL_KEYS):
+        if saved.get(key) != current.get(key):
+            mismatches.append(f"{key}: saved={saved.get(key)!r} current={current.get(key)!r}")
+    if mismatches:
+        shown = "; ".join(mismatches[:8])
+        if len(mismatches) > 8:
+            shown += f"; ... +{len(mismatches) - 8} more"
+        raise ValueError(
+            "resolved config mismatch while resuming; start a new run for architecture, "
+            f"optimizer, masking, data, or schedule changes. Differences: {shown}"
+        )
+
+
 def synthesize(
     config: str | Path | dict[str, Any] | None = None,
     out: str | Path = "data/synth",
@@ -273,6 +327,8 @@ def pretrain(
     run = (Run.open(run_name, runs_root) if resuming
            else Run.create(run_name, resolved, tcfg.seed, tok.content_hash, runs_root,
                            tokenizer_src=shard_dir / "tokenizer"))
+    if resuming:
+        _enforce_resume_config(run.read_config(), resolved)
     logger = MetricLogger(run.dir, wandb=tcfg.wandb, wandb_project=tcfg.wandb_project,
                           run_name=run_name, config=resolved)
     trainer = PreTrainer(model, run, tcfg, tok.content_hash, logger=logger)
@@ -321,6 +377,7 @@ def embed(
     from pragmatiq.training.probe import embed_users
 
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     ds = ShardDataset(shard_dir)
     emb = embed_users(model, ds, token_budget=token_budget, device=device)
@@ -371,6 +428,7 @@ def probe(
     )
 
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     ds = ShardDataset(shard_dir)
     uids, _, eval_us = _load_label_table(label_path)
@@ -413,6 +471,7 @@ def uplift(
     from pragmatiq.training.uplift import UpliftLearner, cutoffs_from_uplift, load_comm_uplift
 
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     ds = ShardDataset(shard_dir)
     rows = load_comm_uplift(label_path)
@@ -470,6 +529,7 @@ def finetune(
     # Seed before LoRA init + dropout so the same seed → identical adapters (rule 2).
     seed_everything(fcfg.seed)
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     ds = ShardDataset(shard_dir)
     result = LoRAFineTuner(model, fcfg, device=device).fit(ds, label_path)
@@ -495,6 +555,7 @@ def export(
 
     if _resolve_device(device) != "cpu":
         raise ValueError(f"ONNX export runs on CPU; pass device='cpu' (got {device!r})")
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device="cpu")
     ds = ShardDataset(shard_dir)
     example = VarlenCollator()([ds.get(ds.user_ids[0])])
@@ -514,6 +575,7 @@ def benchmark(
     from pragmatiq.models.pragmatiq import PragmaModel
 
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users)
     write_results(stats, out)
@@ -529,10 +591,12 @@ def gnn(
     device: str = "auto",
     epochs: int = 150,
 ) -> dict[str, Any]:
-    """Run the four-arm AML GNN ablation.
+    """Run the five-arm AML GNN ablation.
 
     Embeds users with a trained model, builds the transfer graph, and compares
-    (a) isolated embeddings, (b) GraphSAGE+PRAGMA, (c) GraphSAGE+handcrafted.
+    isolated embeddings, graph-aware pragmatiq features, graph-aware
+    hand-crafted features, a no-graph hand-crafted control, and a topology-only
+    graph control.
 
     AML is full-observation mule-ring membership detection, not a forecast: each
     user is embedded from their entire observed history with no eval-point
@@ -546,6 +610,7 @@ def gnn(
     from pragmatiq.training.probe import _load_label_table, embed_users
 
     device = _resolve_device(device)
+    _ensure_shard_tokenizer_matches_run(shard_dir, run)
     model = PragmaModel.from_pretrained(run, device=device)
     ds = ShardDataset(shard_dir)
     emb = embed_users(model, ds, device=device)
@@ -568,7 +633,7 @@ def quickstart(
     out: str | Path = "runs/quickstart",
     n_users: int = 50_000,
     seed: int = 0,
-    model_size: str = "small",
+    model_size: str = "nano",
     max_steps: int = 400,
     n_workers: int = 0,
 ) -> dict[str, Any]:

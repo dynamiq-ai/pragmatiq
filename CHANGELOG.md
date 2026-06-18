@@ -7,7 +7,7 @@ All notable changes to pragmatiq are documented in this file. This project
 follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
 the public API may change.
 
-## [0.1.0b1] — Public beta
+## [0.1.0b2] — Public beta
 
 First public (beta) release: an end-to-end, CPU-first toolkit for behavioral
 banking foundation models.
@@ -37,8 +37,8 @@ banking foundation models.
   high-cardinality text fields with a frozen text encoder and reconstructs them
   with MSE; off by default, so the BPE path is byte-identical.
 - **AML over the transfer graph** — a GraphSAGE node classifier and the
-  three-way relational-recovery ablation (isolated embedding vs graph-aware node
-  features); see MODEL_CARD.md and `notebooks/04`.
+  five-arm relational-recovery ablation with isolated, graph-aware, no-graph,
+  and topology-only controls; see MODEL_CARD.md and `notebooks/04`.
 - **Inference & serving** — a batch embedder, integrated-gradients event
   attribution, ONNX export, a Triton serving image that installs pragmatiq, a
   turnkey `deploy_serving.sh`, monitoring (Prometheus + Grafana), and a Streamlit demo.

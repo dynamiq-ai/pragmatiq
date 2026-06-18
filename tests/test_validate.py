@@ -149,3 +149,26 @@ def test_transfers_self_loops_flagged(good_data: Path, tmp_path: Path) -> None:
                    tmp_path / "transfers.parquet")
     report = validate_dataset(tmp_path)
     assert any("self-loop" in w for w in report.warnings), report.summary()
+
+
+def test_forecast_label_missing_eval_ts_flagged(good_data: Path, tmp_path: Path) -> None:
+    import shutil
+
+    shutil.copytree(good_data, tmp_path, dirs_exist_ok=True)
+    labels = pq.read_table(good_data / "labels" / "default_12m.parquet")
+    idx = labels.schema.get_field_index("eval_ts")
+    bad = labels.remove_column(idx)
+    pq.write_table(bad, tmp_path / "labels" / "default_12m.parquet")
+    report = validate_dataset(tmp_path)
+    assert not report.ok
+    assert any("default_12m.parquet" in e and "eval_ts" in e for e in report.errors), report.summary()
+
+
+def test_unknown_label_table_warns(good_data: Path, tmp_path: Path) -> None:
+    import shutil
+
+    shutil.copytree(good_data, tmp_path, dirs_exist_ok=True)
+    shutil.copy(good_data / "labels" / "aml.parquet", tmp_path / "labels" / "custom.parquet")
+    report = validate_dataset(tmp_path)
+    assert report.ok, report.summary()
+    assert any("unknown label task" in w for w in report.warnings), report.summary()

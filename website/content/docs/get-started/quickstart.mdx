@@ -3,6 +3,9 @@ title: Quickstart
 description: Install pragmatiq and run the full pipeline — generate data, tokenize, pretrain, embed, and probe — in a few minutes on CPU.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 This runs the entire pragmatiq pipeline end to end on synthetic data, on CPU, in a few
 minutes. By the end you will have a trained model and a credit-risk probe score measured
 against a raw-count baseline — proof the embedding carries signal beyond trivial counts.
@@ -65,7 +68,7 @@ print(result["message"])
 
 1. **generate** synthetic users and event histories,
 2. **fit** the key–value–time tokenizer,
-3. **pretrain** a small masked-language model,
+3. **pretrain** a nano masked-language model,
 4. **embed** users,
 5. **probe** a gradient-boosting credit-risk classifier against a raw-count baseline.
 

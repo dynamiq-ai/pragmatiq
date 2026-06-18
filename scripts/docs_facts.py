@@ -95,11 +95,20 @@ def _gates() -> list[dict[str, str]]:
     gates = []
     for path in sorted((REPO / "scripts" / "gates").glob("gate_*.sh")):
         title = ""
+        fallback = ""
         for line in path.read_text().splitlines():
+            if line.startswith("#!"):
+                continue
             m = re.match(r"#\s*(Gate\s*\d+.*)", line)
             if m:
                 title = m.group(1).strip()
                 break
+            if not fallback:
+                m = re.match(r"#\s+(\S.*)", line)
+                if m:
+                    fallback = m.group(1).strip()
+        if not title:
+            title = fallback
         gates.append({"id": path.stem, "title": title})
     return gates
 

@@ -93,7 +93,7 @@ class LoRAFineTuner:
                      _epoch + 1, self.config.max_epochs, val_auc, max(best_auc, val_auc))
             if val_auc > best_auc + 1e-4:
                 best_auc, bad = val_auc, 0
-                best_state = {"head": self.head.state_dict(),
+                best_state = {"head": {k: v.detach().clone() for k, v in self.head.state_dict().items()},
                               "lora": {k: v.detach().clone() for k, v in self.model.state_dict().items()
                                        if "lora" in k}}
             else:

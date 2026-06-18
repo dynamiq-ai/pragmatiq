@@ -3,6 +3,9 @@ title: Model sizes
 description: The nano / small / medium / large presets and how to pick one.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 `ModelConfig.preset` defines four sizes. Depths are `(profile / event / history)` block
 counts; every block uses `ffn = 4·d` and dropout 0.1. The table is rendered from the code:
 

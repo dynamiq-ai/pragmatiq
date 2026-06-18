@@ -152,13 +152,15 @@ def embed_cmd(
 def quickstart_cmd(
     out: Path = typer.Option(Path("runs/quickstart"), help="Output directory."),
     n_users: int = typer.Option(50000, help="Synthetic users."),
+    model_size: str = typer.Option("nano", help="Model size for the smoke run."),
     max_steps: int = typer.Option(400, help="Pretrain steps."),
     n_workers: int = typer.Option(0, help="Generation workers."),
 ) -> None:
     """End-to-end smoke: synth -> tokenize -> pretrain -> probe (prints AUC)."""
     from pragmatiq import api
 
-    res = api.quickstart(out=out, n_users=n_users, max_steps=max_steps, n_workers=n_workers)
+    res = api.quickstart(out=out, n_users=n_users, model_size=model_size,
+                         max_steps=max_steps, n_workers=n_workers)
     typer.echo(json.dumps(res, indent=2))
     typer.echo(res["message"])
 
@@ -210,7 +212,7 @@ def gnn_cmd(
     epochs: int = typer.Option(150, help="GraphSAGE epochs."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
-    """Run the three-way AML GNN ablation (isolated vs GNN+PRAGMA vs GNN+handcrafted)."""
+    """Run the five-arm AML GNN ablation over transfer-graph controls."""
     from pragmatiq import api
 
     seed_tuple = tuple(int(s) for s in seeds.split(","))

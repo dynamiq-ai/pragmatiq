@@ -47,7 +47,7 @@ const SAMPLES: Sample[] = [
   {
     id: 'transfer',
     label: 'P2P transfer',
-    source: 'transfer',
+    source: 'transaction',
     delta: '8·ln(1+Δt/8) ≈ 7.8',
     fields: [
       { key: 'amount', value: '250.00', kind: 'numeric', repr: 'bucket 55 / 64' },

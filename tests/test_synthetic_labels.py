@@ -7,7 +7,7 @@ import pytest
 
 from pragmatiq.data.synthetic.calibrate import calibrate_config
 from pragmatiq.data.synthetic.config import WorldConfig
-from pragmatiq.data.synthetic.labels import LabelOracle
+from pragmatiq.data.synthetic.labels import DAY_US, LabelOracle
 from pragmatiq.data.synthetic.simulator import UserSimulator
 from pragmatiq.data.synthetic.world import World, user_rng
 
@@ -98,6 +98,12 @@ class TestOracle:
             tr, rng = _trace(world, u)
             rows = oracle.label_user(tr, rng)
             assert rows.aml[0][2] == int(world.episodes.mule_member[u])
+
+    def test_aml_observed_through_is_full_horizon(self, world: World) -> None:
+        oracle = LabelOracle(world)
+        tr, rng = _trace(world, 0)
+        rows = oracle.label_user(tr, rng)
+        assert rows.aml[0][1] == world.calendar.start_us() + world.calendar.n_days * DAY_US
 
     def test_uplift_outcomes_monotone(self, world: World) -> None:
         oracle = LabelOracle(world)

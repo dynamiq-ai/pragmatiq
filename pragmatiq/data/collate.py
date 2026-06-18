@@ -11,9 +11,9 @@ The event encoder attends within each ``cu_seqlens_event`` segment; the history
 encoder attends within each ``cu_seqlens_history`` segment. Profile items are
 carried in their own flat arrays with ``cu_seqlens_profile``.
 
-Within-segment attention is what lets the CPU SDPA fallback match a flash-attn
-varlen forward exactly (global rule 5). The model does this by scattering each
-segment into a padded block and masking the padding keys (see
+Within-segment attention is what gives the CPU SDPA fallback and CUDA flash-attn
+path the same masking semantics (global rule 5). The SDPA fallback scatters each
+segment into a padded block and masks the padding keys (see
 ``pragmatiq/models/layers.py``); :func:`block_diag_mask` is an equivalent dense
 formulation used by the padding-equivalence test.
 """
@@ -107,8 +107,9 @@ class PackedBatch:
 def block_diag_mask(cu_seqlens: torch.Tensor, total_len: int) -> torch.Tensor:
     """Additive attention mask (0 within a segment, -inf across) from cu_seqlens.
 
-    Used by the SDPA fallback so a packed forward matches a flash-attn varlen
-    forward. ``cu_seqlens`` is int32 of shape ``[n_segments + 1]``.
+    Used by the SDPA fallback so packed segments have the same attention scope as
+    a flash-attn varlen forward. ``cu_seqlens`` is int32 of shape
+    ``[n_segments + 1]``.
     """
     seg = segment_ids(cu_seqlens, total_len)
     same = seg[:, None] == seg[None, :]

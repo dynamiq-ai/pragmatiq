@@ -3,6 +3,9 @@ title: Serve with Triton
 description: Build the serving image, boot Triton with a trained run, and embed records over HTTP — default model or Nemotron variant.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 The production serving path is a **Triton python backend running the native varlen PyTorch
 model** — the exact no-padding forward used in training, not an approximation.
 

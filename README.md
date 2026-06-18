@@ -81,7 +81,7 @@ pip install -e ".[dev]"
 
 1. generate synthetic users and event histories,
 2. fit the key-value-time tokenizer,
-3. pretrain a small masked-language model,
+3. pretrain a nano masked-language model,
 4. embed users,
 5. run a gradient-boosting credit-risk probe against a raw-count baseline.
 
@@ -280,7 +280,7 @@ pragmatiq trains on a small parquet contract — four files, strict dtypes
 | `events.parquet` | `user_id` (string), `ts` (timestamp[us]), `source` (string), `fields` (map<string,string>) |
 | `profiles.parquet` | `user_id` (string), `as_of` (timestamp[us]), `attributes` (map<string,string>), `lifelong` (list<struct<key: string, ts: timestamp[us]>>) |
 | `transfers.parquet` | optional, for the AML GNN; `from_user`, `to_user` (string), `ts` (timestamp[us]), `amount` (float64) |
-| `labels/*.parquet` | optional task tables: `user_id` (string), `eval_ts` (timestamp[us]), `label` (int8) |
+| `labels/*.parquet` | optional task tables: forecast labels use `user_id` (string), `eval_ts` (timestamp[us]), `label` (int8); AML membership uses `user_id`, `observed_through` (timestamp[us]), `label` (int8) |
 
 The subsections below walk through producing each file from a typical bank
 data warehouse.
@@ -347,7 +347,7 @@ FROM dwh.customers c;
 `transfers.parquet` is the directed money-flow edge list consumed by the
 [AML GNN](#aml-over-the-transfer-graph) — only needed for graph experiments.
 
-Label tables are `(user_id, eval_ts, label)`:
+Forecast label tables are `(user_id, eval_ts, label)`:
 
 ```sql
 CREATE TABLE export.labels_default_12m AS
@@ -362,7 +362,8 @@ their `eval_ts` before embedding, so the embedding only sees what the bank knew
 at decision time and the reported AUC is a genuine forecast, not a hindcast on
 data that already contains the outcome. The AML task is the deliberate
 exception: mule detection is membership classification over observed activity,
-so it uses the full horizon (see [`MODEL_CARD.md`](MODEL_CARD.md)).
+so `labels/aml.parquet` uses `(user_id, observed_through, label)` and the full
+horizon rather than a forecast cut (see [`MODEL_CARD.md`](MODEL_CARD.md)).
 
 ### Validate, tokenize, pretrain
 
@@ -604,8 +605,7 @@ Money laundering through mule rings is a **relational** problem: a mule is
 defined by who they transact with (fan-in of small credits, layering inside
 the ring, shared cash-out), not only by their own behavior. pragmatiq ships a
 transfer-graph extension that tests exactly how much of that signal a graph
-recovers. It needs the `gnn` extra (`pip install "pragmatiq[gnn]"` for
-torch-geometric).
+recovers. The AML GNN path is part of the core install.
 
 ### The pieces
 
@@ -624,38 +624,40 @@ torch-geometric).
   classification (with residual conv layers), because without it the stack
   over-smooths and loses the per-user signal an isolated probe already has.
 
-### The four-arm ablation
+### The five-arm ablation
 
-`pragmatiq gnn` (and `api.gnn`) runs four setups on identical, stratified
+`pragmatiq gnn` (and `api.gnn`) runs five setups on identical, stratified
 train/val/test splits shared across arms, over multiple seeds:
 
 | Arm | Features | Graph? | Question it answers |
 | --- | --- | --- | --- |
 | (a) | pragmatiq embeddings | no — logistic probe | How far does a per-user embedding get alone? |
 | (b) | pragmatiq embeddings | GraphSAGE | Does the transfer graph add to rich learned features? |
-| (c) | hand-crafted node stats (degree, volume) | GraphSAGE | What does a fraud analyst's baseline + a graph achieve? |
+| (c) | hand-crafted node stats (degree, volume) | GraphSAGE + edge attributes | What does a fraud analyst's baseline + a graph achieve? |
 | (d) | same hand-crafted stats | no — logistic control | Is the graph effect real, or just the features? |
+| (e) | same hand-crafted stats | topology-only GraphSAGE | Do transfer amount/recency attributes add beyond adjacency? |
 
 The synthetic mule rings are **multi-hop layered laundering chains**. Money mules
 are modeled as *ordinary recruited accounts* with no distinctive individual
 behavior, and their amounts and counterparty degree are drawn to **match ordinary
-accounts** — so 1-hop degree is *not* a trivial oracle (`(d)`, a degree-only
-logistic baseline, reaches only `0.604`). The laundering legs are written to the
+accounts** — so 1-hop degree is *not* a trivial oracle. The laundering legs are written to the
 transfer ledger (`transfers.parquet`), **not** the card-event stream; the
 discriminative signal is the multi-hop layering chain in that ledger.
 
 **The gated claim — relational recovery (true and robust).** A GraphSAGE over the
 transfer graph recovers money-mule rings that a probe on the isolated per-user
-embedding cannot: `(c) 0.670 ≫ (a) 0.498`, so the AML signal lives in the
-multi-hop transfer structure an isolated embedding misses. Message passing adds
-over the same features without a graph (`(c) 0.670 > (d) 0.604`). This is what
-`gate_6` gates, at both CI and full scale.
+embedding cannot: `(c) > (a)`, so the AML signal lives in the
+multi-hop transfer structure an isolated embedding misses. This is what `gate_6`
+gates, at both CI and full scale.
+
+The `(e)` topology-only control is reported separately so transfer amount/recency
+attributes have their own measured contribution beyond adjacency and message
+passing (`edge_attributes_add = (c) > (e)`).
 
 **Reported, not gated — the honest limitation.** The learned per-user embedding
-adds only a little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does
-**not** beat hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated
-embedding sits near chance, so the model does not capture the multi-hop laundering
-signal in the per-user representation; recovering it in a learned representation
+ordering, no-graph control, and edge-attribute contribution are reported rather
+than gated. The isolated embedding is expected to be weak on this relational
+task, so recovering the multi-hop laundering signal in a learned representation
 is the **open challenge**. This is consistent with the PRAGMA paper's own
 observation that AML is a setting where the model underperforms because it
 processes user histories in isolation — the GNN here is pragmatiq's honest
@@ -666,7 +668,7 @@ extension that probes that gap, not a "the learned embedding wins" result. See
 ### Running it
 
 ```bash
-pip install -e ".[gnn]"
+pip install -e .
 pragmatiq gnn data/tokenized --run runs/demo \
   --transfers data/synth/transfers.parquet \
   --aml-label data/synth/labels/aml.parquet \
@@ -681,26 +683,17 @@ version of the same experiment.
 ### Latest results
 
 The table below is **auto-written** by `write_aml_report` in
-[`pragmatiq/models/gnn.py`](pragmatiq/models/gnn.py) on a passing full run
-(opt-in via `PRAGMATIQ_WRITE_RESULTS=1`). Generated tables carry a provenance
+[`pragmatiq/models/gnn.py`](pragmatiq/models/gnn.py) on a passing full Gate 6 run.
+Generated tables carry a provenance
 stamp (node/edge/mule counts, seeds, epochs, git commit), and the writer
 refuses to overwrite a larger-scale result with a smaller-scale one — a
-CI-scale run can never masquerade as a full-scale result.
+CI-scale run can never masquerade as a full-scale result. Set
+`PRAGMATIQ_WRITE_RESULTS=1` to capture a CI-scale diagnostic table explicitly.
 
 <!-- AML_ABLATION_RESULTS -->
 
-| setup | ROC-AUC (mean ± std over seeds) |
-| --- | --- |
-| (a) probe on isolated pragmatiq embeddings | 0.498 ± 0.010 |
-| (b) GraphSAGE over transfers + pragmatiq features | 0.554 ± 0.026 |
-| (c) GraphSAGE + hand-crafted node features | 0.670 ± 0.014 |
-| (d) control: logistic regression on the same hand-crafted features, no graph | 0.604 ± 0.028 |
-
-**Relational recovery (gated): True** — a GraphSAGE over the transfer graph recovers money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = True), so the AML signal lives in the multi-hop transfer structure an isolated per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over the same features without a graph ((c) > (d) = True). The gate requires both.
-
-**Reported, not gated:** the learned per-user embedding adds a little over the isolated probe ((b) > (a) = True) but does not beat hand-crafted features ((b) > (c) = False). The isolated embedding sits near chance, so on this synthetic book the model does not capture the multi-hop laundering signal on its own — recovering it in a learned per-user representation is the open challenge (see MODEL_CARD.md).
-
-<sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2], epochs=150, commit=a263737</sub>
+Run a full Gate 6 validation to populate this section with the five-arm table
+and provenance stamp.
 
 ## Model sizes
 

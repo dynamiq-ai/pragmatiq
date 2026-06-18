@@ -74,8 +74,9 @@ $E(\text{key}) + E(\text{value}) + \text{pos}$ gives per-token vectors. Then:
    slot output **is the user embedding**.
 
 All three encoders are bidirectional, pre-norm, GELU, with $\text{ffn} = 4d$ and dropout 0.1.
-The whole batch is packed **without padding** using `cu_seqlens`, so the CPU SDPA fallback
-matches a flash-attn varlen forward exactly.
+The whole batch is packed **without padding** using `cu_seqlens`. The CPU SDPA fallback
+is checked against a naive padded reference; CUDA flash-attn uses fp16/bf16 kernels and
+is validated at lower-precision tolerances during GPU runs.
 
 ## Pretraining objective
 
@@ -110,7 +111,7 @@ At synthetic scale none of these bind, so default output is unchanged:
 The core representation above — key–value–time tokenization, the time transform, continuous
 TimeRoPE, the encoder stack, the 3d MLM head, the masking scheme, and the Nemotron variant —
 follows the PRAGMA paper. The **AML transfer-graph GraphSAGE work**
-([AML over the graph](/docs/concepts/architecture)) is pragmatiq's own extension, built
+([AML over the graph](/docs/concepts/aml-graph)) is pragmatiq's own extension, built
 standalone on top of these embeddings — see [AML over the transfer graph](/docs/concepts/aml-graph);
 so are the synthetic data generator and the `nano` size. <Badge variant="ours">Our addition</Badge>
 

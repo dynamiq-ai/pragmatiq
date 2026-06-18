@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import shutil
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +17,14 @@ from pragmatiq.inference.benchmark import benchmark_batch_embed, perf_analyzer_c
 from pragmatiq.inference.embedder import BatchEmbedder
 from pragmatiq.inference.explain import EventAttributor
 from pragmatiq.models.pragmatiq import PragmaModel
+
+
+def _set_tokenizer_state_hash(tok_dir: Path, state: dict) -> None:
+    blob = json.dumps(state, sort_keys=True).encode()
+    bpe_path = tok_dir / "bpe.json"
+    if bpe_path.exists():
+        blob += bpe_path.read_text().encode()
+    (tok_dir / "tokenizer.hash").write_text(hashlib.sha256(blob).hexdigest())
 
 
 @pytest.fixture(scope="module")
@@ -75,6 +86,123 @@ class TestBatchEmbedder:
         assert stats["users_per_sec"] > 0
         assert stats["tokens_per_sec"] > 0
         assert "pragmatiq_embedder" in perf_analyzer_command()
+
+
+class TestApiTokenizerCompatibility:
+    @pytest.fixture()
+    def mismatched_tok(self, trained, tmp_path: Path) -> Path:
+        work, _run_dir = trained
+        dst = tmp_path / "tok_mismatch"
+        shutil.copytree(work / "tok", dst)
+        tok_dir = dst / "tokenizer"
+        state_path = tok_dir / "tokenizer.json"
+        state = json.loads(state_path.read_text())
+        state["config"]["calendar_tz"] = "Europe/London"
+        state_path.write_text(json.dumps(state, sort_keys=True))
+        _set_tokenizer_state_hash(tok_dir, state)
+        return dst
+
+    @pytest.fixture()
+    def stale_manifest_tok(self, trained, tmp_path: Path) -> Path:
+        work, _run_dir = trained
+        dst = tmp_path / "tok_stale_manifest"
+        shutil.copytree(work / "tok", dst)
+        manifest_path = dst / "shard_manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["tokenizer_hash"] = "not_the_training_tokenizer"
+        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True))
+        return dst
+
+    def test_embed_uses_live_tokenizer_hash_not_stale_manifest(
+        self, trained, stale_manifest_tok: Path, monkeypatch
+    ) -> None:
+        _work, run_dir = trained
+
+        def fake_embed_users(model, dataset, **kwargs):  # noqa: ANN001, ANN003
+            return {"u0": np.zeros(model.config.dim, dtype=np.float32)}
+
+        monkeypatch.setattr("pragmatiq.training.probe.embed_users", fake_embed_users)
+        dim = PragmaModel.from_pretrained(run_dir).config.dim
+        assert api.embed(stale_manifest_tok, run_dir) == {"n_users": 1, "dim": dim}
+
+    def test_embed_rejects_mismatched_shards_before_embedding(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        _work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("embed_users should not run before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.training.probe.embed_users", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.embed(mismatched_tok, run_dir)
+
+    def test_probe_rejects_mismatched_shards_before_embedding(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("probe embedding should not run before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.training.probe.embed_users", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.probe(mismatched_tok, run_dir, work / "raw" / "labels" / "default_12m.parquet")
+
+    def test_finetune_rejects_mismatched_shards_before_training(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("finetune should not start before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.training.finetuner.LoRAFineTuner.fit", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.finetune(mismatched_tok, run_dir, work / "raw" / "labels" / "default_12m.parquet")
+
+    def test_export_rejects_mismatched_shards_before_export(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        _work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("export should not run before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.inference.export.export_onnx", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.export(run_dir, mismatched_tok)
+
+    def test_benchmark_rejects_mismatched_shards_before_benchmark(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        _work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("benchmark should not run before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.inference.benchmark.benchmark_batch_embed", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.benchmark(run_dir, mismatched_tok)
+
+    def test_gnn_rejects_mismatched_shards_before_embedding(
+        self, trained, mismatched_tok: Path, monkeypatch
+    ) -> None:
+        work, run_dir = trained
+
+        def guard_missing(*args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("gnn embedding should not run before tokenizer compatibility is checked")
+
+        monkeypatch.setattr("pragmatiq.training.probe.embed_users", guard_missing)
+        with pytest.raises(ValueError, match="tokenizer hash mismatch"):
+            api.gnn(
+                mismatched_tok,
+                run_dir,
+                work / "raw" / "transfers.parquet",
+                work / "raw" / "labels" / "aml.parquet",
+                seeds=(0,),
+                epochs=1,
+            )
 
 
 class TestEventAttributor:

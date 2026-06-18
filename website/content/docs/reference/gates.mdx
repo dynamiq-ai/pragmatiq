@@ -3,6 +3,9 @@ title: Acceptance gates
 description: pragmatiq's acceptance gates — what each asserts and how to run it.
 ---
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
 pragmatiq ships an **acceptance gate** for each major component — an executable script
 under [`scripts/gates/`](https://github.com/dynamiq-ai/pragmatiq/tree/main/scripts/gates)
 that runs the real pipeline and asserts the property that component promises. They are the
@@ -15,7 +18,7 @@ reproducible contract: end-to-end integration checks you can run yourself.
 | `gate_3` | Sharding + varlen collation — packed (varlen) attention ≡ padded attention. |
 | `gate_4` | Model — the encoder stack and tied MLM head match the documented architecture. |
 | `gate_5` | End-to-end training — the probe beats the same-classifier raw-count baseline. |
-| `gate_6` | AML GNN ablation — a graph over transfers recovers signal an isolated probe misses. |
+| `gate_6` | AML GNN ablation — a graph over transfers recovers signal an isolated probe misses, with no-graph and topology-only controls. |
 | `gate_7` | Inference / serving / demo. |
 | `gate_8` | Polish — nano end-to-end on CPU, validation, packaging + attribution. |
 

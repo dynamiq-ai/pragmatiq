@@ -16,7 +16,7 @@ FULL=${PRAGMATIQ_GATE_FULL:-0}
 
 if [ "${PRAGMATIQ_GATE_SKIP_UNIT:-0}" != "1" ]; then
   echo "=== training unit tests (optim / pretrainer / probe / finetune) ==="
-  $PY -m pytest tests/test_training.py -q
+  $PY -m pytest tests/test_training.py tests/test_finetuner.py -q
 else
   echo "=== training unit tests: SKIPPED (PRAGMATIQ_GATE_SKIP_UNIT=1) ==="
 fi

@@ -124,6 +124,14 @@ class TestAmlGNN:
         out = model(x, edge_index)
         assert out.shape == (20, 2)
 
+    def test_rejects_mismatched_edge_attr_shape(self) -> None:
+        x = torch.randn(20, 16)
+        edge_index = torch.randint(0, 20, (2, 60))
+        edge_attr = torch.randn(59, 2)
+        model = AmlGNN(16, hidden=32, n_layers=2)
+        with pytest.raises(ValueError, match="edge_attr shape"):
+            model(x, edge_index, edge_attr)
+
     def test_three_layers(self) -> None:
         model = AmlGNN(8, hidden=16, n_layers=3)
         out = model(torch.randn(10, 8), torch.randint(0, 10, (2, 30)))
@@ -132,6 +140,32 @@ class TestAmlGNN:
     def test_rejects_bad_depth(self) -> None:
         with pytest.raises(ValueError):
             AmlGNN(8, n_layers=1)
+
+    def test_edge_attributes_change_logits_when_enabled(self) -> None:
+        torch.manual_seed(0)
+        x = torch.randn(8, 6)
+        edge_index = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7],
+                                   [1, 2, 3, 4, 5, 6, 7, 0]])
+        edge_attr_a = torch.zeros(edge_index.shape[1], 2)
+        edge_attr_b = torch.ones(edge_index.shape[1], 2)
+        model = AmlGNN(6, hidden=12, n_layers=2, dropout=0.0, use_edge_attr=True)
+        model.eval()
+        out_a = model(x, edge_index, edge_attr_a)
+        out_b = model(x, edge_index, edge_attr_b)
+        assert not torch.allclose(out_a, out_b), "amount/recency edge attributes should affect logits"
+
+    def test_topology_only_mode_ignores_edge_attributes(self) -> None:
+        torch.manual_seed(0)
+        x = torch.randn(8, 6)
+        edge_index = torch.tensor([[0, 1, 2, 3, 4, 5, 6, 7],
+                                   [1, 2, 3, 4, 5, 6, 7, 0]])
+        edge_attr_a = torch.zeros(edge_index.shape[1], 2)
+        edge_attr_b = torch.ones(edge_index.shape[1], 2)
+        model = AmlGNN(6, hidden=12, n_layers=2, dropout=0.0, use_edge_attr=False)
+        model.eval()
+        out_a = model(x, edge_index, edge_attr_a)
+        out_b = model(x, edge_index, edge_attr_b)
+        assert torch.allclose(out_a, out_b)
 
 
 class TestAblationPlumbing:
@@ -144,9 +178,10 @@ class TestAblationPlumbing:
         emb = _fake_embeddings(list(labels), dim=24)
         res = run_aml_ablation(dataset / "transfers.parquet", emb, labels, seeds=(0,), epochs=20)
         assert set(res["per_setup"]) == {"a_isolated", "b_gnn_pragma", "c_gnn_handcrafted",
-                                         "d_lr_handcrafted"}
+                                         "d_lr_handcrafted", "e_gnn_handcrafted_topology"}
         assert "verdict" in res and "pass" in res["verdict"]
         assert "message_passing_adds" in res["verdict"]  # no-graph control arm
+        assert "edge_attributes_add" in res["verdict"]  # topology-only control arm
         for setup in res["per_setup"].values():
             assert 0.0 <= setup["mean"] <= 1.0
 
@@ -159,15 +194,18 @@ class TestAblationPlumbing:
                 "b_gnn_pragma": {"mean": 0.85, "std": 0.03},
                 "c_gnn_handcrafted": {"mean": 0.78, "std": 0.04},
                 "d_lr_handcrafted": {"mean": 0.74, "std": 0.03},
+                "e_gnn_handcrafted_topology": {"mean": 0.76, "std": 0.03},
             },
             "raw": {"a_isolated": [0.70, 0.71, 0.69]},
             "verdict": {"b_beats_a": True, "c_beats_a": True, "b_beats_c": True,
                         "paper_ordering": True, "message_passing_adds": True,
+                        "edge_attributes_add": False,
                         "graph_recovers_signal": True, "pragma_competitive": True, "pass": True},
             "n_nodes": 3000, "n_mules": 40, "n_edges": 1200, "seeds": [0, 1, 2], "epochs": 150,
         }
         md = aml_results_markdown(res)
         assert "0.850" in md and "ROC-AUC" in md and "(b) > (c) = True" in md
+        assert "topology-only" in md
         assert "provenance: n_nodes=3000" in md  # tables are provenance-stamped
         readme = tmp_path / "README.md"
         readme.write_text("# x\n\n## Results\n\n<!-- AML_ABLATION_RESULTS -->\n\nold\n\n## Next\n")
