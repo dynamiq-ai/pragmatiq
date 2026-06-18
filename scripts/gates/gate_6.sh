@@ -1,24 +1,21 @@
 #!/usr/bin/env bash
-# AML GNN ablation — does the learned embedding + transfer graph recover money-
-# mule rings that a per-user embedding (and a hand-crafted-degree baseline) miss?
+# AML GNN ablation — relational recovery of money-mule rings over the transfer graph.
 #
 #   Four arms on synthetic AML (multi-hop laundering chains), 3 seeds:
 #     (a) probe on isolated pragmatiq embeddings        — no graph
-#     (b) GraphSAGE over transfers + pragmatiq features  — the learned-embedding claim
+#     (b) GraphSAGE over transfers + pragmatiq features  — learned-embedding arm
 #     (c) GraphSAGE + hand-crafted node features         — analyst baseline
 #     (d) logistic regression on the same features       — no-graph control
 #   The rings are designed so 1-hop degree is NOT a mule oracle; the discriminative
-#   signal is multi-hop and behavioral. Two tiers of claim:
-#     - Mechanism (gated at CI scale, where nano undertrains): the graph recovers
-#       relational signal an isolated probe misses (c > a) and message passing adds
-#       over the same features without a graph (c > d).
-#     - Headline (gated at full scale, with real training): the learned embedding +
-#       graph beats both the isolated probe and the hand-crafted-feature graph
-#       (b > a and b > c), with (c) sitting between.
-#   See notebooks/04_aml_gnn.ipynb and MODEL_CARD.md for the full discussion.
+#   signal is multi-hop and behavioral. The GATED claim (both scales) is relational
+#   recovery: a graph over the transfer structure recovers signal an isolated probe
+#   misses (c > a), and message passing adds over the same features without a graph
+#   (c > d). The learned-embedding ordering (b > a, b > c) is REPORTED, not gated —
+#   on degree/volume-matched synthetic mules the per-user embedding does not beat
+#   hand-crafted features (b < c). See notebooks/04_aml_gnn.ipynb and MODEL_CARD.md.
 #
 #   Default (CI) uses a modest population + nano model; PRAGMATIQ_GATE_FULL=1
-#   scales up (small model, real training) to certify the headline.
+#   scales up (small model, real training) for tighter numbers.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
