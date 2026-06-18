@@ -1,0 +1,46 @@
+---
+title: Configuration
+description: Every tokenizer and training knob, with its default — rendered straight from the code so it never drifts.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+These tables are generated from the dataclasses in the library (via
+`scripts/docs_facts.py`), so the defaults shown here are exactly the code's defaults. Any
+knob can be overridden in a YAML config (`--config`) or programmatically
+(`api.pretrain(..., key=value)`).
+
+## Tokenizer (`TokenizerConfig`)
+
+Passed to `pragmatiq tokenize --config` / `api.tokenize(config=...)`. See also
+[`configs/data/tokenizer.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/configs/data/tokenizer.yaml).
+
+<ParamTable config="tokenizer_config" />
+
+The last three rows are the [PRAGMA+Nemotron variant](/docs/concepts/architecture) switch:
+set `text_value_mode="embed"` and `text_encoder="nemotron"` (the
+[`configs/data/tokenizer_nemotron.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/configs/data/tokenizer_nemotron.yaml)
+preset) and `pretrain` auto-wires the matching model branch.
+
+## Training (`TrainConfig`)
+
+Passed to `pragmatiq pretrain --config` / `api.pretrain(config=...)`. See also
+[`configs/pretrain.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/configs/pretrain.yaml).
+
+<ParamTable config="train_config" />
+
+A few that matter most for scale and reproducibility:
+
+- `token_budget` — tokens per packed forward (the per-device memory knob).
+- `grad_accum_steps` — micro-batches per optimizer step; effective batch is
+  `token_budget × grad_accum × num_nodes·devices`. `1` is byte-identical to no accumulation.
+- `devices` / `num_nodes` — Fabric DDP across GPUs and hosts.
+- `deterministic` — opt-in reproducible CUDA path (fp32, see [Determinism](/docs/concepts/architecture)).
+- `seed` — same seed → byte-identical CPU output.
+
+<Callout type="info" title="Auto-config">
+Pass `config="auto"` to `pretrain` and pragmatiq sizes `token_budget`, `grad_accum_steps`,
+`max_steps`, and `warmup_steps` from the shard index and the target device. Explicit
+overrides still win.
+</Callout>

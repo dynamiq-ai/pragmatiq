@@ -1,0 +1,70 @@
+---
+title: Serve with Triton
+description: Build the serving image, boot Triton with a trained run, and embed records over HTTP — default model or Nemotron variant.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+The production serving path is a **Triton python backend running the native varlen PyTorch
+model** — the exact no-padding forward used in training, not an approximation.
+
+<Steps>
+
+<Step>
+
+### One-command deploy + smoke
+
+```bash
+pragmatiq pretrain data/tok --name demo            # any trained run works
+bash scripts/deploy_serving.sh --run runs/demo     # default model
+bash scripts/deploy_serving.sh --run runs/nemo --variant nemotron   # Nemotron variant
+```
+
+[`scripts/deploy_serving.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/deploy_serving.sh)
+builds the image, boots `tritonserver` with your run mounted (GPU auto-detected), waits for
+readiness, sends a real embedding request, and verifies the `[n_users, dim]` response.
+
+</Step>
+
+<Step>
+
+### The full stack
+
+```bash
+export PRAGMATIQ_RUN=$PWD/runs/demo
+docker compose -f deploy/docker-compose.yaml up -d --build
+```
+
+The Triton service **builds** from [`deploy/triton/Dockerfile`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/Dockerfile),
+which installs pragmatiq into Triton's Python (the stock image can't import the model) while
+leaving the image's CUDA torch untouched. The compose stack also brings up Prometheus,
+Grafana, and the Streamlit demo. Add `PRAGMATIQ_TRITON_EXTRAS=nemotron` for the Nemotron
+variant.
+
+</Step>
+
+<Step>
+
+### Request format
+
+One request carries a JSON array of plain user records — the same dicts `embed_records`
+accepts; the response is the `[n_users, dim]` fp32 matrix. Batching happens **inside** the
+model (the varlen forward packs all users with no padding).
+
+```bash
+curl -s localhost:8000/v2/models/pragmatiq_embedder/infer \
+  -H 'Content-Type: application/json' -d @- <<'JSON'
+{ "inputs": [{
+    "name": "records_json", "shape": [1], "datatype": "BYTES",
+    "data": ["[{\"user_id\":\"u1\",\"events\":[{\"ts\":1718200000000000,\"source\":\"transaction\",\"fields\":{\"amount\":\"42.50\",\"merchant\":\"TESCO\"}}],\"attributes\":{\"country\":\"GB\"},\"lifelong\":[]}]"]
+}]}
+JSON
+```
+
+Unseen keys/values map to `[UNK]` with a logged warning — serving never raises on vocabulary
+drift. An ONNX export (`.[serve]`) is available as a portable dense alternative.
+
+</Step>
+
+</Steps>

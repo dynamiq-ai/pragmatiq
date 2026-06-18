@@ -1,0 +1,49 @@
+---
+title: Reproducibility & determinism
+description: Seeds, byte-identical CPU output, the deterministic GPU path, and the gates — what reproduces exactly and what does not.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+Reproducibility is the throughline of pragmatiq, because a bank replicating it needs to trust
+that a run is a run. Here is exactly what is guaranteed.
+
+## CPU is byte-identical
+
+From a fixed seed, **CPU runs are byte-identical** — weight init, dropout, the masking stream,
+and shard/worker output are all seeded. The synthetic generator's determinism and the
+training resume are CI-enforced:
+
+- The generator produces byte-identical output for **any worker count** (same seed).
+- The tokenizer fit is **worker-count-invariant**.
+- An interrupted run resumed mid-flight reproduces the **exact** batch and masking stream of an
+  uninterrupted one — checkpoints capture the model, both optimizers, the scheduler, the
+  sampler position, all RNG states, the tokenizer hash, and the resolved config.
+
+## CPU vs GPU, and the deterministic path
+
+GPU kernels use a different reduction order, so **CPU and GPU outputs are never bit-identical
+to each other** — pick one target and compare against itself.
+
+<DecisionCard
+  title="An opt-in deterministic GPU path, off by default"
+  why="bf16 backward on CUDA has no deterministic implementation upstream, so a reproducible GPU run must train in fp32. That has a throughput cost most runs shouldn't pay, so it is a flag (deterministic: true), not the default."
+  alternative="Always-on determinism (forces fp32 everywhere, slower) or never (no reproducible GPU runs at all)."
+/>
+
+With `deterministic: true`: the GPU forward/embedding is reproducible run-to-run on fixed
+hardware, and GPU training is bit-exact in fp32. Gradient-accumulation `grad_accum_steps=1` is
+byte-identical to no accumulation, and the Nemotron variant off is byte-identical to a build
+without it.
+
+## The gates are the contract
+
+The [acceptance gates](/docs/reference/gates) run the real pipeline and assert each
+component's property — they are the executable, reproducible definition of "working".
+
+## Environment
+
+pragmatiq requires **Python 3.11+**. Use a virtual environment (`pip install -e ".[dev]"`),
+and run the dev commands (`pytest`, `ruff`, `mypy`) from it. The CI runs the same tools, so a
+green local run matches CI.

@@ -1,0 +1,51 @@
+# Triton config for the pragmatiq embedder. This file sits at the model root; the
+# implementation lives in the version subdirectory `1/model.py` (Triton's model
+# repository requires <model>/<version>/<file>, and serves the highest version).
+# Python backend running the native varlen PyTorch model — the high-throughput
+# path (no padding); the ONNX export is the portable dense reformulation.
+# Batching is handled INSIDE the model: one request carries a JSON array of many
+# users and the varlen forward packs them with no padding (the production-faithful
+# path). Triton's own dynamic_batching requires max_batch_size >= 1 with
+# stackable, fixed-shape per-request tensors — incompatible with our ragged
+# [n_users, dim] output — so we set max_batch_size: 0 and batch in-model. The
+# 2-instance group below provides request-level concurrency; to use Triton
+# dynamic batching instead, switch to one-user-per-request with a fixed [dim]
+# output and set max_batch_size + dynamic_batching { max_queue_delay_microseconds: 2000 }.
+name: "pragmatiq_embedder"
+backend: "python"
+max_batch_size: 0
+
+input [
+  {
+    name: "records_json"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+output [
+  {
+    name: "embeddings"
+    data_type: TYPE_FP32
+    dims: [ -1, -1 ]   # [n_users, dim]
+  }
+]
+
+instance_group [
+  {
+    # CPU-first (global rule 5): the stack must boot on a CPU-only host, so the
+    # committed default is KIND_CPU. The python backend selects its compute
+    # device in 1/model.py: it runs on CUDA when PRAGMATIQ_SERVE_GPU=1 is set in
+    # the container environment and a GPU is visible (the path the deploy script
+    # takes when nvidia-smi is present), and on CPU otherwise. Setting kind to
+    # KIND_GPU here is also honored and pins each instance to its assigned GPU.
+    count: 2
+    kind: KIND_CPU
+  }
+]
+
+parameters [
+  {
+    key: "run_dir"
+    value: { string_value: "/models/run" }
+  }
+]

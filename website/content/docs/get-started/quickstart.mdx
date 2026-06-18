@@ -1,0 +1,110 @@
+---
+title: Quickstart
+description: Install pragmatiq and run the full pipeline — generate data, tokenize, pretrain, embed, and probe — in a few minutes on CPU.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+This runs the entire pragmatiq pipeline end to end on synthetic data, on CPU, in a few
+minutes. By the end you will have a trained model and a credit-risk probe score measured
+against a raw-count baseline — proof the embedding carries signal beyond trivial counts.
+
+<Callout title="Requirements">
+Python **3.11+**. A GPU is optional — everything runs on CPU (slower but correct). The
+commands below use a virtual environment so the install is isolated.
+</Callout>
+
+<Steps>
+
+<Step>
+
+### Install
+
+```bash
+git clone https://github.com/dynamiq-ai/pragmatiq.git
+cd pragmatiq
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+The full pipeline (including the AML graph) works with the plain install. Optional
+extras add focused tooling: `.[serve]` for ONNX/Triton export, `.[extras]` for the
+frozen text embedder and experiment tracking, `.[demo]` for the Streamlit app, and
+`.[full]` for all of them.
+
+</Step>
+
+<Step>
+
+### Run the whole pipeline
+
+<Tabs items={['CLI', 'Python']}>
+
+<Tab value="CLI">
+
+```bash
+pragmatiq quickstart
+# smaller/faster local smoke:
+pragmatiq quickstart --n-users 2000 --max-steps 80
+```
+
+</Tab>
+
+<Tab value="Python">
+
+```python
+from pragmatiq import api
+
+result = api.quickstart(n_users=2000, max_steps=80)
+print(result["message"])
+```
+
+</Tab>
+
+</Tabs>
+
+`quickstart` runs five stages in order:
+
+1. **generate** synthetic users and event histories,
+2. **fit** the key–value–time tokenizer,
+3. **pretrain** a nano masked-language model,
+4. **embed** users,
+5. **probe** a gradient-boosting credit-risk classifier against a raw-count baseline.
+
+</Step>
+
+<Step>
+
+### Read the result
+
+The run prints a one-line summary like:
+
+```text
+credit probe beats the raw-count baseline  ·  run: runs/quickstart
+```
+
+The probe head is **gradient boosting** by default (`HistGradientBoostingClassifier`),
+and the raw-count baseline uses the *same* classifier — so the gap reflects the
+**representation**, not the model family. Both ROC-AUC and PR-AUC are reported (PR-AUC is
+the honest headline on low-prevalence risk tasks).
+
+<Callout type="info" title="Why this is a forecast, not a hindcast">
+When a label table carries an `eval_ts`, each user's history is truncated at that point
+**before** embedding — for both the probe and the baseline — so metrics never peek at the
+outcome window.
+</Callout>
+
+</Step>
+
+</Steps>
+
+## Where to go next
+
+<Cards>
+  <Card title="How it works" href="/docs/concepts/architecture" description="The encoder stack, temporal encoding, and the objective — what each piece means and why." />
+  <Card title="Bring your own data" href="/docs/tutorials/bring-your-own-data" description="The parquet data contract and how to point pragmatiq at real records." />
+</Cards>
+
+The same library surface (`pragmatiq/api.py`) backs the CLI, notebooks, and production
+callers, so anything `quickstart` does, you can drive stage by stage.

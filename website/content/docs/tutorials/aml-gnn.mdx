@@ -1,0 +1,61 @@
+---
+title: AML GNN ablation
+description: Run the four-arm GraphSAGE ablation over the transfer graph and read the result.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+This is the hands-on runbook for pragmatiq's [AML graph extension](/docs/concepts/aml-graph)
+(our addition, not in the paper). See that page for *why*; here is *how to run it*.
+
+<Steps>
+
+<Step>
+
+### Build a run with transfers + AML labels
+
+```bash
+pip install -e .
+pragmatiq synth generate --out data/aml --n-users 12000 --n-workers 8 \
+  --config configs/data/synthetic.yaml         # produces transfers.parquet + labels/aml.parquet
+pragmatiq tokenize data/aml --out data/aml/tok
+pragmatiq pretrain data/aml/tok --name aml --model-size small
+```
+
+</Step>
+
+<Step>
+
+### Run the ablation
+
+```bash
+pragmatiq gnn data/aml/tok --run runs/aml \
+  --transfers data/aml/transfers.parquet \
+  --aml-label data/aml/labels/aml.parquet \
+  --epochs 150
+```
+
+This trains four setups and reports held-out ROC-AUC (mean ± std over seeds):
+**(a)** a probe on isolated embeddings, **(b)** GraphSAGE + pragmatiq features, **(c)**
+GraphSAGE + hand-crafted features, **(d)** a logistic control on the hand-crafted features
+with no graph.
+
+</Step>
+
+<Step>
+
+### Read it
+
+The gated claim is **relational recovery — `(c) 0.670 ≫ (a) 0.498`**: the
+transfer graph carries multi-hop AML signal an isolated per-user embedding cannot see, and
+message passing adds over the same features without a graph (`(c) > (d) 0.604`). The honest
+limitation is that the learned per-user embedding adds only a little ((b) `0.554`) and does
+**not** beat hand-crafted features ((b) `< (c)`) — recovering the laundering signal in a learned
+representation is the open challenge. The full discussion is on the
+[concept page](/docs/concepts/aml-graph) and in the
+[`04_aml_gnn` notebook](https://github.com/dynamiq-ai/pragmatiq/blob/main/notebooks/04_aml_gnn.ipynb).
+
+</Step>
+
+</Steps>

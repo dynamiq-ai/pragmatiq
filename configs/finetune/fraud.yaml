@@ -1,0 +1,11 @@
+# LoRA fine-tune config for the fraud task.
+lora_rank: 8
+lora_alpha: 8.0
+lr: 0.001
+weight_decay: 0.01
+max_epochs: 20
+patience: 3
+token_budget: 16384
+n_classes: 2
+val_fraction: 0.2
+seed: 0

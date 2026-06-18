@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling caches
+.claude/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Project artifacts (anchored to repo root so they never shadow the
+# pragmatiq/data/ source package or pragmatiq/.../runs modules)
+/runs/
+/data/
+/outputs/
+*.parquet
+*.lmdb
+realism_report.html
+/wandb/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Secrets / local env — never commit
+.env
+.env.*
+!.env.example
+*.key
+secrets/
+
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+
+# Local-only design spec
+docs/SPEC.md

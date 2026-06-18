@@ -1,0 +1,55 @@
+---
+title: Install
+description: Get pragmatiq running locally — Python 3.11+, a virtual environment, and optional extras.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+pragmatiq is **CPU-first**: everything runs on CPU (slower but correct), and CUDA / flash-attn
+are accelerations, not requirements.
+
+## Requirements
+
+- **Python 3.11+**
+- A virtual environment (recommended, so the install is isolated)
+- A GPU is optional
+
+## Install
+
+```bash
+git clone https://github.com/dynamiq-ai/pragmatiq.git
+cd pragmatiq
+python3.11 -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+`.[dev]` adds the test/lint tooling (pytest, ruff, mypy). Run those dev commands from the
+virtual environment so they match CI.
+
+## Optional extras
+
+The full pipeline — including the gradient-boosting probe and the AML transfer-graph
+GraphSAGE ablation — works with the plain install. The extras add focused tooling:
+
+| Extra | For |
+| --- | --- |
+| `.[serve]` | ONNX export + Triton client |
+| `.[demo]` | the Streamlit demo |
+| `.[extras]` | the frozen-text-embedding variant (`transformers`) + experiment tracking (Weights & Biases, TensorBoard) |
+| `.[full]` | everything above |
+| `.[dev]` | the test/lint toolchain |
+
+```bash
+pip install -e ".[serve]"   # or .[full], .[dev], ... — combine as needed
+```
+
+## Verify
+
+```bash
+pytest -q                 # the test suite
+ruff check . && mypy pragmatiq
+bash scripts/gates/gate_8.sh   # the CPU end-to-end pipeline smoke
+```
+
+Then run the [Quickstart](/docs/get-started/quickstart) to see the whole pipeline end to end.

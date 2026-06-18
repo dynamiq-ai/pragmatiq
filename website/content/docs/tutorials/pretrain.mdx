@@ -1,0 +1,88 @@
+---
+title: Pretrain (and scale)
+description: Train the masked-language model — on CPU, on one GPU, or across many — with auto-config, gradient accumulation, and multi-node DDP.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+Pretraining masks event values and reconstructs them, learning a representation with no labels.
+
+<Steps>
+
+<Step>
+
+### Train
+
+<Tabs items={['CLI', 'Python']}>
+<Tab value="CLI">
+
+```bash
+pragmatiq pretrain data/tok --name demo --model-size small --config configs/pretrain.yaml
+```
+
+</Tab>
+<Tab value="Python">
+
+```python
+from pragmatiq import api
+s = api.pretrain("data/tok", "demo", model_size="small",
+                 config={"max_steps": 4000, "token_budget": 16384})
+print(s["last_metrics"])
+```
+
+</Tab>
+</Tabs>
+
+The trainer auto-detects CUDA (bf16-mixed on GPU, fp32 on CPU) — the same command on both.
+A one-line heartbeat reports `step, loss, mlm_acc, tokens/s, ETA`.
+
+</Step>
+
+<Step>
+
+### Scale to large books, hands-off
+
+Pass `config="auto"` and pragmatiq sizes the batch and schedule from the data + device:
+
+```bash
+pragmatiq pretrain data/tok --name big --model-size medium --config auto
+```
+
+The three levers it sets are also usable by hand (see [Configuration](/docs/reference/configuration)):
+
+- **`grad_accum_steps`** — micro-batches per optimizer step. Effective batch =
+  `token_budget × grad_accum × num_nodes·devices`, so you reach a large, stable batch on a
+  memory-bound GPU without raising `token_budget`. `1` is byte-identical to no accumulation.
+- **`devices` / `num_nodes`** — Fabric DDP across GPUs and hosts; the rank sampler shards the
+  data per global rank with a per-rank masking seed.
+- **truncation caps** (on the tokenizer) keep heavy-tailed real histories tractable.
+
+</Step>
+
+<Step>
+
+### Resume & reproduce
+
+```bash
+pragmatiq pretrain data/tok --name demo --resume auto
+```
+
+Checkpoints capture the model, both optimizers, the LR scheduler, the sampler position, all
+RNG states, the tokenizer hash, and the resolved config — so an interrupted run resumed
+mid-flight reproduces the exact batch and masking stream of an uninterrupted one (tested
+bit-exactly). From a fixed seed, CPU runs are byte-identical; for a reproducible GPU run set
+`deterministic: true` (see [Reproducibility](/docs/decisions/reproducibility)).
+
+</Step>
+
+</Steps>
+
+### Renting a GPU
+
+[`scripts/runpod_launch.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/runpod_launch.py)
+is a turnkey path to validate on a rented A100/H100: it provisions a pod, syncs the repo over
+SSH, installs, and runs the GPU end-to-end pipeline (including auto-config, the Nemotron
+variant, serving, and the full-scale gates).
+
+Next: [Embed & evaluate](/docs/tutorials/evaluate).

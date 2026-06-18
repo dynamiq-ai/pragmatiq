@@ -1,0 +1,43 @@
+# WorldConfig for the synthetic generator.
+# Any field of pragmatiq.data.synthetic.WorldConfig may appear here.
+
+n_users: 100_000
+start_date: "2023-01-01"
+months: 25
+n_merchants: 50_000
+fraud_rate: 0.004
+default_rate: 0.03
+mule_ring_count: 8
+seed: 0
+
+country_mix:
+  GB: 0.55
+  IE: 0.10
+  FR: 0.10
+  DE: 0.10
+  ES: 0.05
+  PL: 0.05
+  LT: 0.05
+
+archetype_mix:
+  student: 0.10
+  salaried: 0.38
+  freelancer: 0.10
+  family: 0.16
+  pensioner: 0.07
+  high_net_worth: 0.03
+  trader: 0.05
+  dormant: 0.06
+  mule: 0.01
+  fraud_victim: 0.04
+
+# Difficulty/realism knobs (see tests/baselines/credit_gbdt.py)
+trait_noise: 0.55
+label_noise: 0.005
+activity_scale: 1.0
+missing_field_rate: 0.0   # >0 omits that fraction of event fields (sparse real feeds)
+
+# Label eval points (months from start; lookahead must fit the horizon)
+eval_month_credit: 13
+eval_month_short: 19
+campaigns_per_month: 2.0

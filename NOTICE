@@ -1,0 +1,13 @@
+pragmatiq
+Copyright 2026 Dynamiq
+
+pragmatiq is an independent implementation inspired by the PRAGMA paper
+(arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+
+PRAGMA and Revolut are referenced only to identify and attribute the research
+paper. No affiliation, endorsement, trademark license, or sponsorship by
+Revolut is implied. All third-party trademarks are the property of their
+respective owners.
+
+This product includes software developed by Dynamiq and is licensed under
+the Apache License, Version 2.0. See LICENSE for the full license text.

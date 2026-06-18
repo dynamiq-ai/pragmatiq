@@ -1,0 +1,39 @@
+---
+title: Acceptance gates
+description: pragmatiq's acceptance gates — what each asserts and how to run it.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+pragmatiq ships an **acceptance gate** for each major component — an executable script
+under [`scripts/gates/`](https://github.com/dynamiq-ai/pragmatiq/tree/main/scripts/gates)
+that runs the real pipeline and asserts the property that component promises. They are the
+reproducible contract: end-to-end integration checks you can run yourself.
+
+| Gate | Asserts |
+| --- | --- |
+| `gate_1` | Synthetic generator acceptance — realism + byte-identical determinism. |
+| `gate_2` | Key–value–time tokenizer — round-trip, `[UNK]` fallbacks, vocab range. |
+| `gate_3` | Sharding + varlen collation — packed (varlen) attention ≡ padded attention. |
+| `gate_4` | Model — the encoder stack and tied MLM head match the documented architecture. |
+| `gate_5` | End-to-end training — the probe beats the same-classifier raw-count baseline. |
+| `gate_6` | AML GNN ablation — a graph over transfers recovers signal an isolated probe misses (`c>a`), and message passing adds over the same features without a graph (`c>d`). |
+| `gate_7` | Inference / serving / demo. |
+| `gate_8` | Polish — nano end-to-end on CPU, validation, packaging + attribution. |
+
+## Running them
+
+```bash
+bash scripts/gates/gate_5.sh                 # CI scale (small N, CPU, minutes)
+PRAGMATIQ_GATE_FULL=1 bash scripts/gates/gate_5.sh   # full scale (GPU box)
+```
+
+Each gate is runnable standalone and honors `PRAGMATIQ_GATE_FULL=1` for full-scale runs.
+The CI-scale defaults run on a CPU in minutes; the full-scale variants (50k–100k users) are
+intended for a GPU host — see [Pretrain (and scale)](/docs/tutorials/pretrain).
+
+<Callout type="info" title="Gates are integration checks">
+Each gate runs the real pipeline for its area and asserts the property it guards. Run the
+relevant gate after a change to that area; a red gate means the guarded property is broken.
+</Callout>

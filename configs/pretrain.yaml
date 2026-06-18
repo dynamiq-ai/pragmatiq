@@ -1,0 +1,16 @@
+# Pretraining defaults. All values overridable on the CLI.
+max_steps: 20000
+token_budget: 16384      # GUESS: tokens per batch
+lr_muon: 0.003           # GUESS: Muon LR
+lr_adamw: 0.0003         # GUESS: AdamW LR
+weight_decay: 0.01
+warmup_steps: 500        # GUESS
+grad_clip: 1.0
+checkpoint_every_min: 15.0
+log_every: 20
+seed: 0
+deterministic: false     # opt-in reproducible CUDA path; fp32 on GPU (bit-exact), perf cost
+nan_skip: true
+verbose: true            # one-line stderr heartbeat every log_every steps
+wandb: false             # mirror metrics to Weights & Biases (pip install -e ".[extras]")
+wandb_project: pragmatiq

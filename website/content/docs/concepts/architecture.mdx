@@ -1,0 +1,119 @@
+---
+title: Architecture
+description: How pragmatiq turns a key–value–time event history into a user embedding — the four-encoder stack, temporal encoding, and the pretraining objective.
+---
+
+This is the "how it works" tour: from a raw banking event history to a single dense
+**user embedding**, and the reasoning behind each choice. Every claim here is implemented
+in the library (`pragmatiq/models/`, `pragmatiq/data/`).
+
+## The stack at a glance
+
+pragmatiq compresses one customer's entire history with a **four-encoder stack** on top of
+a tokenizer that turns every field into a `(key, value, time)` triple. Click through it:
+
+<ArchitectureExplorer />
+
+## Tokenization: key–value–time
+
+The tokenizer fits one vocabulary over the whole dataset, then turns each user's history
+into flat token arrays. It emits **one key token per field**, paired with a value
+representation chosen by the field's *kind*; keys and values share a single embedding space.
+
+<TokenizationWalkthrough />
+
+- **Numeric** values are percentile-binned (with a dedicated zero bucket), so an unseen
+  magnitude clips into the end buckets rather than failing.
+- **Low-cardinality strings** become one categorical token per value.
+- **High-cardinality text** is byte-level BPE by default — or, in the
+  [Nemotron variant](/docs/concepts/architecture#pretraining-objective), a single sentinel
+  token whose raw string a frozen text model maps to a vector.
+
+<DecisionCard
+  title="A dedicated zero bucket for numeric fields"
+  why="Zero is semantically special in banking (no balance, no spend) and is over-represented; giving it its own bucket keeps the percentile edges meaningful for the non-zero mass."
+  alternative="Folding zero into the lowest percentile bucket, which blurs 'absent' with 'very small'."
+/>
+
+## Temporal encoding
+
+Time is the spine of the model. The core transform compresses raw elapsed seconds with a
+log curve so recent and distant events both stay informative:
+
+$$
+\tau(\Delta t) = 8 \cdot \ln\!\left(1 + \frac{\Delta t}{8}\right)
+$$
+
+That value is then used as a **continuous position for rotary embeddings** (TimeRoPE) —
+not an integer index. A token at log-seconds $p$ rotates frequency pair $i$ by
+$p \cdot \text{inv\_freq}_i$, so attention scores encode the *elapsed time between two events*
+rather than their ordinal distance.
+
+<DecisionCard
+  title="RoPE over a continuous time position, not token index"
+  why="Banking events are wildly irregular — seconds apart, then months apart. Continuous-time RoPE makes 'one second ago' and 'one month ago' genuinely different relative rotations, which integer positions cannot express."
+  alternative="Standard integer-position RoPE or learned absolute positions, which treat 'the previous event' identically regardless of elapsed time."
+/>
+
+Two axes use it: the **profile encoder** positions each lifelong milestone by log-seconds
+since it occurred; the **history encoder** positions each event by log-seconds to the most
+recent event. Calendar features (hour, day-of-week, day-of-month) take a separate sin/cos →
+MLP path and are added to each event vector, so day/night and weekday/weekend structure is
+available independently of elapsed time.
+
+## The encoder stack
+
+$E(\text{key}) + E(\text{value}) + \text{pos}$ gives per-token vectors. Then:
+
+1. The **event encoder** encodes each event independently (within-event attention, a
+   prepended `[EVT]` marker); the `[EVT]` output plus calendar features is the per-event
+   vector $z_e$.
+2. The **profile-state encoder** runs over each user's profile tokens under a `[USR]`
+   marker → the profile state $z_a$.
+3. The **history encoder** runs over the sequence $[z_a, z_e\dots]$ → $z_h$; the `[USR]`
+   slot output **is the user embedding**.
+
+All three encoders are bidirectional, pre-norm, GELU, with $\text{ffn} = 4d$ and dropout 0.1.
+The whole batch is packed **without padding** using `cu_seqlens`. The CPU SDPA fallback
+is checked against a naive padded reference; CUDA flash-attn uses fp16/bf16 kernels and
+is validated at lower-precision tolerances during GPU runs.
+
+## Pretraining objective
+
+For each masked token the MLM head concatenates three views —
+$[\hat{z}_e(\text{token}),\, z_h(\text{event}),\, z_h(\text{USR})] \in \mathbb{R}^{3d}$ —
+projects $3d \to d$, and scores against the **tied** embedding table with cross-entropy and
+label smoothing 0.1. Masking unions three modes: 15% per token, 10% per whole event, 10% per
+(user, key); of the selected positions, 10% become `[UNK]` and are excluded from the loss.
+
+In the **PRAGMA+Nemotron variant**, text tokens carry a frozen embedding instead of a vocab
+id, so a masked text token is reconstructed with **MSE** against that frozen vector. The loss
+becomes $\mathcal{L} = \text{CE} + \lambda \cdot \text{MSE}$ (default $\lambda = 1$), and the
+variant is **off by default** — the BPE path stays byte-identical.
+
+## Pre-training caps
+
+Real histories are heavy-tailed, so the tokenizer caps them (the paper defaults below).
+At synthetic scale none of these bind, so default output is unchanged:
+
+<ParamTable
+  config="tokenizer_config"
+  only={['max_event_tokens', 'max_profile_tokens', 'max_events_per_user']}
+  notes={{
+    max_event_tokens: 'Tokens kept per event (first N).',
+    max_profile_tokens: 'Tokens kept for the profile state (first whole items fitting N).',
+    max_events_per_user: 'A longer history keeps only its most recent N events.',
+  }}
+/>
+
+## What is ours, not the paper
+
+The core representation above — key–value–time tokenization, the time transform, continuous
+TimeRoPE, the encoder stack, the 3d MLM head, the masking scheme, and the Nemotron variant —
+follows the PRAGMA paper. The **AML transfer-graph GraphSAGE work**
+([AML over the graph](/docs/concepts/aml-graph)) is pragmatiq's own extension, built
+standalone on top of these embeddings — see [AML over the transfer graph](/docs/concepts/aml-graph);
+so are the synthetic data generator and the `nano` size. <Badge variant="ours">Our addition</Badge>
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.

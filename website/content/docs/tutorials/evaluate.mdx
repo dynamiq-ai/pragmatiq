@@ -1,0 +1,68 @@
+---
+title: Embed, probe & fine-tune
+description: Turn a trained model into task signal — embeddings, a gradient-boosting probe, and LoRA fine-tuning.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+Three ways to get value from a trained model, in increasing cost.
+
+<Steps>
+
+<Step>
+
+### Embed users
+
+```bash
+pragmatiq embed data/tok --run runs/demo --out embeddings.parquet
+```
+
+Runs the frozen model over every user → a `[n_users, dim]` matrix. For interactive use,
+`PragmaModel.from_pretrained(run).embed_records([...])` embeds plain dicts without the shard
+pipeline (see the [API reference](/docs/reference/api)).
+
+</Step>
+
+<Step>
+
+### Probe
+
+```bash
+pragmatiq probe data/tok --run runs/demo \
+  --label data/synth/labels/default_12m.parquet --probe-model gbdt
+```
+
+The probe keeps the backbone frozen and fits a classifier on the embeddings. The default head
+is **gradient boosting** (`HistGradientBoostingClassifier`; `logistic` / `lightgbm` selectable),
+and the raw-count baseline uses the **same** classifier — so the gap reflects the
+representation, not the model family. Both **ROC-AUC and PR-AUC** are reported.
+
+<Callout type="info" title="Forecast, not hindcast">
+When a label table carries an `eval_ts`, histories are truncated at it before embedding — for
+both the probe and the baseline — so metrics never see the outcome window.
+</Callout>
+
+</Step>
+
+<Step>
+
+### LoRA fine-tune
+
+```bash
+pragmatiq finetune data/tok --run runs/demo \
+  --label data/synth/labels/default_12m.parquet --config configs/finetune/credit.yaml
+```
+
+LoRA injects rank-8 adapters into attention/FFN, then trains only the adapters and a
+classification head on the `[USR]` embedding with early stopping. `merge_lora()` folds the
+adapters back for export. This is the supervised path when you want to adapt the backbone to
+one task; the probe is the cheap representation check.
+
+</Step>
+
+</Steps>
+
+The multi-task probe benchmark (`scripts/benchmarks/multitask_probe.py`) probes every
+user-level task at once and writes a provenance-stamped results table. Next:
+[Serve](/docs/tutorials/serve).

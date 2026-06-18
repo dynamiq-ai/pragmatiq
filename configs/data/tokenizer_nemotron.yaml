@@ -1,0 +1,25 @@
+# Tokenizer configuration for the PRAGMA+Nemotron variant.
+#
+# High-cardinality text fields (merchant names, device ids, free-text memos) are NOT
+# split into BPE pieces here. Instead each text field emits one sentinel token whose
+# raw string is embedded by a frozen text model; pre-training reconstructs that vector
+# with MSE. pretrain() detects text_value_mode=="embed" on the loaded tokenizer and
+# builds the model's text branch with the matching encoder + width automatically.
+#
+# Requires the optional dependency:  pip install -e ".[extras]"
+
+n_buckets: 64
+categorical_threshold: 1000   # text fields above this stay textual → frozen embedding
+target_vocab: 28000           # BPE still tokenises any remaining sub-threshold text
+bpe_min_frequency: 2
+lowercase_text: false
+max_numeric_sample: 100000
+calendar_tz: UTC
+max_event_tokens: 24
+max_profile_tokens: 200
+max_events_per_user: 6500
+
+text_value_mode: embed                  # route event text fields to the frozen encoder
+text_encoder: nemotron                  # frozen Nvidia Nemotron text embedder
+text_encoder_dim: 2048                  # Nemotron hidden size (MSE reconstruction target)
+seed: 0

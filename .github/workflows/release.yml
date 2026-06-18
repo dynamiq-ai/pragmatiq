@@ -1,0 +1,92 @@
+name: release
+
+# Every version-bumping merge to `main` cuts a release: build the package, upload
+# to PyPI via Trusted Publishing, and create the `v<version>` tag and GitHub
+# Release. A merge that does NOT bump the version (the tag already exists) is a
+# no-op, so only release PRs (develop -> main) that bump the version publish.
+#
+# This is one self-contained job on purpose: a Release created by the default
+# GITHUB_TOKEN does not trigger other workflows, so tagging/publishing cannot be
+# split across chained workflows.
+#
+# PyPI Trusted Publishing (OIDC) — no API token/secret. One-time setup: on
+# https://pypi.org/manage/project/pragmatiq/settings/publishing/ add a trusted
+# publisher for owner `dynamiq-ai`, repo `pragmatiq`, workflow `release.yml`,
+# environment `pypi`. Pre-release versions (e.g. 0.1.0b3) publish as pre-releases.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write # create the tag and GitHub Release
+  id-token: write # PyPI Trusted Publishing (OIDC)
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Read version from pyproject.toml
+        id: version
+        run: |
+          v=$(grep -m1 '^version' pyproject.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Version: $v"
+
+      - name: Skip if this version is already released
+        id: tag
+        run: |
+          if git rev-parse "v${{ steps.version.outputs.value }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "v${{ steps.version.outputs.value }} already released — nothing to do."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build sdist + wheel
+        if: steps.tag.outputs.exists == 'false'
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+          twine check dist/*
+
+      - name: Publish to PyPI
+        if: steps.tag.outputs.exists == 'false'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Idempotent: if a prior run uploaded the version but then failed before
+          # tagging, a rerun skips the existing files instead of erroring, so the
+          # tag + Release step can finish.
+          skip-existing: true
+
+      - name: Tag and create GitHub Release
+        if: steps.tag.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.version.outputs.value }}
+        run: |
+          # PEP 440 pre-releases (aN / bN / rcN) are marked as GitHub pre-releases.
+          PRERELEASE=""
+          case "$V" in
+            *a[0-9]*|*b[0-9]*|*rc[0-9]*) PRERELEASE="--prerelease" ;;
+          esac
+          git tag "v$V"
+          git push origin "v$V"
+          gh release create "v$V" \
+            --title "v$V" \
+            --generate-notes \
+            --target "$GITHUB_SHA" \
+            $PRERELEASE

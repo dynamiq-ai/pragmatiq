@@ -1,0 +1,93 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pragmatiq"
+version = "0.1.0b3"
+description = "Independent banking event-sequence modeling toolkit inspired by arXiv:2604.08649; not affiliated with or endorsed by Revolut."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.11"
+authors = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
+maintainers = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
+keywords = ["foundation-model", "banking", "transformers", "synthetic-data", "fraud", "credit-risk"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy>=1.24",
+    "pyarrow>=14.0",
+    "pandas>=2.0",
+    "lmdb>=1.4",
+    "tokenizers>=0.15",
+    "typer>=0.9",
+    "omegaconf>=2.3",
+    "pyyaml>=6.0",
+    "scikit-learn>=1.3",
+    "lightgbm>=4.0",
+    "torch-geometric>=2.4",
+    "lightning>=2.2",
+    "matplotlib>=3.9",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# Serving / export, the Streamlit demo, and a single `extras` group for the
+# frozen text encoder and experiment tracking. `full` pulls them all; `dev` is
+# the contributor toolchain. The gradient-boosting probe and the AML GNN need no
+# extra — they are part of the core install.
+serve = ["onnx>=1.16", "onnxscript>=0.1", "onnxruntime>=1.18", "tritonclient[http]>=2.40"]
+demo = ["streamlit>=1.30", "plotly>=5.18"]
+extras = ["transformers>=4.40", "wandb>=0.16", "tensorboard>=2.16"]
+full = ["pragmatiq[serve,demo,extras]"]
+dev = ["pytest>=7.4", "pytest-cov", "ruff>=0.4", "mypy>=1.8", "types-PyYAML"]
+
+[project.scripts]
+pragmatiq = "pragmatiq.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/dynamiq-ai/pragmatiq"
+Documentation = "https://pragmatiq.getdynamiq.ai"
+Repository = "https://github.com/dynamiq-ai/pragmatiq"
+Issues = "https://github.com/dynamiq-ai/pragmatiq/issues"
+Paper = "https://arxiv.org/abs/2604.08649"
+Changelog = "https://github.com/dynamiq-ai/pragmatiq/blob/main/CHANGELOG.md"
+Security = "https://github.com/dynamiq-ai/pragmatiq/security/policy"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pragmatiq"]
+
+[tool.hatch.build.targets.sdist]
+# Ship a lean source tarball: the package plus essential metadata and docs,
+# leaving out the documentation site, notebooks, deployment stack, and assets.
+only-include = ["pragmatiq", "README.md", "LICENSE", "NOTICE", "CHANGELOG.md", "CITATION.cff"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "B008", "B905"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+no_implicit_optional = true
+warn_unused_ignores = false
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = ["ignore::DeprecationWarning"]

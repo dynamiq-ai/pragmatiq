@@ -1,0 +1,10 @@
+# PRAGMA small (~10M params at ~28k vocab). Size table.
+size: small
+dim: 192
+n_heads: 3
+depth_profile: 1
+depth_event: 5
+depth_history: 2
+dropout: 0.1
+rope_base: 10000.0   # GUESS: RoPE base for the time axis
+max_position: 64

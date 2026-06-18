@@ -1,0 +1,24 @@
+# Tokenizer configuration.
+
+n_buckets: 64            # GUESS: percentile buckets per numeric key (+ zero bucket)
+categorical_threshold: 1000   # max distinct values for one-token-per-value fields
+target_vocab: 28000      # GUESS: total vocab size; BPE fills the remainder
+bpe_min_frequency: 2
+lowercase_text: false    # statement strings stay uppercase
+max_numeric_sample: 100000   # reservoir size per key for percentile fitting
+calendar_tz: UTC         # IANA zone for the hour/day-of-week/day-of-month features;
+                         #   set a local zone (e.g. Europe/London) for local-time data
+# Pre-training sequence caps (paper defaults) — keep training tractable on long
+# real histories; null disables. At synthetic scale none of these bind.
+max_event_tokens: 24       # tokens kept per event
+max_profile_tokens: 200    # tokens kept for the profile state
+max_events_per_user: 6500  # keep the most recent N events per user
+# PRAGMA+Nemotron variant. "bpe" (default) tokenises text field values into sub-word
+# pieces. "embed" emits one sentinel token per event text field and carries the raw
+# string, which a frozen text encoder maps to a vector (reconstructed via MSE during
+# pre-training). pretrain() reads these and auto-builds the matching model text branch.
+# See configs/data/tokenizer_nemotron.yaml for the production setup.
+text_value_mode: bpe       # "bpe" | "embed"
+text_encoder: hash         # registered frozen encoder: "hash" (CI) | "nemotron" (prod)
+text_encoder_dim: 64       # the encoder's output width (MSE reconstruction target dim)
+seed: 0

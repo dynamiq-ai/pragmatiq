@@ -1,0 +1,379 @@
+{
+  "api": [
+    {
+      "name": "synthesize",
+      "signature": "synthesize(config: 'str | Path | dict[str, Any] | None' = None, out: 'str | Path' = 'data/synth', n_users: 'int | None' = None, seed: 'int | None' = None, n_workers: 'int' = 0, write_report: 'bool' = True, **overrides: 'Any') -> 'dict[str, Any]'",
+      "summary": "Generate a synthetic dataset."
+    },
+    {
+      "name": "tokenize",
+      "signature": "tokenize(data_dir: 'str | Path', out: 'str | Path', config: 'str | Path | dict[str, Any] | None' = None, tokenizer_dir: 'str | Path | None' = None, max_users: 'int | None' = None, rows_per_shard: 'int' = 4096, n_workers: 'int' = 0) -> 'dict[str, Any]'",
+      "summary": "Fit (or load) the tokenizer and write tokenized parquet shards + index."
+    },
+    {
+      "name": "pretrain",
+      "signature": "pretrain(shard_dir: 'str | Path', run_name: 'str', model_size: 'str' = 'small', config: 'str | Path | dict[str, Any] | None' = None, runs_root: 'str | Path' = 'runs', resume: 'str | None' = None, **overrides: 'Any') -> 'dict[str, Any]'",
+      "summary": "Pretrain a pragmatiq model on tokenized shards."
+    },
+    {
+      "name": "finetune",
+      "signature": "finetune(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', config: 'str | Path | dict[str, Any] | None' = None, device: 'str' = 'auto', **overrides: 'Any') -> 'dict[str, Any]'",
+      "summary": "LoRA fine-tune a trained model's adapters + head on a label table."
+    },
+    {
+      "name": "embed",
+      "signature": "embed(shard_dir: 'str | Path', run: 'str | Path', out: 'str | Path | None' = None, token_budget: 'int' = 16384, device: 'str' = 'auto') -> 'dict[str, Any]'",
+      "summary": "Embed every user in ``shard_dir`` with a trained model."
+    },
+    {
+      "name": "probe",
+      "signature": "probe(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', device: 'str' = 'auto', token_budget: 'int' = 16384, seed: 'int' = 0, with_baseline: 'bool' = True, probe_model: 'str' = 'gbdt') -> 'dict[str, Any]'",
+      "summary": "Probe a trained model on a label table; compares to a raw-count baseline."
+    },
+    {
+      "name": "uplift",
+      "signature": "uplift(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', device: 'str' = 'auto', token_budget: 'int' = 16384, seed: 'int' = 0, learner: 'str' = 't') -> 'dict[str, Any]'",
+      "summary": "Evaluate communication-campaign uplift on a trained model."
+    },
+    {
+      "name": "gnn",
+      "signature": "gnn(shard_dir: 'str | Path', run: 'str | Path', transfers_path: 'str | Path', aml_label_path: 'str | Path', seeds: 'tuple[int, ...]' = (0, 1, 2), device: 'str' = 'auto', epochs: 'int' = 150) -> 'dict[str, Any]'",
+      "summary": "Run the four-arm AML GNN ablation."
+    },
+    {
+      "name": "quickstart",
+      "signature": "quickstart(out: 'str | Path' = 'runs/quickstart', n_users: 'int' = 50000, seed: 'int' = 0, model_size: 'str' = 'nano', max_steps: 'int' = 400, n_workers: 'int' = 0) -> 'dict[str, Any]'",
+      "summary": "End-to-end smoke: synth \u2192 tokenize \u2192 nano pretrain \u2192 probe."
+    }
+  ],
+  "gates": [
+    {
+      "id": "gate_1",
+      "title": "Acceptance check \u2014 synthetic data generator."
+    },
+    {
+      "id": "gate_2",
+      "title": "Acceptance check \u2014 key-value-time tokenizer."
+    },
+    {
+      "id": "gate_3",
+      "title": "Acceptance check \u2014 sharding, dataset, varlen collation."
+    },
+    {
+      "id": "gate_4",
+      "title": "Acceptance check \u2014 model."
+    },
+    {
+      "id": "gate_5",
+      "title": "Acceptance check \u2014 end-to-end training."
+    },
+    {
+      "id": "gate_6",
+      "title": "AML GNN ablation \u2014 relational recovery of money-mule rings over the transfer graph."
+    },
+    {
+      "id": "gate_7",
+      "title": "Acceptance check \u2014 inference, serving, demo."
+    },
+    {
+      "id": "gate_8",
+      "title": "Acceptance check \u2014 nano end-to-end on CPU, validate, packaging."
+    }
+  ],
+  "model_sizes": [
+    {
+      "depth_event": 2,
+      "depth_history": 1,
+      "depth_profile": 1,
+      "dim": 64,
+      "n_heads": 2,
+      "name": "nano"
+    },
+    {
+      "depth_event": 5,
+      "depth_history": 2,
+      "depth_profile": 1,
+      "dim": 192,
+      "n_heads": 3,
+      "name": "small"
+    },
+    {
+      "depth_event": 16,
+      "depth_history": 6,
+      "depth_profile": 3,
+      "dim": 512,
+      "n_heads": 8,
+      "name": "medium"
+    },
+    {
+      "depth_event": 45,
+      "depth_history": 18,
+      "depth_profile": 9,
+      "dim": 1024,
+      "n_heads": 16,
+      "name": "large"
+    }
+  ],
+  "tokenizer_config": [
+    {
+      "default": 64,
+      "name": "n_buckets",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 1000,
+      "name": "categorical_threshold",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 28000,
+      "name": "target_vocab",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 2,
+      "name": "bpe_min_frequency",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": false,
+      "name": "lowercase_text",
+      "required": false,
+      "type": "bool"
+    },
+    {
+      "default": 100000,
+      "name": "max_numeric_sample",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": null,
+      "name": "numeric_min_cardinality",
+      "required": false,
+      "type": "int | None"
+    },
+    {
+      "default": [],
+      "name": "force_categorical",
+      "required": false,
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": [],
+      "name": "force_numeric",
+      "required": false,
+      "type": "tuple[str, ...]"
+    },
+    {
+      "default": 0,
+      "name": "seed",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": "percentile_binner",
+      "name": "value_encoder",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": "UTC",
+      "name": "calendar_tz",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": 24,
+      "name": "max_event_tokens",
+      "required": false,
+      "type": "int | None"
+    },
+    {
+      "default": 200,
+      "name": "max_profile_tokens",
+      "required": false,
+      "type": "int | None"
+    },
+    {
+      "default": 6500,
+      "name": "max_events_per_user",
+      "required": false,
+      "type": "int | None"
+    },
+    {
+      "default": "bpe",
+      "name": "text_value_mode",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": "hash",
+      "name": "text_encoder",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": 64,
+      "name": "text_encoder_dim",
+      "required": false,
+      "type": "int"
+    }
+  ],
+  "train_config": [
+    {
+      "default": 1000,
+      "name": "max_steps",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 16384,
+      "name": "token_budget",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 1,
+      "name": "grad_accum_steps",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 0.003,
+      "name": "lr_muon",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 0.0003,
+      "name": "lr_adamw",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 0.01,
+      "name": "weight_decay",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 100,
+      "name": "warmup_steps",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 1.0,
+      "name": "grad_clip",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 15.0,
+      "name": "checkpoint_every_min",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 10,
+      "name": "log_every",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": 0,
+      "name": "seed",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": false,
+      "name": "deterministic",
+      "required": false,
+      "type": "bool"
+    },
+    {
+      "default": true,
+      "name": "nan_skip",
+      "required": false,
+      "type": "bool"
+    },
+    {
+      "default": 50,
+      "name": "max_consecutive_skips",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": true,
+      "name": "verbose",
+      "required": false,
+      "type": "bool"
+    },
+    {
+      "default": false,
+      "name": "wandb",
+      "required": false,
+      "type": "bool"
+    },
+    {
+      "default": "pragmatiq",
+      "name": "wandb_project",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": "pragma",
+      "name": "masker",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": 0.15,
+      "name": "p_token",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 0.1,
+      "name": "p_event",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 0.1,
+      "name": "p_key",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 0.1,
+      "name": "p_unk",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": 1.0,
+      "name": "text_loss_weight",
+      "required": false,
+      "type": "float"
+    },
+    {
+      "default": "auto",
+      "name": "devices",
+      "required": false,
+      "type": "int | str"
+    },
+    {
+      "default": 1,
+      "name": "num_nodes",
+      "required": false,
+      "type": "int"
+    }
+  ]
+}

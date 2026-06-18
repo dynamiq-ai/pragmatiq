@@ -1,0 +1,15 @@
+# Nano pretraining for CPU/CI end-to-end (<10 min).
+max_steps: 60
+token_budget: 4096
+lr_muon: 0.003
+lr_adamw: 0.0003
+weight_decay: 0.01
+warmup_steps: 10
+grad_clip: 1.0
+checkpoint_every_min: 1000.0
+log_every: 5
+seed: 0
+deterministic: false     # opt-in reproducible CUDA path; fp32 on GPU (bit-exact), perf cost
+nan_skip: true
+verbose: true            # one-line stderr heartbeat every log_every steps
+wandb: false

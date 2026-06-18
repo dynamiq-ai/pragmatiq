@@ -1,0 +1,58 @@
+---
+title: Decisions log
+description: The non-obvious choices pragmatiq made where the paper is silent — each with its rationale and the alternative considered.
+---
+
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
+
+Where the PRAGMA paper leaves an engineering detail unspecified, pragmatiq picks a default,
+**exposes it in config**, and records the reasoning here. Exact default values live in the
+[Configuration reference](/docs/reference/configuration) (rendered from the code); this page
+is the *why*. Source-level guesses are marked `# GUESS` in the code.
+
+<DecisionCard
+  title="Two optimizers: Muon for 2-D weights, AdamW for the rest"
+  why="Muon's orthogonalized updates suit the large 2-D hidden weight matrices; embeddings, norms, and biases train better under AdamW. Clipping is per-optimizer."
+  alternative="A single AdamW over everything — simpler, but leaves the hidden-weight conditioning Muon gives on the table."
+/>
+
+<DecisionCard
+  title="Gradient boosting as the default probe head"
+  why="A learned embedding has non-linear structure a linear head misses; HistGradientBoostingClassifier captures it, and PR-AUC is reported alongside ROC-AUC for the low-prevalence risk tasks. The raw-count baseline uses the SAME classifier, so the gap is about the representation, not the model family."
+  alternative="Logistic regression (still selectable via probe_model='logistic') — a cleaner linear read, but a weaker ceiling on a rich embedding."
+/>
+
+<DecisionCard
+  title="Percentile bucketing with a dedicated zero bucket"
+  why="Banking magnitudes are heavy-tailed and zero is semantically special (no balance / no spend) and over-represented; percentile edges + a separate zero bucket keep both ends meaningful, and out-of-range values clip rather than fail."
+  alternative="Fixed-width bins (poor on heavy tails) or standardized continuous inputs (loses the robustness of binning to outliers)."
+/>
+
+<DecisionCard
+  title="Pre-training truncation caps (24 / 200 / 6500), on by default"
+  why="Real histories are heavy-tailed; capping per-event tokens, profile tokens, and events-per-user keeps training tractable and the batch shapes bounded. At synthetic scale none of them bind, so default output is unchanged."
+  alternative="No caps — simpler, but a few pathological users dominate memory and batch time at real scale."
+/>
+
+<DecisionCard
+  title="RoPE frequency base is a tunable GUESS (10000)"
+  why="The paper does not specify the RoPE base for the continuous time axis; 10000 is the conventional default and is exposed as rope_base so it can be tuned per dataset."
+  alternative="Hard-coding it — fine until someone's time scales differ and they need to tune it."
+/>
+
+<DecisionCard
+  title="Masking 15 / 10 / 10 with 10% [UNK]-as-dropout"
+  why="The token/event/key union matches the paper; the 10% of selected positions replaced by [UNK] and excluded from the loss act as input dropout, so the model can't lean on a token that is sometimes simply absent."
+  alternative="Token-only masking — simpler, but misses the event- and key-level structure that makes the objective informative for whole-field prediction."
+/>
+
+<DecisionCard
+  title="The AML gate scores relational recovery, not a learned-embedding win"
+  why="On synthetic money-mule rings whose transfer amounts and counterparty degree are matched to ordinary accounts, the discriminative signal is the multi-hop transfer structure, not any per-user feature. Gate 6 therefore requires that a GraphSAGE over the transfer graph beats a probe on the isolated embedding (c > a) and beats the same hand-crafted features without a graph (c > d) — i.e. message passing recovers relational signal. The learned per-user embedding sits near chance on its own and does not beat hand-crafted features, so 'the embedding beats hand-crafted features' (b > c) is reported, not gated — consistent with the paper's observation that AML is where a per-history model underperforms."
+  alternative="Gating the aspirational headline b > c — but it is not achievable on degree/volume-matched synthetic mules, and gating it would either fail honest runs or invite weakening the benchmark to make it pass."
+/>
+
+For the larger architectural choices (continuous-time RoPE, the zero bucket, the Nemotron
+default-off), see the [Architecture](/docs/concepts/architecture) and
+[Nemotron](/docs/concepts/nemotron) pages, which carry their own decision cards inline.
