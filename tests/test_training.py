@@ -205,6 +205,11 @@ class TestPretrainer:
         # strict load raises). The max_steps kwarg extends the stored config.
         api.pretrain(shards / "tok", "rrt", resume="auto", max_steps=9, runs_root=runs_root)
         assert Run.open("rrt", runs_root).read_config()["model_size"] == "nano"
+        # The extended max_steps actually advances the run from 6 to 9: the kwarg is
+        # an operational override resume honors, not just a stored-config value.
+        ckpt = torch.load(Run.open("rrt", runs_root).checkpoints / "last.pt",
+                          map_location="cpu", weights_only=False)
+        assert ckpt["step"] == 9, f"resume did not extend max_steps; stopped at step {ckpt['step']}"
 
     def test_nan_loss_dumps_and_skips(self, shards: Path, monkeypatch) -> None:
         tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
