@@ -224,6 +224,20 @@ def _class_weights(y: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     return torch.tensor([1.0, neg / pos], dtype=torch.float32)
 
 
+def _significant_margin(xs: list[float], ys: list[float], floor: float = 0.01) -> bool:
+    """Whether arm ``xs`` beats arm ``ys`` by more than the cross-seed noise.
+
+    Gates on the mean of the *paired* per-seed difference exceeding BOTH ``floor``
+    and the cross-seed std of that difference — a noise-aware replacement for a
+    fixed margin. A fixed 0.01 could clear a gap that sits inside the per-seed
+    noise band (observed: a world seed where c−d = 0.016 with std 0.014), which
+    makes the gate flip with the seed. With a single seed the std is 0 and this
+    reduces to ``mean > floor``.
+    """
+    d = np.asarray(xs, dtype=float) - np.asarray(ys, dtype=float)
+    return bool(d.mean() > max(floor, float(d.std())))
+
+
 def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask: torch.Tensor,
              test_mask: torch.Tensor, epochs: int = 80, hidden: int = 128, n_layers: int = 2,
              lr: float = 1e-2, patience: int = 4, eval_every: int = 5) -> float:
@@ -312,6 +326,9 @@ def aml_results_markdown(res: dict[str, Any]) -> str:
     if "d_lr_handcrafted" in ps:
         rows.append(("(d) control: logistic regression on the same hand-crafted features, no graph",
                      ps["d_lr_handcrafted"]))
+    if "e_gnn_topology" in ps:
+        rows.append(("(e) control: GraphSAGE on topology-only (degree) features, no amount/volume",
+                     ps["e_gnn_topology"]))
     lines = ["| setup | ROC-AUC (mean ± std over seeds) |", "| --- | --- |"]
     lines += [f"| {name} | {m['mean']:.3f} ± {m['std']:.3f} |" for name, m in rows]
     v = res["verdict"]
@@ -320,7 +337,8 @@ def aml_results_markdown(res: dict[str, Any]) -> str:
     lines.append(
         f"**Relational recovery (gated): {v['pass']}** — a GraphSAGE over the transfer graph recovers "
         f"money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = "
-        f"{v['c_beats_a']}), so the AML signal lives in the multi-hop transfer structure an isolated "
+        f"{v.get('graph_recovers_signal', v['c_beats_a'])}), so the AML signal lives in the multi-hop "
+        f"transfer structure an isolated "
         f"per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, "
         f"so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over "
         f"the same features without a graph ((c) > (d) = {mp}). The gate requires both."
@@ -403,7 +421,7 @@ def run_aml_ablation(
     epochs: int = 150,
     gnn_layers: int = 3,
 ) -> dict[str, Any]:
-    """The four-arm AML comparison (a: isolated, b: GNN+pragmatiq, c: GNN+handcrafted, d: LR control).
+    """The AML ablation (a: isolated, b: GNN+pragmatiq, c: GNN+handcrafted, d: LR control, e: GNN topology-only).
 
     Returns mean/std AUC per setup over ``seeds`` plus a verdict. The gated claim is
     *relational recovery* — ``c > a`` (a graph over the transfer structure recovers
@@ -448,9 +466,16 @@ def _run_aml_ablation(
     hand = handcrafted_node_features(transfers_path, user_ids)
     hand_graph = TransferGraph(x=torch.from_numpy(hand).float(), edge_index=pragma_graph.edge_index,
                                edge_attr=pragma_graph.edge_attr, y=pragma_graph.y, user_ids=user_ids)
+    # Arm (e), topology-only control: the SAME graph but node features reduced to
+    # degree only (in/out/total), dropping the amount/volume columns. It isolates
+    # what adjacency + message passing alone recover from the rings, separate from
+    # transfer-amount/recency signal. SPEC Phase 6 (e); reported, not gated.
+    hand_topo = hand[:, :3]
+    topo_graph = TransferGraph(x=torch.from_numpy(hand_topo).float(), edge_index=pragma_graph.edge_index,
+                               edge_attr=pragma_graph.edge_attr, y=pragma_graph.y, user_ids=user_ids)
 
-    res: dict[str, list[float]] = {"a_isolated": [], "b_gnn_pragma": [],
-                                   "c_gnn_handcrafted": [], "d_lr_handcrafted": []}
+    res: dict[str, list[float]] = {"a_isolated": [], "b_gnn_pragma": [], "c_gnn_handcrafted": [],
+                                   "d_lr_handcrafted": [], "e_gnn_topology": []}
     for s in seeds:
         # one stratified split per seed, shared by all arms (fair comparison);
         # model selection uses the val mask, test is scored exactly once
@@ -463,6 +488,8 @@ def _run_aml_ablation(
         # control arm: SAME handcrafted features, NO message passing — isolates
         # what graph propagation itself contributes over the raw features
         res["d_lr_handcrafted"].append(_fit_mlp(hand, y, train_mask, test_mask))
+        res["e_gnn_topology"].append(_fit_gnn(topo_graph, s, train_mask, val_mask, test_mask,
+                                              epochs=epochs, n_layers=gnn_layers))
 
     def ms(v: list[float]) -> dict[str, float]:
         a = np.array(v)
@@ -472,7 +499,6 @@ def _run_aml_ablation(
     a = summary["a_isolated"]["mean"]
     b = summary["b_gnn_pragma"]["mean"]
     c = summary["c_gnn_handcrafted"]["mean"]
-    d = summary["d_lr_handcrafted"]["mean"]
     # The gated claim is relational recovery: a GraphSAGE over the transfer graph
     # recovers money-mule rings that an isolated probe on the same features misses
     # (c > a), and message passing adds over the same features without a graph
@@ -487,7 +513,12 @@ def _run_aml_ablation(
     #    beating hand-crafted features) is REPORTED, not gated — see the verdict.
     # The control arm (d) checks the graph effect is real: (c) > (d) means message
     # passing adds over the same hand-crafted features without a graph.
-    margin = 0.01
+    margin = 0.01  # reported (not gated) booleans keep a small fixed margin
+    # Gated claims are noise-aware: the mean gap must exceed the cross-seed std of
+    # the per-seed paired difference, not a fixed 0.01 that a gap inside the noise
+    # band could clear (observed: a world seed with c−d = 0.016 at std 0.014).
+    graph_recovers_signal = _significant_margin(res["c_gnn_handcrafted"], res["a_isolated"])
+    message_passing_adds = _significant_margin(res["c_gnn_handcrafted"], res["d_lr_handcrafted"])
     return {
         "per_setup": summary, "raw": res,
         "n_nodes": pragma_graph.num_nodes, "n_edges": int(pragma_graph.edge_index.shape[1]),
@@ -498,18 +529,21 @@ def _run_aml_ablation(
             "b_beats_c": b > c + margin,
             "c_beats_a": c > a + margin,
             "c_between_a_and_b": a <= c <= b,
-            "message_passing_adds": c > d + margin,
-            # Relational recovery: a graph over the transfer structure beats a
-            # probe on the isolated per-user embedding (c > a), so the AML signal
-            # lives in the multi-hop transfer structure an isolated embedding misses.
-            "graph_recovers_signal": c > a + margin,
-            # The learned-embedding headline — the per-user embedding + graph beats
-            # both the isolated probe and the hand-crafted-feature graph (b > a and
-            # b > c), (c) between — is reported, not gated: on this synthetic book
-            # the per-user embedding does not recover the multi-hop signal on its own.
+            # Relational recovery (gated): a GraphSAGE over the transfer structure
+            # beats a probe on the isolated per-user embedding (c > a), and message
+            # passing adds over the same features without a graph (c > d) — each by
+            # more than the cross-seed noise.
+            "graph_recovers_signal": graph_recovers_signal,
+            "message_passing_adds": message_passing_adds,
+            # Arm (e), reported not gated: does topology (degree) + message passing
+            # alone recover the rings over the isolated probe, without amount/volume?
+            "topology_only_recovers": _significant_margin(res["e_gnn_topology"], res["a_isolated"]),
+            # The learned-embedding headline (b > a and b > c, (c) between) is
+            # reported, not gated: on this synthetic book the per-user embedding does
+            # not recover the multi-hop signal on its own.
             "paper_ordering": (b > a + margin) and (b > c + margin) and (a <= c <= b),
-            # The gated claim is the relational mechanism: recovery (c > a) plus
+            # The gate is the relational mechanism: noise-aware recovery (c > a) plus
             # message passing adding over the same features without a graph (c > d).
-            "pass": (c > a + margin) and (c > d + margin),
+            "pass": graph_recovers_signal and message_passing_adds,
         },
     }

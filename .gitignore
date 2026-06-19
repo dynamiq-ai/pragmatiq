@@ -43,3 +43,6 @@ secrets/
 
 # Local-only design spec
 docs/SPEC.md
+
+# Local-only copy of the inspiration paper (not redistributable)
+/paper/

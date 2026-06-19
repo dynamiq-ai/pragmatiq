@@ -127,3 +127,33 @@ def test_custom_head_resolved_for_finetune() -> None:
     ft = LoRAFineTuner(model, FineTuneConfig(head="ranking_test", n_classes=3, lora_rank=4))
     assert isinstance(ft.head, RankingTestHead)
     assert ft.head.net.out_features == 3  # head built at the configured n_classes
+
+
+def test_stratified_val_split_keeps_both_classes_for_rare_labels() -> None:
+    """A rare-positive label table must yield a val split with both classes.
+
+    An unstratified shuffle+slice can put all (or zero) positives on one side,
+    leaving the held-out val single-class -> roc_auc is NaN -> best_val_auc stays
+    -1.0 and the LAST-epoch (not best) model is returned. Stratifying prevents it.
+    """
+    from pragmatiq.training.finetuner import _stratified_split
+
+    # 40 users, only 4 positives: a 25% unstratified val could easily miss all 4.
+    labels = {f"u{i}": (1 if i < 4 else 0) for i in range(40)}
+    users = list(labels)
+    train, val = _stratified_split(users, labels, val_fraction=0.25, seed=0)
+    assert sum(labels[u] for u in val) >= 1, "val split has no positives (not stratified)"
+    assert any(labels[u] == 0 for u in val), "val split has no negatives"
+    assert train.isdisjoint(val) and (train | val) == set(users), "split must partition users"
+
+
+def test_stratified_split_never_empties_a_train_class() -> None:
+    """A small class with a high val_fraction must still leave a member in train,
+    or the backbone never sees that class during fine-tuning (n_val capped at len-1)."""
+    from pragmatiq.training.finetuner import _stratified_split
+
+    labels = {f"u{i}": (1 if i < 2 else 0) for i in range(10)}  # only 2 positives
+    train, val = _stratified_split(list(labels), labels, val_fraction=0.8, seed=0)
+    assert sum(labels[u] for u in train) >= 1, "train lost its only positives"
+    assert sum(labels[u] for u in val) >= 1, "val lost its only positives"
+    assert any(labels[u] == 0 for u in train), "train lost its negatives"
