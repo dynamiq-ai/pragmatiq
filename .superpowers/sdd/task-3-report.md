@@ -179,8 +179,9 @@ This test runs GREEN in the `.venv` (where heavy modules ARE installed) because 
 
 ### 5. Full suite
 ```
-~385 passed, 1 skipped (in progress during commit; ~93% at time of report)
-Expected: same as Task 2 result (385 passed, 1 skipped)
+386 passed, 1 skipped, 18 warnings in 1380.47s (0:23:00)
+(1 extra test from new boundary test; skip: bf16 Newton-Schulz CUDA-only)
+No failures.
 ```
 
 ### 6. MissingExtraError sanity
