@@ -166,6 +166,8 @@ def put_dir(local_dir: str | Path, url: str) -> None:
             # ensure parent exists
             parent = "/".join(remote_path.split("/")[:-1])
             if parent:
+                # makedirs is not on the base AbstractFileSystem spec but is
+                # present on all backends we support (memory, s3, gcs, azure).
                 fs.makedirs(parent, exist_ok=True)
             with src_file.open("rb") as src, fs.open(remote_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)

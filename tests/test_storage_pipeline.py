@@ -5,8 +5,6 @@ with both local and memory:// paths, then asserts the embeddings are identical.
 """
 from __future__ import annotations
 
-import io
-
 import numpy as np
 import pyarrow.parquet as pq
 import pytest
@@ -94,15 +92,7 @@ class TestStagingRemoteInput:
 
         from pragmatiq.storage.staging import staging
 
-        # Write a small dir tree to memory://
         mem = fsspec.filesystem("memory")
-        mem.makedirs("/testinput", exist_ok=True)
-        with mem.open("/testinput/a.txt", "wb") as f:
-            f.write(b"hello")
-        with mem.open("/testinput/sub/b.txt", "wb") as f:
-            f.write(b"world")
-
-        # Re-run and check inside context
         mem.makedirs("/testinput2", exist_ok=True)
         with mem.open("/testinput2/c.txt", "wb") as f:
             f.write(b"check")
@@ -239,67 +229,59 @@ class TestPutDir:
 
 @pytest.mark.slow
 def test_local_vs_remote_pipeline_equivalence(tmp_path):
-    """Embeddings produced via remote (memory://) staging must equal local embeddings."""
-    # --- LOCAL run ---
-    local_raw = tmp_path / "local" / "raw"
-    local_tok = tmp_path / "local" / "tok"
-    local_runs = tmp_path / "local" / "runs"
-    local_emb = tmp_path / "local" / "embeddings.parquet"
+    """Staging a checkpoint through memory:// and back must be bit-exact.
 
-    api.synthesize(SYNTH_CFG, out=local_raw, write_report=False)
-    api.tokenize(local_raw, local_tok)
+    One training run is performed locally; the resulting checkpoint is uploaded to
+    memory:// via put_dir, then embed() is called twice:
+      1. from the original local run directory
+      2. from the memory:// URL (staging materialises it back before inference)
+
+    The two embed calls use the SAME checkpoint and the SAME tokenised data, so
+    the outputs must be bit-for-bit identical — any difference would indicate that
+    staging corrupted the checkpoint or the tokenised input.
+    """
+    from pragmatiq.storage.cache import put_dir
+
+    raw = tmp_path / "raw"
+    tok = tmp_path / "tok"
+    runs = tmp_path / "runs"
+    local_emb = tmp_path / "local_embeddings.parquet"
+    staged_emb = tmp_path / "staged_embeddings.parquet"
+
+    # Single training run (local)
+    api.synthesize(SYNTH_CFG, out=raw, write_report=False)
+    api.tokenize(raw, tok)
     pretrain_result = api.pretrain(
-        local_tok,
+        tok,
         "testrun",
         model_size="nano",
         config=TRAIN_CFG,
-        runs_root=local_runs,
+        runs_root=runs,
     )
     local_run_dir = pretrain_result["run_dir"]
-    api.embed(local_tok, local_run_dir, out=local_emb)
+
+    # Embed from the local run directory
+    api.embed(tok, local_run_dir, out=local_emb)
     local_embs = _read_embeddings(local_emb)
 
-    # --- REMOTE (memory://) run ---
-    mem_raw = "memory:///pipeline/raw"
-    mem_tok = "memory:///pipeline/tok"
-    mem_runs = "memory:///pipeline/runs"
-    mem_emb = "memory:///pipeline/embeddings.parquet"
-
-    api.synthesize(SYNTH_CFG, out=mem_raw, write_report=False)
-    api.tokenize(mem_raw, mem_tok)
-    api.pretrain(
-        mem_tok,
-        "testrun",
-        model_size="nano",
-        config=TRAIN_CFG,
-        runs_root=mem_runs,
-    )
-    # After staging, run was uploaded to mem_runs/testrun; stage.input pulls it back for embed
-    mem_run = mem_runs.rstrip("/") + "/testrun"
-    api.embed(mem_tok, mem_run, out=mem_emb)
-
-    # Read remote embeddings back: download parquet from memory://
-    parquet_bytes = storage.read_bytes(mem_emb)
-    remote_embs_table = pq.read_table(io.BytesIO(parquet_bytes))
-    remote_embs = {
-        row["user_id"]: np.array(row["embedding"])
-        for _, row in remote_embs_table.to_pandas().iterrows()
-    }
+    # Upload the SAME checkpoint to memory:// and embed from there
+    mem_run = "memory:///pipeline/testrun"
+    put_dir(local_run_dir, mem_run)
+    api.embed(tok, mem_run, out=staged_emb)
+    staged_embs = _read_embeddings(staged_emb)
 
     # Assert same user IDs
-    assert set(local_embs.keys()) == set(remote_embs.keys()), (
+    assert set(local_embs.keys()) == set(staged_embs.keys()), (
         f"User ID sets differ: local={set(local_embs.keys())}, "
-        f"remote={set(remote_embs.keys())}"
+        f"staged={set(staged_embs.keys())}"
     )
 
-    # Assert embeddings are numerically identical (same model, same seed, same data)
+    # Staging must be bit-exact: same checkpoint bytes → same model weights → same output.
     for uid in local_embs:
-        np.testing.assert_allclose(
+        np.testing.assert_array_equal(
             local_embs[uid],
-            remote_embs[uid],
-            rtol=1e-5,
-            atol=1e-5,
-            err_msg=f"Embedding mismatch for user {uid}",
+            staged_embs[uid],
+            err_msg=f"Embedding mismatch for user {uid} — staging altered the checkpoint",
         )
 
 
@@ -308,5 +290,5 @@ def test_embed_missing_remote_run_raises(tmp_path):
     api.synthesize(dict(n_users=20, seed=1), out=tmp_path / "raw", write_report=False)
     api.tokenize(tmp_path / "raw", tmp_path / "tok")
 
-    with pytest.raises((FileNotFoundError, ValueError, OSError, RuntimeError)):
+    with pytest.raises((FileNotFoundError, ValueError, OSError, RuntimeError), match=r"nonexistent"):
         api.embed(tmp_path / "tok", "memory:///nonexistent/run")
