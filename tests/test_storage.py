@@ -11,6 +11,8 @@ gcsfs, adlfs), which allows testing the "missing backend" error path for real.
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -391,15 +393,29 @@ class TestPyarrowFilesystem:
 # --------------------------------------------------------------------------- #
 
 def test_storage_is_torch_free():
-    """import pragmatiq.storage must not pull in torch."""
-    # torch may already be in sys.modules from other tests in the suite.
-    # What we verify here is that the module itself doesn't import torch on its own.
-    # We do this by checking that importing the storage submodules doesn't
-    # raise and that no torch sub-attribute is referenced from them.
-    import pragmatiq.storage as s
-    required = ["get_fs", "local_path", "atomic_write", "materialize_dir", "pyarrow_filesystem"]
-    for name in required:
-        assert hasattr(s, name), f"Missing: {name}"
+    """import pragmatiq.storage must not pull in torch in a clean interpreter."""
+    # Run in a subprocess so we start from a truly fresh sys.modules — no leakage
+    # from other tests that may have imported torch earlier in the same process.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import pragmatiq.storage, sys; "
+                "assert not any("
+                "    m == 'torch' or m.startswith('torch.')"
+                "    for m in sys.modules"
+                "), f'torch found in sys.modules: {[m for m in sys.modules if m==\"torch\" or m.startswith(\"torch.\")]}'; "
+                "print('OK')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"torch-free check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+    assert "OK" in result.stdout
 
 
 def test_storage_public_api_complete():
@@ -407,3 +423,71 @@ def test_storage_public_api_complete():
     import pragmatiq.storage as s
     for name in s.__all__:
         assert hasattr(s, name), f"{name} in __all__ but not importable"
+
+
+# --------------------------------------------------------------------------- #
+# PRAGMATIQ_CACHE_DIR env-var is honoured by local_path
+# --------------------------------------------------------------------------- #
+
+def test_cache_dir_env_var_honoured(tmp_path, monkeypatch):
+    """PRAGMATIQ_CACHE_DIR must be used as the root for materialised remote files."""
+    custom_cache = tmp_path / "my_cache"
+    monkeypatch.setenv("PRAGMATIQ_CACHE_DIR", str(custom_cache))
+
+    url = "memory:///env_test/payload.bin"
+    data = b"\xca\xfe\xba\xbe"
+    storage.write_bytes(url, data)
+
+    with storage.local_path(url) as lp:
+        # The local path must live under our custom cache dir
+        assert os.path.abspath(lp).startswith(os.path.abspath(str(custom_cache))), (
+            f"Expected path under {custom_cache}, got {lp}"
+        )
+        # And the bytes must match
+        with open(lp, "rb") as fh:
+            assert fh.read() == data
+
+
+# --------------------------------------------------------------------------- #
+# Parent-directory auto-creation in write_bytes / write_text / atomic_write
+# --------------------------------------------------------------------------- #
+
+class TestParentDirAutoCreate:
+    """write_bytes, write_text, and atomic_write must create missing parent dirs."""
+
+    def test_write_bytes_local_creates_parent(self, tmp_path):
+        target = str(tmp_path / "new_subdir" / "deep" / "file.bin")
+        storage.write_bytes(target, b"hello")
+        assert os.path.exists(target)
+        assert open(target, "rb").read() == b"hello"
+
+    def test_write_text_local_creates_parent(self, tmp_path):
+        target = str(tmp_path / "sub" / "file.txt")
+        storage.write_text(target, "world")
+        assert os.path.exists(target)
+        assert open(target).read() == "world"
+
+    def test_write_bytes_memory_creates_parent(self):
+        url = "memory:///new_parent/child/data.bin"
+        storage.write_bytes(url, b"\x01\x02\x03")
+        assert storage.read_bytes(url) == b"\x01\x02\x03"
+
+    def test_write_text_memory_creates_parent(self):
+        url = "memory:///new_parent2/nested/text.txt"
+        storage.write_text(url, "remote text")
+        assert storage.read_text(url) == "remote text"
+
+    def test_atomic_write_local_creates_parent(self, tmp_path):
+        target = str(tmp_path / "atomic_sub" / "result.bin")
+        with storage.atomic_write(target, "wb") as fh:
+            fh.write(b"atomic")
+        assert os.path.exists(target)
+        assert open(target, "rb").read() == b"atomic"
+        # No stray .tmp left over
+        assert not os.path.exists(target + ".tmp")
+
+    def test_atomic_write_memory_creates_parent(self):
+        url = "memory:///atomic_parent/nested/out.bin"
+        with storage.atomic_write(url, "wb") as fh:
+            fh.write(b"remote-atomic")
+        assert storage.read_bytes(url) == b"remote-atomic"

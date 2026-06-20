@@ -10,6 +10,7 @@ is raised when the extra is absent.
 
 from __future__ import annotations
 
+import posixpath
 from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
@@ -168,8 +169,17 @@ def read_bytes(url: str | Path) -> bytes:
 
 
 def write_bytes(url: str | Path, data: bytes) -> None:
-    """Write *data* bytes to *url*, creating or overwriting the file."""
+    """Write *data* bytes to *url*, creating or overwriting the file.
+
+    The parent directory is created automatically if it does not exist yet,
+    matching the behaviour of :func:`~pragmatiq.storage.artifacts.write_json`.
+    This works for both local paths and remote/in-memory filesystems via
+    the underlying fsspec ``makedirs`` call.
+    """
     fs, path = get_fs(url)
+    parent = posixpath.dirname(path)
+    if parent and parent != path:
+        fs.makedirs(parent, exist_ok=True)
     fs.write_bytes(path, data)
 
 

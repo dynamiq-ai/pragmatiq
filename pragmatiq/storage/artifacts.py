@@ -105,6 +105,10 @@ def atomic_write(url: str, mode: str = "wb") -> Generator[Any, None, None]:
     fs, path = get_fs(url)
 
     if is_local(url):
+        # Ensure the parent directory exists before trying to write the .tmp file
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         tmp_path = path + ".tmp"
         try:
             with open(tmp_path, mode) as fh:
@@ -119,6 +123,10 @@ def atomic_write(url: str, mode: str = "wb") -> Generator[Any, None, None]:
     else:
         # Remote: write to a unique temp key, then mv
         parent = os.path.dirname(path)
+        # Ensure the parent "directory" exists on the remote filesystem before
+        # writing the temporary key (matters for memory:// and some real stores).
+        if parent:
+            fs.makedirs(parent, exist_ok=True)
         tmp_key = (parent + "/" if parent else "") + f".tmp-{uuid.uuid4().hex}"
         try:
             with fs.open(tmp_key, mode) as fh:
