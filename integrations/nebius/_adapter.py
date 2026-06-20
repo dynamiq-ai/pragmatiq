@@ -392,8 +392,6 @@ class NebiusAdapter:
 
         Raises:
             MissingExtraError: If the ``requests`` package is not installed.
-            NotImplementedError: The Nebius endpoint must be deployed first —
-                see ``docs/INTEGRATIONS.md``.
         """
         from integrations._base import _require
 

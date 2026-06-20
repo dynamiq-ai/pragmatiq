@@ -260,9 +260,9 @@ kubectl logs -l job-name=pragmatiq-embedder-embed -n pragmatiq
 
 ## Extending with new adapters
 
-Use the `@register_head`, `@register_masker`, `@register_value_encoder`
-decorators in `pragmatiq/registry.py` to extend the model.  For new cloud
-adapters:
+To add a new cloud adapter, subclass or implement the `CloudAdapter` protocol
+defined in `integrations/_base.py` with the required methods and attributes.
+For new cloud adapters:
 
 1. Create `integrations/<provider>/` with `_adapter.py` + `__init__.py`.
 2. Implement `name`, `manifest()`, `package()`, `healthcheck()` following the

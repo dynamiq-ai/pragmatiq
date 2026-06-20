@@ -419,9 +419,6 @@ class AzureAdapter:
 
         Raises:
             MissingExtraError: If the ``requests`` package is not installed.
-            NotImplementedError: The AKS cluster must be deployed first —
-                use the Helm chart from :meth:`package` and follow
-                ``docs/INTEGRATIONS.md``.
         """
         from integrations._base import _require
 
