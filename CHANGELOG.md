@@ -7,6 +7,28 @@ All notable changes to pragmatiq are documented in this file. This project
 follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
 the public API may change.
 
+## [0.1.0b4] — Hardening and the SageMaker guide
+
+Surgical reliability fixes from a pre-launch validation pass, plus a new deployment
+tutorial. No change to the public API or the foundation-model architecture.
+
+### Added
+- "Run pragmatiq on Amazon SageMaker" tutorial: a managed training job for
+  pretraining and a NVIDIA Triton real-time endpoint for serving, on synthetic data
+  or your own.
+- A topology-only GraphSAGE control (arm `e`) reported alongside the AML ablation arms.
+- A full `pytest` CI job, so the finetuner / uplift / multitask / inference unit
+  tests run in CI rather than only the smoke subset.
+
+### Changed
+- The AML relational-recovery gate uses a noise-aware margin — the mean paired
+  per-seed difference must exceed the cross-seed standard deviation — instead of a
+  fixed `0.01` a within-noise gap could clear.
+- The LoRA fine-tuner stratifies its validation split by label, so rare-positive
+  tasks keep both classes held out (no silent single-class split).
+- LightGBM moved to an optional `[gbdt]` extra; the default probe (scikit-learn
+  `HistGradientBoosting`) needs no extra. The `probe` CLI gained a `--seed` flag.
+
 ## [0.1.0b3] — Validation hardening
 
 Strengthens release-readiness validation and reproducibility safety. No change to

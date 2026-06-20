@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use pragmatiq, please cite the software and the PRAGMA paper that inspired it."
 type: software
 title: "pragmatiq: an open-source PRAGMA-inspired banking foundation model stack"
-version: "0.1.0b3"
+version: "0.1.0b4"
 license: Apache-2.0
 authors:
   - name: "Dynamiq"

@@ -86,7 +86,7 @@ jobs:
           git tag "v$V"
           git push origin "v$V"
           gh release create "v$V" \
-            --title "v$V" \
+            --title "pragmatiq $V" \
             --generate-notes \
             --target "$GITHUB_SHA" \
             $PRERELEASE

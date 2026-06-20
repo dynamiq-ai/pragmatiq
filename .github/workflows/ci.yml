@@ -51,6 +51,26 @@ jobs:
           -x
           --durations=10
 
+  tests:
+    # The full test suite — the `quality` job above runs only a fast smoke subset,
+    # so unit tests for finetuner / uplift / multitask / inference would otherwise
+    # never run in CI. This job closes that coverage gap.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install (CPU torch)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,serve]"
+      - name: Full pytest
+        run: pytest tests/ -q --durations=15
+
   python-compat:
     runs-on: ubuntu-latest
     timeout-minutes: 10
