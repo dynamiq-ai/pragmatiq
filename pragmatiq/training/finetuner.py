@@ -28,6 +28,33 @@ from .probe import _load_label_table, cutoffs_from_labels
 log = logging.getLogger(__name__)
 
 
+def _stratified_split(
+    users: list[str], labels: dict[str, int], val_fraction: float, seed: int
+) -> tuple[set[str], set[str]]:
+    """Partition ``users`` into ``(train, val)`` sets, stratified by label.
+
+    Splitting each class proportionally keeps both classes in the validation set
+    when the data allows. An unstratified shuffle-and-slice can leave the val
+    split single-class for rare labels (fraud/aml) — which makes the held-out
+    ROC-AUC NaN, so ``best_val_auc`` stays at the ``-1.0`` sentinel and the
+    last-epoch (not best) model is silently kept. At least one user per present
+    class is held out for val whenever that class has more than one member.
+    """
+    rng = np.random.default_rng(seed)
+    by_cls: dict[int, list[str]] = {}
+    for u in users:
+        by_cls.setdefault(int(labels[u]), []).append(u)
+    val: set[str] = set()
+    for members in by_cls.values():
+        members = list(members)
+        rng.shuffle(members)
+        # Cap at len-1 so at least one member of each class stays in train (a
+        # high val_fraction on a tiny class must not empty that class from train).
+        n_val = min(len(members) - 1, max(1, int(round(len(members) * val_fraction)))) if len(members) > 1 else 0
+        val.update(members[:n_val])
+    return set(users) - val, val
+
+
 @dataclass
 class FineTuneConfig:
     """Hyperparameters for LoRA fine-tuning."""
@@ -75,10 +102,9 @@ class LoRAFineTuner:
         self._cutoffs = cutoffs_from_labels(uids, eval_us)
         have = {u: int(lab) for u, lab in zip(uids, labels) if u in set(dataset.index.order)}
         users = list(have)
-        rng = np.random.default_rng(self.config.seed)
-        rng.shuffle(users)
-        n_val = max(1, int(len(users) * self.config.val_fraction))
-        val_users, train_users = set(users[:n_val]), set(users[n_val:])
+        # Stratify the val split by label so rare-positive tasks keep both classes
+        # held out (else val ROC-AUC is NaN and the last-epoch model is kept).
+        train_users, val_users = _stratified_split(users, have, self.config.val_fraction, self.config.seed)
         label_of = have
 
         opt = torch.optim.AdamW(self._trainable(), lr=self.config.lr,

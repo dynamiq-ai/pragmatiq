@@ -144,9 +144,10 @@ class TestAblationPlumbing:
         emb = _fake_embeddings(list(labels), dim=24)
         res = run_aml_ablation(dataset / "transfers.parquet", emb, labels, seeds=(0,), epochs=20)
         assert set(res["per_setup"]) == {"a_isolated", "b_gnn_pragma", "c_gnn_handcrafted",
-                                         "d_lr_handcrafted"}
+                                         "d_lr_handcrafted", "e_gnn_topology"}
         assert "verdict" in res and "pass" in res["verdict"]
         assert "message_passing_adds" in res["verdict"]  # no-graph control arm
+        assert "topology_only_recovers" in res["verdict"]  # arm (e) topology-only diagnostic
         for setup in res["per_setup"].values():
             assert 0.0 <= setup["mean"] <= 1.0
 
@@ -211,3 +212,41 @@ class TestAblationPlumbing:
         }
         write_aml_report(small, readme_path=readme, notebook_path=None)
         assert "full-scale table" in readme.read_text(), "CI-scale must not clobber full-scale"
+
+
+class TestGateMargin:
+    """The gate-6 relational-recovery margin must be noise-aware, not a fixed 0.01."""
+
+    def test_significant_margin_is_noise_aware(self) -> None:
+        from pragmatiq.models.gnn import _significant_margin
+
+        # Clearly separated, low cross-seed variance -> significant.
+        assert _significant_margin([0.67, 0.66, 0.68], [0.60, 0.59, 0.61]) is True
+        # Positive mean difference (~0.01) but swamped by cross-seed std (~0.06):
+        # the old fixed-0.01 gate passes this; a noise-aware gate must reject it.
+        assert _significant_margin([0.61, 0.55, 0.58], [0.59, 0.62, 0.50]) is False
+        # Tiny margin below the floor even with zero variance -> rejected.
+        assert _significant_margin([0.505, 0.505], [0.500, 0.500]) is False
+
+    def test_markdown_cites_the_gated_noise_aware_flag(self) -> None:
+        """The 'Relational recovery (gated)' line must print graph_recovers_signal
+        (the noise-aware paired-seed test the gate uses), not c_beats_a (the fixed
+        0.01 mean-margin reported flag), so the narrative matches the actual gate."""
+        from pragmatiq.models.gnn import aml_results_markdown
+
+        res = {
+            "per_setup": {"a_isolated": {"mean": 0.60, "std": 0.05},
+                          "b_gnn_pragma": {"mean": 0.61, "std": 0.05},
+                          "c_gnn_handcrafted": {"mean": 0.62, "std": 0.05},
+                          "d_lr_handcrafted": {"mean": 0.59, "std": 0.05}},
+            "raw": {"a_isolated": [0.6]},
+            # Divergent on purpose: the fixed-margin c_beats_a is True, but the
+            # noise-aware gate (graph_recovers_signal) is False.
+            "verdict": {"pass": False, "c_beats_a": True, "graph_recovers_signal": False,
+                        "message_passing_adds": False, "b_beats_a": False, "b_beats_c": False,
+                        "paper_ordering": False},
+            "n_nodes": 100, "n_mules": 5, "n_edges": 40, "seeds": [0, 1, 2], "epochs": 10,
+        }
+        md = aml_results_markdown(res)
+        assert "(c) > (a) = False" in md, "markdown must cite the gated noise-aware flag"
+        assert "(c) > (a) = True" not in md

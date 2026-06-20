@@ -99,12 +99,13 @@ def probe_cmd(
     label: Path = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
     probe_model: str = typer.Option("gbdt", help="Probe head: gbdt | logistic | lightgbm."),
+    seed: int = typer.Option(0, help="Probe random seed (for reproducible AUCs)."),
 ) -> None:
     """Probe a trained model on a label table; reports ROC-AUC + PR-AUC vs baseline."""
     from pragmatiq import api
 
     typer.echo(json.dumps(
-        api.probe(shard_dir, run, label, device=device, probe_model=probe_model), indent=2))
+        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed), indent=2))
 
 
 @app.command("uplift")
