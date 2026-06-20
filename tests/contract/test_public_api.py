@@ -12,15 +12,12 @@ functions (``pretrain``, ``quickstart``, …) are covered only in STABILITY.md.
 from __future__ import annotations
 
 import inspect
-import json
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import pragmatiq.api as api_module
-
 
 # ---------------------------------------------------------------------------
 # Helper

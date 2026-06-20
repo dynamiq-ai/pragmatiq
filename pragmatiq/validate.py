@@ -14,7 +14,14 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from pragmatiq.core.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, SOURCES, TRANSFERS_SCHEMA, label_schema
+from pragmatiq.core.schema import (
+    EVENTS_SCHEMA,
+    LABEL_TASKS,
+    PROFILES_SCHEMA,
+    SOURCES,
+    TRANSFERS_SCHEMA,
+    label_schema,
+)
 
 
 @dataclass

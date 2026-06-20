@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Helper: walk a Typer app and collect (command_path, [param_names])
 # ---------------------------------------------------------------------------
@@ -170,6 +169,7 @@ class TestCLISmoke:
     def _runner():
         """Return a (CliRunner, app) pair, suppressing the mix_stderr kwarg if unsupported."""
         from typer.testing import CliRunner
+
         from pragmatiq.cli import app
         try:
             return CliRunner(mix_stderr=False), app

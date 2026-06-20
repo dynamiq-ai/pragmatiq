@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pragmatiq.core.schema import SOURCE_TXN
+
 from .config import WorldConfig
 from .simulator import UserTrace
 from .world import DAY_US, World

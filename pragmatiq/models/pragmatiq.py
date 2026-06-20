@@ -326,8 +326,9 @@ class PragmaModel(nn.Module):
         ``lifelong``, ``as_of``); see :class:`~pragmatiq.core.schema.UserRecord`.
         Requires a model loaded via :meth:`from_pretrained` (carries a tokenizer).
         """
-        from ..data.collate import VarlenCollator
         from pragmatiq.core.schema import UserRecord
+
+        from ..data.collate import VarlenCollator
 
         tok = getattr(self, "_tokenizer", None)
         if tok is None:

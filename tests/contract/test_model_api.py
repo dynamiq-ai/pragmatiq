@@ -10,7 +10,6 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
@@ -180,6 +179,7 @@ def test_embed_records_optional_params() -> None:
 def test_embed_records_return_annotation() -> None:
     """embed_records must declare a return-type annotation (np.ndarray)."""
     import numpy as np
+
     from pragmatiq.models.pragmatiq import PragmaModel
 
     sig = inspect.signature(PragmaModel.embed_records)

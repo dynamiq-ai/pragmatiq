@@ -38,9 +38,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pragmatiq.core.schema import UserRecord
+
 from ..progress import progress
 from ..registry import get_value_encoder, register_value_encoder
-from pragmatiq.core.schema import UserRecord
 
 log = logging.getLogger(__name__)
 
