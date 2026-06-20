@@ -1,23 +1,20 @@
 ---
-title: Run pragmatiq on AWS
-description: End-to-end on AWS — train the pragmatiq banking foundation model on an EC2 GPU instance with the AWS Deep Learning AMI, push artifacts to S3, then serve embeddings with NVIDIA Triton on an Amazon SageMaker real-time endpoint.
+title: Run pragmatiq on Amazon SageMaker
+description: Train the pragmatiq banking foundation model with an Amazon SageMaker training job and serve user embeddings from a NVIDIA Triton real-time endpoint — end to end, with pip install pragmatiq, on synthetic or your own data.
 ---
 
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
 
-This guide runs the **whole pragmatiq pipeline on AWS**, in two phases:
+This guide runs pragmatiq **entirely on Amazon SageMaker** — no servers to manage. You prep data in **SageMaker Studio**, train with a managed **SageMaker training job**, and serve embeddings from a **NVIDIA Triton real-time endpoint**. pragmatiq is on PyPI, so every step is just `pip install pragmatiq`.
 
-1. **Train on EC2** — launch a single GPU instance from the [AWS Deep Learning AMI](https://docs.aws.amazon.com/dlami/latest/devguide/), generate data, tokenize, pretrain, embed, probe, fine-tune, and run the AML graph ablation; stage every artifact to **Amazon S3**.
-2. **Serve on SageMaker** — package the production **NVIDIA Triton** model and deploy it as an **Amazon SageMaker real-time endpoint** that returns user embeddings over HTTPS.
+| Step | SageMaker service | Output |
+| --- | --- | --- |
+| 1. Prep data | Studio notebook | `events.parquet` … in S3 |
+| 2. Train | Training job (PyTorch estimator) | a trained run (`model.tar.gz`) in S3 |
+| 3. Serve | Triton real-time endpoint | embeddings over HTTPS |
 
-It mirrors the local [Pretrain](/docs/tutorials/pretrain) and [Serve with Triton](/docs/tutorials/serve) tutorials — same commands, same Triton request shape — just on AWS-managed infrastructure. pragmatiq is **CPU-first**, so you can rehearse the entire flow on a CPU instance before paying for a GPU.
-
-<Callout type="info" title="Dynamiq is an AWS Partner">
-If you're standing this up on AWS at scale — multi-GPU training, SageMaker pipelines, or wiring
-embeddings into a feature store — [we can help](https://getdynamiq.ai). The steps below are
-self-serve and use only standard AWS services.
-</Callout>
+It mirrors the local [Pretrain](/docs/tutorials/pretrain) and [Serve with Triton](/docs/tutorials/serve) tutorials — same commands, same Triton request shape — on SageMaker-managed infrastructure. Works on the **synthetic generator** or on **your own bank data** (same four-file contract).
 
 ## How pragmatiq works — a foundation model for events, not text
 
@@ -76,104 +73,20 @@ All three are bidirectional, pre-norm, GELU, `ffn = 4d` — and the whole batch 
 
 ### The Nemotron variant
 
-By default, high-cardinality text is BPE. The optional **PRAGMA+Nemotron** variant instead emits **one sentinel token** per text field and lets a *frozen* text model embed its raw string; masked text tokens are reconstructed with **MSE** against that vector, so the loss becomes $\mathcal{L} = \text{CE} + \lambda \cdot \text{MSE}$. It's switchable from the data step alone and **off by default** (the BPE path stays byte-identical). To train it on AWS, `pip install -e ".[extras]"` on the instance, then tokenize with `configs/data/tokenizer_nemotron.yaml` before `pretrain` — the text branch is auto-wired. See [the variant page](/docs/concepts/nemotron).
+By default, high-cardinality text is BPE. The optional **PRAGMA+Nemotron** variant instead emits **one sentinel token** per text field and lets a *frozen* text model embed its raw string; masked text tokens are reconstructed with **MSE** against that vector, so the loss becomes $\mathcal{L} = \text{CE} + \lambda \cdot \text{MSE}$. It's switchable from the data step alone and **off by default** (the BPE path stays byte-identical) — tokenize with `configs/data/tokenizer_nemotron.yaml` and `pip install "pragmatiq[extras]"` for the frozen embedder. See [the variant page](/docs/concepts/nemotron).
 
-## Prerequisites
+## Set up SageMaker
 
 <Steps>
 
 <Step>
 
-### An AWS account + the CLI
+### Open SageMaker Studio
 
-Install the [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) and configure credentials:
-
-```bash
-aws configure          # access key, secret, default region (e.g. us-east-1), output (json)
-aws sts get-caller-identity   # confirm you're authenticated
-```
-
-</Step>
-
-<Step>
-
-### A GPU quota (do this first — it can take time)
-
-New AWS accounts start with a **zero vCPU quota for G and P instances**, so a GPU launch fails until you raise it. In the [Service Quotas console](https://console.aws.amazon.com/servicequotas/home/services/ec2/quotas/) (EC2), request an increase for:
-
-- **Running On-Demand G and VT instances** — for `g5` / `g6` / `g6e` (this guide's default), or
-- **Running On-Demand P instances** — for `p4d` / `p4de` / `p5`.
-
-Ask for at least the vCPU count of the instance you plan to launch (e.g. 4 for `g6e.xlarge`). Small increases often auto-approve; larger ones go to Support. See [EC2 instance quotas](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html).
-
-</Step>
-
-<Step>
-
-### A key pair, security group, and S3 access
+In the AWS console, open [Amazon SageMaker Studio](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html) and launch a **JupyterLab** space — this is your driver environment. You'll also need a [SageMaker execution role](https://docs.aws.amazon.com/sagemaker/latest/dg/sagemaker-roles.html) (Studio creates one) with access to your S3 bucket and ECR, and an S3 bucket for data and artifacts:
 
 ```bash
-# SSH key pair
-aws ec2 create-key-pair --key-name pragmatiq --query KeyMaterial --output text > pragmatiq.pem
-chmod 600 pragmatiq.pem
-
-# An S3 bucket for datasets, checkpoints, and the model artifact
 aws s3 mb s3://YOUR-pragmatiq-bucket
-```
-
-Create a security group that allows **SSH from your IP only**, and attach an **IAM instance profile** that grants the instance read/write to your bucket (the [EC2 → S3 role pattern](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/iam-roles-for-amazon-ec2.html); scope it to your bucket rather than `AmazonS3FullAccess` for least privilege). See [security groups](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/creating-security-group.html) and [key pairs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/ec2-key-pairs.html).
-
-</Step>
-
-</Steps>
-
-## Pick an instance
-
-pragmatiq trains on one GPU and runs on CPU when there isn't one. Right-size to the model — there's no need for an 8-GPU box to train the 10M-parameter `small` config.
-
-| Stage | Instance | Accelerator | When |
-| --- | --- | --- | --- |
-| Smoke / data prep | [`c7i.2xlarge`](https://aws.amazon.com/ec2/instance-types/c7i/) | CPU only | Generate + tokenize, or rehearse end-to-end. No GPU quota needed. |
-| **Single-GPU dev (recommended)** | [`g6e.xlarge`](https://aws.amazon.com/ec2/instance-types/g6e/) | 1× NVIDIA L40S (48 GB) | `small`/`medium` models, bf16 + flash-attn; cheap enough to iterate. |
-| Budget single-GPU | [`g5.xlarge`](https://aws.amazon.com/ec2/instance-types/g5/) / [`g6.xlarge`](https://aws.amazon.com/ec2/instance-types/g6/) | 1× A10G / L4 (24 GB) | Lowest-cost GPU entry; uses the SDPA attention path. |
-| Full scale | [`p4de.24xlarge`](https://aws.amazon.com/ec2/instance-types/p4/) / [`p5.48xlarge`](https://aws.amazon.com/ec2/instance-types/p5/) | 8× A100 80 GB / H100 | The 1B `large` config and multi-GPU/multi-node DDP. |
-
-<Callout type="info" title="Cost & spot">
-Prices move, so size with the [AWS Pricing Calculator](https://calculator.aws/) rather than a number
-printed here. Because pragmatiq checkpoints capture the full training state (and resume bit-exactly),
-training is a good fit for [Spot Instances](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/spot-savings.html) —
-checkpoint to S3, and a reclaimed instance resumes where it left off. The flash-attn kernel needs an
-Ada/Hopper GPU (L40S, L4, H100); on older cards pragmatiq falls back to PyTorch SDPA automatically.
-</Callout>
-
-## Train on EC2
-
-You have two paths: the **DIY EC2 instance** below (full control, closest to a local workflow), or a managed **SageMaker training job** (the callout) that provisions the box, runs your script, and tears it down for you.
-
-<Callout type="info" title="Managed alternative: a SageMaker training job">
-Instead of SSHing into an instance, hand the run to SageMaker. With the [SageMaker Python SDK
-`PyTorch` estimator](https://docs.aws.amazon.com/sagemaker/latest/dg/data-parallel-framework-estimator.html),
-point `entry_point` at a thin script that calls `api.synthesize` / `api.tokenize` / `api.pretrain`,
-set the instance type (e.g. `ml.g5.2xlarge`), and SageMaker mounts your S3 input channels at
-`/opt/ml/input/data/…`, runs the job, and uploads `/opt/ml/model` back to S3. Turn on
-[managed spot training](https://docs.aws.amazon.com/sagemaker/latest/dg/model-managed-spot-training.html)
-with checkpoints to `/opt/ml/checkpoints` for up to ~90% savings — pragmatiq's bit-exact `--resume`
-makes interruptions safe. [SageMaker Studio](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html)
-is the notebook-driven way to launch the same jobs.
-</Callout>
-
-<Steps>
-
-<Step>
-
-### Launch from the Deep Learning AMI
-
-Launch your chosen instance from a current **Deep Learning OSS Nvidia Driver AMI GPU PyTorch (Ubuntu 22.04)** — it ships the NVIDIA driver, CUDA, and a CUDA-enabled PyTorch, so there's nothing to compile. Find the latest AMI id in the [DLAMI release notes](https://docs.aws.amazon.com/dlami/latest/devguide/appendix-ami-release-notes.html), attach your key pair, security group, and the S3 instance profile, and give it a **100–200 GB gp3** root volume for checkpoints and shards ([EBS gp3](https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html)).
-
-```bash
-ssh -i pragmatiq.pem ubuntu@<INSTANCE_PUBLIC_IP>
-nvidia-smi                                   # driver + GPU visible
-python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 ```
 
 </Step>
@@ -182,116 +95,188 @@ python -c "import torch; print(torch.__version__, torch.cuda.is_available())"
 
 ### Install pragmatiq
 
-The DLAMI's PyTorch already has CUDA, so install pragmatiq against it (don't reinstall torch):
+In a Studio notebook cell, install pragmatiq (PyPI) and the SageMaker SDK:
 
 ```bash
-git clone https://github.com/dynamiq-ai/pragmatiq.git && cd pragmatiq
-pip install -e ".[serve]"      # .[serve] adds the ONNX/Triton client used later
+pip install pragmatiq sagemaker
 ```
 
-</Step>
-
-<Step>
-
-### Generate & tokenize
-
-```bash
-pragmatiq synth generate --out data/synth --n-users 50000 --seed 0 --n-workers 8
-pragmatiq tokenize data/synth --out data/tok --n-workers 8
+```python
+import sagemaker
+sess = sagemaker.Session()
+role = sagemaker.get_execution_role()
+bucket = "YOUR-pragmatiq-bucket"
 ```
-
-The generator is **deterministic** (same seed → byte-identical output for any worker count), and the tokenizer fit is worker-count-invariant. See [Generate & tokenize](/docs/tutorials/data-pipeline). To model your own book without moving raw records, `pragmatiq synth calibrate --stats configs/data/aggregates.example.yaml` fits the generator to shareable aggregates.
-
-</Step>
-
-<Step>
-
-### Pretrain
-
-```bash
-pragmatiq pretrain data/tok --name demo --model-size small --config configs/pretrain.yaml
-```
-
-The trainer auto-detects CUDA (**bf16-mixed on GPU**, fp32 on CPU) — identical command either way — and prints a `step, loss, mlm_acc, tokens/s, ETA` heartbeat. For larger books pass `--config auto` to size the batch, gradient accumulation, and schedule from the data and the device; add `--devices N` for multi-GPU Fabric DDP on a `p4de`/`p5`. Checkpoints capture model, both optimizers, scheduler, sampler position, and RNG states, so `--resume auto` survives a Spot reclaim. See [Pretrain (and scale)](/docs/tutorials/pretrain).
-
-</Step>
-
-<Step>
-
-### Embed, probe, fine-tune, and the AML graph
-
-```bash
-pragmatiq embed data/tok --run runs/demo --out embeddings.parquet
-pragmatiq probe data/tok --run runs/demo \
-  --label data/synth/labels/default_12m.parquet --probe-model gbdt
-pragmatiq finetune data/tok --run runs/demo \
-  --label data/synth/labels/default_12m.parquet --config configs/finetune/credit.yaml
-pragmatiq gnn data/tok --run runs/demo \
-  --transfers data/synth/transfers.parquet \
-  --aml-label data/synth/labels/aml.parquet --epochs 150
-```
-
-The probe reports ROC-AUC + PR-AUC against a same-classifier raw-count baseline (histories are truncated at each label's `eval_ts`, so metrics never see the outcome window). See [Embed, probe & fine-tune](/docs/tutorials/evaluate) and the [AML GNN ablation](/docs/tutorials/aml-gnn).
-
-</Step>
-
-<Step>
-
-### Stage artifacts to S3
-
-```bash
-aws s3 sync runs/demo s3://YOUR-pragmatiq-bucket/runs/demo
-aws s3 cp embeddings.parquet s3://YOUR-pragmatiq-bucket/embeddings.parquet
-```
-
-The trained run in S3 is the input to serving. You can now **stop or terminate** the training instance. See [`aws s3 sync`](https://docs.aws.amazon.com/cli/latest/reference/s3/sync.html).
 
 </Step>
 
 </Steps>
 
-## Serve with NVIDIA Triton on Amazon SageMaker
+## Get your data into S3
 
-pragmatiq's production serving path is a **Triton python backend running the native varlen PyTorch model** — the exact no-padding forward used in training (see [Serve with Triton](/docs/tutorials/serve)). On AWS, the managed home for that is an [Amazon SageMaker real-time endpoint with the Triton Inference Server](https://docs.aws.amazon.com/sagemaker/latest/dg/triton.html): you bring the Triton model repository, SageMaker handles scaling, health checks, and HTTPS.
+pragmatiq trains on a four-file [parquet contract](/docs/reference/data-contract) — the same files whether they're synthetic or yours. Produce them, then upload to S3.
+
+<Tabs items={['Synthetic data', 'Bring your own data']}>
+<Tab value="Synthetic data">
+
+The generator is **deterministic** (same seed → byte-identical output) and writes the full contract — `events.parquet`, `profiles.parquet`, `transfers.parquet`, and `labels/*.parquet`:
+
+```python
+from pragmatiq import api
+api.synthesize({"n_users": 50000, "seed": 0}, out="data", n_workers=8)
+sess.upload_data("data", bucket=bucket, key_prefix="data")   # -> s3://.../data/
+```
+
+To resemble your real book without moving raw records, `pragmatiq synth calibrate --stats configs/data/aggregates.example.yaml` fits the generator's priors to shareable aggregates.
+
+</Tab>
+<Tab value="Bring your own data">
+
+Write the four files with the exact dtypes in the [data contract](/docs/reference/data-contract). The key idea: event `fields` and profile `attributes` are **`map<string,string>`** — pass raw string values (`"42.10"`, `"5411"`), and the tokenizer infers numeric / categorical / text per field. Don't pre-bin or pre-encode.
+
+```python
+import pyarrow as pa, pyarrow.parquet as pq
+
+events = pa.table({
+    "user_id": ["u1", "u1"],
+    "ts": pa.array([1_700_000_000_000_000, 1_700_003_600_000_000], type=pa.timestamp("us")),
+    "source": ["transaction", "app"],            # groups schemas: transaction / app / trading …
+    "fields": [                                   # map<string,string> per event
+        {"amount": "42.10", "mcc": "5411", "merchant": "TESCO STORES 4521"},
+        {"screen": "home", "action": "view"},
+    ],
+})
+pq.write_table(events, "data/events.parquet")
+# + profiles.parquet (user_id, as_of, attributes, lifelong),
+#   optional transfers.parquet and labels/<task>.parquet — see the data contract.
+```
+
+Forecast label tables carry an `eval_ts` per user, so histories are truncated before embedding (a forecast, not a hindcast). Validate and upload:
+
+```python
+import subprocess
+subprocess.run(["pragmatiq", "validate", "data"], check=True)   # fails loudly on dtype/integrity issues
+sess.upload_data("data", bucket=bucket, key_prefix="data")
+```
+
+<Callout title="Your data stays in your account">
+Everything runs in your AWS account and VPC. The generator and `synth calibrate` exist so you can
+develop against a realistic book without moving raw records.
+</Callout>
+
+</Tab>
+</Tabs>
+
+## Train with a SageMaker training job
+
+A SageMaker training job runs your script on a GPU instance it provisions and tears down for you, reading the data from S3 and writing the trained run back to S3. Two small files define it.
 
 <Steps>
 
 <Step>
 
-### Build a SageMaker-Triton image with pragmatiq installed
+### The entry point and its requirements
 
-The stock Triton image can't `import pragmatiq`, so — exactly as [`deploy/triton/Dockerfile`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/Dockerfile) does for local serving — install pragmatiq into Triton's Python. For SageMaker, base the image on the **SageMaker Triton container** so it speaks SageMaker's inference contract (`/ping`, `/invocations`), then push it to [Amazon ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/docker-push-ecr-image.html):
+`src/train.py` — tokenizes the mounted data channel and pretrains, writing the run to the SageMaker model directory (which SageMaker uploads to S3):
 
-```dockerfile
-# Dockerfile.sagemaker — base on the SageMaker Triton DLC for your region/version
-# (see the SageMaker Triton docs for the current image URI), then add pragmatiq.
-FROM <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/sagemaker-tritonserver:<TAG>
-RUN pip install --no-cache-dir "pragmatiq[serve] @ git+https://github.com/dynamiq-ai/pragmatiq.git"
+```python
+# src/train.py
+import os
+from pragmatiq import api
+
+data = os.environ["SM_CHANNEL_DATA"]      # S3 "data" channel, mounted by SageMaker
+out  = os.environ["SM_MODEL_DIR"]         # /opt/ml/model -> tarred to S3 as model.tar.gz
+
+api.tokenize(data, "/tmp/tok", n_workers=8)
+api.pretrain("/tmp/tok", "run", model_size="small",
+             config={"max_steps": 4000, "token_budget": 16384}, runs_root=out)
 ```
 
-```bash
-aws ecr create-repository --repository-name pragmatiq-triton
-# docker build -t pragmatiq-triton -f Dockerfile.sagemaker . && push to ECR (see the ECR docs)
-```
+`src/requirements.txt` — SageMaker installs this into the training container before your script runs. **This is the `pip install`** that pulls pragmatiq from PyPI into the managed job:
 
-Bake every dependency into the image — SageMaker runs the container read-only, so there's no package install at request time.
+```text
+pragmatiq[serve]
+```
 
 </Step>
 
 <Step>
 
-### Package the model repository + run
+### Launch it
 
-SageMaker loads a Triton **model repository** from a `model.tar.gz` in S3. Use pragmatiq's committed repository layout ([`deploy/triton/model_repository/pragmatiq_embedder/`](https://github.com/dynamiq-ai/pragmatiq/tree/main/deploy/triton/model_repository)) — the `config.pbtxt` plus `1/model.py` — and include the trained run it should serve:
+From the Studio notebook, point the [PyTorch estimator](https://docs.aws.amazon.com/sagemaker/latest/dg/data-parallel-framework-estimator.html) at your script and the S3 data channel. The trainer auto-detects CUDA (**bf16 on GPU**), so the same code runs on any instance:
+
+```python
+from sagemaker.pytorch import PyTorch
+
+est = PyTorch(
+    entry_point="train.py", source_dir="src",
+    role=role, framework_version="2.4", py_version="py311",
+    instance_type="ml.g5.2xlarge", instance_count=1,
+)
+est.fit({"data": f"s3://{bucket}/data"})
+print(est.model_data)        # s3://.../model.tar.gz — the trained run
+```
+
+Turn on [managed spot training](https://docs.aws.amazon.com/sagemaker/latest/dg/model-managed-spot-training.html) (`use_spot_instances=True` + a checkpoint path) for up to ~90% savings — pragmatiq checkpoints capture the full state and resume bit-exactly, so an interruption is safe.
+
+</Step>
+
+</Steps>
+
+## Serve with NVIDIA Triton on a SageMaker endpoint
+
+pragmatiq's production serving path is a **Triton python backend running the native varlen PyTorch model** — the exact no-padding forward used in training (see [Serve with Triton](/docs/tutorials/serve)). SageMaker hosts it on a managed real-time endpoint: you supply a Triton model repository and a container with pragmatiq installed.
+
+<Steps>
+
+<Step>
+
+### Build the serving image
+
+The stock Triton image can't `import pragmatiq`, so base on the [SageMaker Triton container](https://docs.aws.amazon.com/sagemaker/latest/dg/deploy-models-frameworks-triton.html) (it already speaks SageMaker's `/ping` + `/invocations` contract) and `pip install pragmatiq`. Bake every dependency in — SageMaker runs the container read-only:
+
+```dockerfile
+# Dockerfile — base on the current SageMaker Triton image for your region (see the
+# SageMaker Triton docs for the URI), then add pragmatiq from PyPI.
+FROM <ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/sagemaker-tritonserver:<TAG>
+RUN pip install --no-cache-dir "pragmatiq[serve]"
+```
+
+Build it and push to [Amazon ECR](https://docs.aws.amazon.com/AmazonECR/latest/userguide/docker-push-ecr-image.html):
 
 ```bash
-mkdir -p model_repository/pragmatiq_embedder/1
-cp -r deploy/triton/model_repository/pragmatiq_embedder/config.pbtxt model_repository/pragmatiq_embedder/
-cp -r deploy/triton/model_repository/pragmatiq_embedder/1/model.py   model_repository/pragmatiq_embedder/1/
-aws s3 cp s3://YOUR-pragmatiq-bucket/runs/demo model_repository/pragmatiq_embedder/1/run --recursive
-tar -C model_repository -czf model.tar.gz pragmatiq_embedder
-aws s3 cp model.tar.gz s3://YOUR-pragmatiq-bucket/triton/model.tar.gz
+aws ecr create-repository --repository-name pragmatiq-triton
+# docker build -t pragmatiq-triton . && tag + push to ECR (see the ECR docs)
 ```
+
+</Step>
+
+<Step>
+
+### Package the model repository
+
+A Triton **model repository** is a folder per model. pragmatiq ships one — `config.pbtxt` plus a version directory `1/` holding `model.py`. Drop the trained run in alongside it and tar the repo to S3:
+
+```bash
+base=https://raw.githubusercontent.com/dynamiq-ai/pragmatiq/main/deploy/triton/model_repository/pragmatiq_embedder
+mkdir -p model_repository/pragmatiq_embedder/1/run
+curl -sL $base/config.pbtxt -o model_repository/pragmatiq_embedder/config.pbtxt
+curl -sL $base/1/model.py   -o model_repository/pragmatiq_embedder/1/model.py
+
+aws s3 cp s3://YOUR-pragmatiq-bucket/.../model.tar.gz run.tgz   # est.model_data
+tar -xzf run.tgz -C model_repository/pragmatiq_embedder/1/run --strip-components=1
+
+tar -C model_repository -czf triton.tar.gz pragmatiq_embedder
+aws s3 cp triton.tar.gz s3://YOUR-pragmatiq-bucket/triton/triton.tar.gz
+```
+
+<Callout type="info" title="Why the “1/” directory?">
+Triton requires every model's files to live in a numbered **version directory** —
+`pragmatiq_embedder/1/`. The number is the model version; Triton serves the highest one, so
+`2/`, `3/` … let you roll versions without touching the endpoint. The `config.pbtxt` sits one
+level up, at the model root.
+</Callout>
 
 </Step>
 
@@ -299,12 +284,12 @@ aws s3 cp model.tar.gz s3://YOUR-pragmatiq-bucket/triton/model.tar.gz
 
 ### Create the model, endpoint config, and endpoint
 
-Point a SageMaker **Model** at your ECR image and the S3 artifact, then create an **endpoint** on a GPU instance (`ml.g5.xlarge` is a fine starting point):
+Point a SageMaker **Model** at your ECR image and the S3 artifact. The environment variables tell the SageMaker Triton container which model to load and where the run lives inside the unpacked archive, and size the python backend's shared memory:
 
 ```bash
 aws sagemaker create-model --model-name pragmatiq-embedder \
   --execution-role-arn arn:aws:iam::<ACCOUNT>:role/<SageMakerExecutionRole> \
-  --primary-container 'Image=<ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/pragmatiq-triton:latest,ModelDataUrl=s3://YOUR-pragmatiq-bucket/triton/model.tar.gz,Environment={SAGEMAKER_TRITON_DEFAULT_MODEL_NAME=pragmatiq_embedder,SAGEMAKER_TRITON_SHM_DEFAULT_BYTE_SIZE=1073741824}'
+  --primary-container 'Image=<ACCOUNT>.dkr.ecr.<REGION>.amazonaws.com/pragmatiq-triton:latest,ModelDataUrl=s3://YOUR-pragmatiq-bucket/triton/triton.tar.gz,Environment={SAGEMAKER_TRITON_DEFAULT_MODEL_NAME=pragmatiq_embedder,PRAGMATIQ_RUN=/opt/ml/model/pragmatiq_embedder/1/run,SAGEMAKER_TRITON_SHM_DEFAULT_BYTE_SIZE=1073741824}'
 
 aws sagemaker create-endpoint-config --endpoint-config-name pragmatiq-embedder \
   --production-variants VariantName=main,ModelName=pragmatiq-embedder,InstanceType=ml.g5.xlarge,InitialInstanceCount=1
@@ -314,15 +299,13 @@ aws sagemaker create-endpoint --endpoint-name pragmatiq-embedder \
 aws sagemaker wait endpoint-in-service --endpoint-name pragmatiq-embedder
 ```
 
-`SAGEMAKER_TRITON_DEFAULT_MODEL_NAME` tells the single-model endpoint which model in the repository to load, and the python backend runs in shared memory, so raise `SAGEMAKER_TRITON_SHM_DEFAULT_BYTE_SIZE` above its 16 MB default. Add [auto-scaling](https://docs.aws.amazon.com/sagemaker/latest/dg/endpoint-auto-scaling.html) once it's live; the [SageMaker Triton guide](https://docs.aws.amazon.com/sagemaker/latest/dg/deploy-models-frameworks-triton.html) has the current container URIs and the execution-role policy.
-
 </Step>
 
 <Step>
 
 ### Invoke it
 
-The request body is the **same `records_json` payload** as local Triton — a JSON array of plain user records; the response is the `[n_users, dim]` fp32 embedding matrix. Batching happens *inside* the model (the varlen forward packs all users with no padding), and unseen keys/values map to `[UNK]` rather than raising. The SageMaker Triton container adapts Triton's KServe v2 protocol to SageMaker's `/invocations`, so you POST the same body through the standard `invoke-endpoint`.
+The request body is the **same `records_json` payload** as local Triton — a JSON array of plain user records; the response is the `[n_users, dim]` fp32 embedding matrix. Batching happens *inside* the model (the varlen forward packs all users with no padding), and unseen keys/values map to `[UNK]` rather than raising. The SageMaker Triton container adapts Triton's KServe v2 protocol to `/invocations`, so you POST it through the standard `invoke-endpoint`:
 
 ```bash
 aws sagemaker-runtime invoke-endpoint --endpoint-name pragmatiq-embedder \
@@ -331,37 +314,26 @@ aws sagemaker-runtime invoke-endpoint --endpoint-name pragmatiq-embedder \
   out.json && cat out.json
 ```
 
+Add [auto-scaling](https://docs.aws.amazon.com/sagemaker/latest/dg/endpoint-auto-scaling.html) once it's live.
+
 </Step>
 
 </Steps>
 
-<Callout type="info" title="Other serving options">
-Prefer not to use SageMaker? The same image runs anywhere Triton does: a **single EC2 GPU instance**
-(closest to the repo's [`scripts/deploy_serving.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/deploy_serving.sh)
-+ `docker compose`), **[Amazon ECS](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-gpu.html)**, or
-**Amazon EKS**. SageMaker trades a bit of control for managed scaling, health checks, and HTTPS.
-
-For irregular traffic, SageMaker also offers [async inference](https://docs.aws.amazon.com/sagemaker/latest/dg/async-inference.html) (queue-based, scales to zero) and [serverless inference](https://docs.aws.amazon.com/sagemaker/latest/dg/serverless-endpoints.html) (pay-per-request) — serverless is **CPU-only**, which suits pragmatiq's CPU forward; real-time is the low-latency GPU default.
-</Callout>
-
 ## Clean up
 
-GPU resources bill by the hour — tear down what you're not using:
+A real-time endpoint bills per instance-hour while it's in service — delete it when you're done:
 
 ```bash
 aws sagemaker delete-endpoint --endpoint-name pragmatiq-embedder
 aws sagemaker delete-endpoint-config --endpoint-config-name pragmatiq-embedder
 aws sagemaker delete-model --model-name pragmatiq-embedder
-aws ec2 terminate-instances --instance-ids <INSTANCE_ID>   # if you didn't already
 ```
 
-Keep artifacts in S3 (cheap) and delete them when done. Use the [Pricing Calculator](https://calculator.aws/) to estimate before a long run, and prefer Spot + right-sizing for training.
+Training jobs bill only while running and stop on their own. Artifacts in S3 are cheap; delete them when finished.
 
 ## Where to go next
 
-- [PyTorch on AWS](https://aws.amazon.com/pytorch/) and the [AWS Machine Learning Blog](https://aws.amazon.com/blogs/machine-learning/) — patterns for distributed training and inference.
-- [Deep Learning AMI](https://docs.aws.amazon.com/dlami/latest/devguide/) and [Deep Learning Containers](https://docs.aws.amazon.com/deep-learning-containers/latest/devguide/what-is-dlc.html) — the supported PyTorch/CUDA images.
-- [NVIDIA Triton on SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/triton.html) — multi-model endpoints, autoscaling, and TensorRT.
-- For very large books, [Amazon FSx for Lustre](https://docs.aws.amazon.com/fsx/latest/LustreGuide/what-is.html) removes the S3 download bottleneck across multi-node runs. AWS [Trainium](https://aws.amazon.com/ai/machine-learning/trainium/) is a cost lever for training via PyTorch/Neuron — note it's not a drop-in for CUDA/flash-attn.
-
-Locally, the same flow is [Quickstart](/docs/get-started/quickstart) → [Pretrain](/docs/tutorials/pretrain) → [Serve](/docs/tutorials/serve).
+- [Amazon SageMaker training jobs](https://docs.aws.amazon.com/sagemaker/latest/dg/how-it-works-training.html) and [SageMaker Studio](https://docs.aws.amazon.com/sagemaker/latest/dg/studio-updated.html).
+- [NVIDIA Triton on SageMaker](https://docs.aws.amazon.com/sagemaker/latest/dg/deploy-models-frameworks-triton.html) — the container, model repository, and autoscaling.
+- The same pipeline locally: [Quickstart](/docs/get-started/quickstart) → [Pretrain](/docs/tutorials/pretrain) → [Serve](/docs/tutorials/serve), and [Bring your own data](/docs/tutorials/bring-your-own-data).

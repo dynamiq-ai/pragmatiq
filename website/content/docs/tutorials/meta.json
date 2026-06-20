@@ -1,4 +1,4 @@
 {
   "title": "Tutorials",
-  "pages": ["data-pipeline", "pretrain", "evaluate", "serve", "aws", "aml-gnn", "bring-your-own-data"]
+  "pages": ["data-pipeline", "pretrain", "evaluate", "serve", "aml-gnn", "bring-your-own-data", "aws"]
 }
