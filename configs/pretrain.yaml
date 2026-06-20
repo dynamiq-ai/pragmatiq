@@ -5,6 +5,11 @@ lr_muon: 0.003           # GUESS: Muon LR
 lr_adamw: 0.0003         # GUESS: AdamW LR
 weight_decay: 0.01
 warmup_steps: 500        # GUESS
+# Masking probabilities for the PRAGMA token/event/key scheme.
+p_token: 0.15    # fraction of tokens selected independently
+p_event: 0.10    # fraction of events selected (all tokens in event masked)
+p_key: 0.10      # fraction of (user, key) pairs selected
+p_unk: 0.10      # GUESS: fraction of selected → [UNK], excluded from CE loss
 grad_clip: 1.0
 checkpoint_every_min: 15.0
 log_every: 20

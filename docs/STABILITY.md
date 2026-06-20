@@ -1,5 +1,10 @@
 # pragmatiq Public API Stability Contract
 
+> **FROZEN as of pragmatiq 1.0.0** (2026-06-21). SemVer applies from
+> this release forward. The contract below is enforced automatically by
+> `tests/contract/` on every CI run and gate 9. No item in this document
+> may change without a deliberate version bump and a matching update here.
+
 This document is the **frozen surface** for pragmatiq's public API.
 Changes to any item listed here require a deliberate version bump per the
 SemVer policy below.  The `tests/contract/` test suite enforces this

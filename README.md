@@ -748,22 +748,32 @@ pragmatiq pretrain data/tokenized --name nemo --model-size medium   # text branc
 - **Serving** handles both variants — build the Triton image with
   `PRAGMATIQ_TRITON_EXTRAS=nemotron` (see [Serving with Triton](#serving-with-triton)).
 
-## Defaults where the paper is silent
+## Paper-silent (`# GUESS`) hyperparameters
 
 The paper leaves some engineering details unspecified. pragmatiq treats these
-as defaults, exposes them in config, and marks source-level guesses with
-`# GUESS`.
+as documented defaults, exposes every one in config, and marks source-level
+choices with `# GUESS`. Defaults are written into each run's `run.yaml` /
+`meta.json` at training time, so shipped checkpoints embed their values
+reproducibly regardless of future default changes. Changing a default is a
+**MINOR** (not breaking) change per the [stability policy](docs/STABILITY.md);
+the checkpoint-format and tokenizer-hash guards ensure already-shipped
+checkpoints always load identically.
 
-| Knob | Default | Where |
-| --- | --- | --- |
-| Muon LR for 2-D hidden weights | `3e-3` | `configs/pretrain.yaml` |
-| AdamW LR for embeddings/norms/biases | `3e-4` | `configs/pretrain.yaml` |
-| Token budget per batch | `16384` | `configs/pretrain.yaml` |
-| Warmup steps | `500` | `configs/pretrain.yaml` |
-| Numeric percentile buckets plus zero bucket | `64` | `configs/data/tokenizer.yaml` |
-| Target total vocabulary | `28000` | `configs/data/tokenizer.yaml` |
-| RoPE base | `10000.0` | `ModelConfig` size preset; override via the pretrain `config` (e.g. `rope_base:`) |
-| `[UNK]` fraction of masked positions | `10%` | `MaskingStrategy(p_unk=0.10)` |
+The table below lists all 17 `# GUESS` source markers, resolved to 9 unique
+hyperparameters (some values appear in both the dataclass and the optimizer or
+masker call-site).
+
+| # | Parameter | File(s) | Default | Config key | Rationale |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `lr_muon` — Muon LR for 2-D hidden weights | `training/pretrainer.py`, `training/optim.py` | `3e-3` | `configs/pretrain.yaml · lr_muon` | Paper-silent; matches Keller Jordan's Muon reference, known to work for MLM at this scale |
+| 2 | `lr_adamw` — AdamW LR for embeddings/norms/biases | `training/pretrainer.py`, `training/optim.py` | `3e-4` | `configs/pretrain.yaml · lr_adamw` | Paper-silent; standard AdamW default one decade below Muon LR; stable for embedding tables |
+| 3 | `warmup_steps` — cosine-schedule warmup length | `training/pretrainer.py` | `100` (dataclass); `500` (pretrain.yaml) | `configs/pretrain.yaml · warmup_steps` | Paper-silent; ~2–5% of default max_steps; short warm-up avoids early instability on CPU-first runs |
+| 4 | `token_budget` — per-forward token cap | `training/pretrainer.py`, `training/autoconfig.py` | `16384` | `configs/pretrain.yaml · token_budget` | Paper-silent; fits a `small` model on a single 16 GiB GPU with headroom for optimizer state |
+| 5 | `p_unk` — `[UNK]` fraction of selected masked positions | `training/masking.py`, `training/pretrainer.py` | `0.10` (10 %) | `TrainConfig.p_unk` / `configs/pretrain.yaml` | Paper-silent; keeps the model robust to unseen tokens; excluded from CE loss like the BERT sentinel |
+| 6 | `n_buckets` — percentile buckets per numeric key | `data/tokenizer.py` | `64` | `configs/data/tokenizer.yaml · n_buckets` | Paper-silent; 64 uniform-mass bins give ~1.5% resolution per bucket, balancing vocab size vs precision |
+| 7 | `target_vocab` — target total vocabulary size | `data/tokenizer.py` | `28000` | `configs/data/tokenizer.yaml · target_vocab` | Paper-silent; in the range of standard NLP sub-word vocabs; BPE fills the remainder after categoricals |
+| 8 | `numeric_min_cardinality` — distinct-value floor for numeric routing | `data/tokenizer.py` | `None` (= `4 × n_buckets`) | `configs/data/tokenizer.yaml · numeric_min_cardinality` | Paper-silent; separates low-cardinality identifier codes (MCC, ZIP) from continuous magnitudes |
+| 9 | `rope_base` — geometric frequency ladder base for TimeRoPE | `models/pragmatiq.py`, `models/embeddings.py` | `10000.0` | `configs/model/{small,medium,large}.yaml · rope_base` | Paper-silent; inherited from LLaMA/GPT-NeoX RoPE; appropriate for log-seconds positions |
 
 ## Serving with Triton
 

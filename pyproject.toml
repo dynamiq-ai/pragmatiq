@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragmatiq"
-version = "0.1.0b4"
+version = "1.0.0"
 description = "Independent banking event-sequence modeling toolkit inspired by arXiv:2604.08649; not affiliated with or endorsed by Revolut."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -13,7 +13,7 @@ authors = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
 maintainers = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
 keywords = ["foundation-model", "banking", "transformers", "synthetic-data", "fraud", "credit-risk"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: Apache Software License",
