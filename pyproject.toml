@@ -103,3 +103,4 @@ disallow_untyped_defs = false
 testpaths = ["tests"]
 addopts = "-ra"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]

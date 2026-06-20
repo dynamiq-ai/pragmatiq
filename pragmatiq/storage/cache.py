@@ -132,7 +132,47 @@ def materialize_dir(url: str, dest: str | Path) -> None:
             shutil.copyfileobj(src, dst)
 
 
+def put_dir(local_dir: str | Path, url: str) -> None:
+    """Recursively upload a local directory to *url*.
+
+    - **Local** *url*: performs a local recursive copy (like :func:`materialize_dir`
+      but in the opposite direction).
+    - **Remote** *url*: uploads every file under *local_dir* to the remote
+      filesystem rooted at *url*.
+
+    Args:
+        local_dir: Source directory on the local filesystem.
+        url:       Destination directory URL (local or remote).
+    """
+    local_dir = Path(local_dir)
+    if is_local(url):
+        dest = Path(url[len("file://"):] if url.startswith("file://") else url)
+        dest.mkdir(parents=True, exist_ok=True)
+        for src_file in local_dir.rglob("*"):
+            if src_file.is_file():
+                rel = src_file.relative_to(local_dir)
+                out = dest / rel
+                out.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file, out)
+        return
+
+    # Remote: upload each file
+    fs, remote_root = get_fs(url)
+    remote_root = remote_root.rstrip("/")
+    for src_file in local_dir.rglob("*"):
+        if src_file.is_file():
+            rel = src_file.relative_to(local_dir)
+            remote_path = remote_root + "/" + str(rel).replace("\\", "/")
+            # ensure parent exists
+            parent = "/".join(remote_path.split("/")[:-1])
+            if parent:
+                fs.makedirs(parent, exist_ok=True)
+            with src_file.open("rb") as src, fs.open(remote_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
 __all__: list[str] = [
     "local_path",
     "materialize_dir",
+    "put_dir",
 ]

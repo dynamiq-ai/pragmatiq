@@ -18,6 +18,7 @@ from typing import Any
 from pragmatiq.core.config import load_yaml as _load_yaml
 from pragmatiq.core.env import resolve_device as _resolve_device
 from pragmatiq.progress import progress
+from pragmatiq.storage.staging import staging as _staging
 
 
 def _read_shard_tokenizer_hash(shard_dir: str | Path) -> str:
@@ -98,20 +99,22 @@ def synthesize(
     Returns:
         The generation manifest (also written to ``out/manifest.json``).
     """
-    from pragmatiq.data.synthetic import WorldConfig, generate
+    with _staging() as stage:
+        out = stage.output(out, is_dir=True)  # type: ignore[assignment]
+        from pragmatiq.data.synthetic import WorldConfig, generate
 
-    base: dict[str, Any] = {}
-    if isinstance(config, (str, Path)):
-        base = _load_yaml(config)
-    elif isinstance(config, dict):
-        base = dict(config)
-    if n_users is not None:
-        base["n_users"] = n_users
-    if seed is not None:
-        base["seed"] = seed
-    base.update(overrides)
-    cfg = WorldConfig.from_dict(base)
-    return generate(cfg, out, n_workers=n_workers, write_report=write_report)
+        base: dict[str, Any] = {}
+        if isinstance(config, (str, Path)):
+            base = _load_yaml(config)
+        elif isinstance(config, dict):
+            base = dict(config)
+        if n_users is not None:
+            base["n_users"] = n_users
+        if seed is not None:
+            base["seed"] = seed
+        base.update(overrides)
+        cfg = WorldConfig.from_dict(base)
+        return generate(cfg, out, n_workers=n_workers, write_report=write_report)
 
 
 def tokenize(
@@ -144,61 +147,64 @@ def tokenize(
     Returns:
         The shard manifest (also written to ``out/shard_manifest.json``).
     """
-    from pragmatiq.data.sharding import ShardWriter
-    from pragmatiq.data.tokenizer import PragmaTokenizer, TokenizerConfig, iter_user_records
+    with _staging() as stage:
+        data_dir = stage.input(data_dir)  # type: ignore[assignment]
+        out = stage.output(out, is_dir=True)  # type: ignore[assignment]
+        from pragmatiq.data.sharding import ShardWriter
+        from pragmatiq.data.tokenizer import PragmaTokenizer, TokenizerConfig, iter_user_records
 
-    data_dir = Path(data_dir)
-    out = Path(out)
-    out.mkdir(parents=True, exist_ok=True)
+        data_dir = Path(data_dir)
+        out = Path(out)
+        out.mkdir(parents=True, exist_ok=True)
 
-    if tokenizer_dir is not None:
-        tok = PragmaTokenizer.load(tokenizer_dir)
-        tok_src = Path(tokenizer_dir)
-    else:
-        cfg_dict: dict[str, Any] = {}
-        if isinstance(config, (str, Path)):
-            cfg_dict = _load_yaml(config)
-        elif isinstance(config, dict):
-            cfg_dict = dict(config)
-        tok = PragmaTokenizer(TokenizerConfig.from_dict(cfg_dict)).fit(data_dir, n_workers=n_workers)
-        tok.save(out / "tokenizer")
-        tok_src = out / "tokenizer"
+        if tokenizer_dir is not None:
+            tok = PragmaTokenizer.load(tokenizer_dir)
+            tok_src = Path(tokenizer_dir)
+        else:
+            cfg_dict: dict[str, Any] = {}
+            if isinstance(config, (str, Path)):
+                cfg_dict = _load_yaml(config)
+            elif isinstance(config, dict):
+                cfg_dict = dict(config)
+            tok = PragmaTokenizer(TokenizerConfig.from_dict(cfg_dict)).fit(data_dir, n_workers=n_workers)
+            tok.save(out / "tokenizer")
+            tok_src = out / "tokenizer"
 
-    writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard)
-    # Progress total is best-effort: manifest.json may be absent or foreign
-    # (bring-your-own datasets only owe us the parquet contract).
-    total: int | None = None
-    manifest_path = Path(data_dir) / "manifest.json"
-    if manifest_path.exists():
-        import json
+        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard)
+        # Progress total is best-effort: manifest.json may be absent or foreign
+        # (bring-your-own datasets only owe us the parquet contract).
+        total: int | None = None
+        manifest_path = Path(data_dir) / "manifest.json"
+        if manifest_path.exists():
+            import json
 
-        try:
-            raw = json.loads(manifest_path.read_text()).get("n_users")
-            total = int(raw) if raw is not None else None
-        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            total = None
-    if max_users is not None:
-        # total == 0 is a real answer (empty dataset), not "unknown"
-        total = max_users if total is None else min(total, max_users)
-    encoded: Iterator[tuple[Any, dict[str, Any]]]
-    if n_workers and n_workers > 1:
-        from pragmatiq.data.parallel_tokenize import parallel_tokenize
+            try:
+                raw = json.loads(manifest_path.read_text()).get("n_users")
+                total = int(raw) if raw is not None else None
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                total = None
+        if max_users is not None:
+            # total == 0 is a real answer (empty dataset), not "unknown"
+            total = max_users if total is None else min(total, max_users)
+        encoded: Iterator[tuple[Any, dict[str, Any]]]
+        if n_workers and n_workers > 1:
+            from pragmatiq.data.parallel_tokenize import parallel_tokenize
 
-        encoded = parallel_tokenize(data_dir, tok, tok_src, n_workers, max_users=max_users)
-    else:
-        records = iter_user_records(data_dir, max_users=max_users)
-        encoded = (
-            (tok.encode(rec),
-             {"attributes": rec.attributes, "lifelong": rec.lifelong, "as_of": rec.as_of})
-            for rec in records
-        )
-    n = 0
-    for enc, profile in progress(encoded, total=total, desc="tokenize", unit="user"):
-        writer.add(enc, profile=profile)
-        n += 1
-    manifest = writer.close()
-    manifest["vocab_size"] = tok.vocab_size
-    return manifest
+            encoded = parallel_tokenize(data_dir, tok, tok_src, n_workers, max_users=max_users)
+        else:
+            records = iter_user_records(data_dir, max_users=max_users)
+            encoded = (
+                (tok.encode(rec),
+                 {"attributes": rec.attributes, "lifelong": rec.lifelong, "as_of": rec.as_of})
+                for rec in records
+            )
+        n = 0
+        for enc, profile in progress(encoded, total=total, desc="tokenize", unit="user"):
+            writer.add(enc, profile=profile)
+            n += 1
+        manifest = writer.close()
+        manifest["vocab_size"] = tok.vocab_size
+        return manifest
 
 
 def pretrain(
@@ -214,6 +220,37 @@ def pretrain(
 
     Returns a summary dict (run name, final step, last metrics).
     """
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        _orig_runs_root = str(runs_root)
+        runs_root = stage.output(runs_root, is_dir=True)  # type: ignore[assignment]
+        # Resume pre-population: if runs_root was staged (remote), materialize
+        # the existing run dir so the trainer can resume from it.
+        _runs_root_staged = str(runs_root) != _orig_runs_root
+        if _runs_root_staged:
+            from pragmatiq.storage.cache import materialize_dir as _mat_dir
+            from pragmatiq.storage.fs import exists as _st_exists
+
+            _remote_run = _orig_runs_root.rstrip("/") + "/" + run_name
+            if _st_exists(_remote_run):
+                import logging as _logging
+
+                _logging.getLogger(__name__).info(
+                    "staging: pre-populating local run dir from %s", _remote_run
+                )
+                _mat_dir(_remote_run, Path(runs_root) / run_name)
+        return _pretrain_inner(shard_dir, run_name, model_size, config, runs_root, resume, **overrides)
+
+
+def _pretrain_inner(
+    shard_dir: str | Path,
+    run_name: str,
+    model_size: str = "small",
+    config: str | Path | dict[str, Any] | None = None,
+    runs_root: str | Path = "runs",
+    resume: str | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
     from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
     from pragmatiq.data.tokenizer import PragmaTokenizer
     from pragmatiq.experiments.run import Run
@@ -349,30 +386,34 @@ def embed(
     Raises:
         ValueError: if no users are found in ``shard_dir``.
     """
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.models.pragmatiq import PragmaModel
-    from pragmatiq.training.probe import embed_users
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        run = stage.input(run)  # type: ignore[assignment]
+        out = stage.output(out, is_dir=False) if out is not None else None
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.models.pragmatiq import PragmaModel
+        from pragmatiq.training.probe import embed_users
 
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    ds = ShardDataset(shard_dir)
-    emb = embed_users(model, ds, token_budget=token_budget, device=device)
-    ds.close()
-    if not emb:
-        raise ValueError(f"no users found in shard_dir {shard_dir!r}; check the path and that "
-                         "tokenize() produced shards")
-    if out is not None:
-        import numpy as np
-        import pyarrow as pa
-        import pyarrow.parquet as pq
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        ds = ShardDataset(shard_dir)
+        emb = embed_users(model, ds, token_budget=token_budget, device=device)
+        ds.close()
+        if not emb:
+            raise ValueError(f"no users found in shard_dir {shard_dir!r}; check the path and that "
+                             "tokenize() produced shards")
+        if out is not None:
+            import numpy as np
+            import pyarrow as pa
+            import pyarrow.parquet as pq
 
-        uids = list(emb)
-        mat = np.stack([emb[u] for u in uids])
-        table = pa.table({"user_id": uids,
-                          "embedding": [row.tolist() for row in mat]})
-        pq.write_table(table, Path(out))
-    return {"n_users": len(emb), "dim": int(next(iter(emb.values())).shape[0])}
+            uids = list(emb)
+            mat = np.stack([emb[u] for u in uids])
+            table = pa.table({"user_id": uids,
+                              "embedding": [row.tolist() for row in mat]})
+            pq.write_table(table, Path(out))
+        return {"n_users": len(emb), "dim": int(next(iter(emb.values())).shape[0])}
 
 
 def probe(
@@ -394,34 +435,38 @@ def probe(
     (when present) before embedding, for both the probe and the baseline — task metrics
     must never be computed on embeddings that contain the outcome window.
     """
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.models.pragmatiq import PragmaModel
-    from pragmatiq.training.probe import (
-        EmbeddingProbe,
-        RawCountBaseline,
-        _load_label_table,
-        cutoffs_from_labels,
-        embed_users,
-    )
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        run = stage.input(run)  # type: ignore[assignment]
+        label_path = stage.input(label_path)  # type: ignore[assignment]
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.models.pragmatiq import PragmaModel
+        from pragmatiq.training.probe import (
+            EmbeddingProbe,
+            RawCountBaseline,
+            _load_label_table,
+            cutoffs_from_labels,
+            embed_users,
+        )
 
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    ds = ShardDataset(shard_dir)
-    uids, _, eval_us = _load_label_table(label_path)
-    cutoffs = cutoffs_from_labels(uids, eval_us)
-    emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
-    probe_res = EmbeddingProbe(model=probe_model, seed=seed).run(emb, label_path)
-    out: dict[str, Any] = {"probe_model": probe_model,
-                           "probe_auc": probe_res.auc, "probe_pr_auc": probe_res.pr_auc,
-                           "probe_accuracy": probe_res.accuracy,
-                           "n_test": probe_res.n_test, "prevalence": probe_res.prevalence}
-    if with_baseline:
-        base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path)
-        out["baseline_auc"] = base.auc
-        out["baseline_pr_auc"] = base.pr_auc
-    ds.close()
-    return out
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        ds = ShardDataset(shard_dir)
+        uids, _, eval_us = _load_label_table(label_path)
+        cutoffs = cutoffs_from_labels(uids, eval_us)
+        emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
+        probe_res = EmbeddingProbe(model=probe_model, seed=seed).run(emb, label_path)
+        out_dict: dict[str, Any] = {"probe_model": probe_model,
+                                    "probe_auc": probe_res.auc, "probe_pr_auc": probe_res.pr_auc,
+                                    "probe_accuracy": probe_res.accuracy,
+                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence}
+        if with_baseline:
+            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path)
+            out_dict["baseline_auc"] = base.auc
+            out_dict["baseline_pr_auc"] = base.pr_auc
+        ds.close()
+        return out_dict
 
 
 def uplift(
@@ -442,22 +487,26 @@ def uplift(
     learner's Qini, the oracle Qini (ranking by the true ``y1 - y0``), and the
     average treatment effect.
     """
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.models.pragmatiq import PragmaModel
-    from pragmatiq.training.probe import embed_users
-    from pragmatiq.training.uplift import UpliftLearner, cutoffs_from_uplift, load_comm_uplift
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        run = stage.input(run)  # type: ignore[assignment]
+        label_path = stage.input(label_path)  # type: ignore[assignment]
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.models.pragmatiq import PragmaModel
+        from pragmatiq.training.probe import embed_users
+        from pragmatiq.training.uplift import UpliftLearner, cutoffs_from_uplift, load_comm_uplift
 
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    ds = ShardDataset(shard_dir)
-    rows = load_comm_uplift(label_path)
-    cutoffs = cutoffs_from_uplift(rows)
-    emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
-    res = UpliftLearner(seed=seed, learner=learner).run(emb, rows)
-    ds.close()
-    return {"qini": res.qini, "qini_oracle": res.qini_oracle, "ate": res.ate,
-            "n_train": res.n_train, "n_test": res.n_test, "treated_frac": res.treated_frac}
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        ds = ShardDataset(shard_dir)
+        rows = load_comm_uplift(label_path)
+        cutoffs = cutoffs_from_uplift(rows)
+        emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
+        res = UpliftLearner(seed=seed, learner=learner).run(emb, rows)
+        ds.close()
+        return {"qini": res.qini, "qini_oracle": res.qini_oracle, "ate": res.ate,
+                "n_train": res.n_train, "n_test": res.n_test, "treated_frac": res.treated_frac}
 
 
 def finetune(
@@ -487,31 +536,36 @@ def finetune(
         held-out AUC, epochs run before early-stopping, number of injected LoRA
         adapters, and the per-epoch validation-AUC history.
     """
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.models.pragmatiq import PragmaModel
-    from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
-    from pragmatiq.training.pretrainer import seed_everything
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        run = stage.input(run)  # type: ignore[assignment]
+        label_path = stage.input(label_path)  # type: ignore[assignment]
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.models.pragmatiq import PragmaModel
+        from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
+        from pragmatiq.training.pretrainer import seed_everything
 
-    base: dict[str, Any] = {}
-    if isinstance(config, (str, Path)):
-        base = _load_yaml(config)
-    elif isinstance(config, dict):
-        base = dict(config)
-    base.update(overrides)
-    unknown = set(base) - set(FineTuneConfig.__dataclass_fields__)
-    if unknown:
-        raise ValueError(f"unknown finetune config key(s): {sorted(unknown)}; "
-                         f"known: {sorted(FineTuneConfig.__dataclass_fields__)}")
-    fcfg = FineTuneConfig(**{k: v for k, v in base.items() if k in FineTuneConfig.__dataclass_fields__})
-    # Seed before LoRA init + dropout so the same seed → identical adapters (rule 2).
-    seed_everything(fcfg.seed)
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    ds = ShardDataset(shard_dir)
-    result = LoRAFineTuner(model, fcfg, device=device).fit(ds, label_path)
-    ds.close()
-    return result
+        base: dict[str, Any] = {}
+        if isinstance(config, (str, Path)):
+            base = _load_yaml(config)
+        elif isinstance(config, dict):
+            base = dict(config)
+        base.update(overrides)
+        unknown = set(base) - set(FineTuneConfig.__dataclass_fields__)
+        if unknown:
+            raise ValueError(f"unknown finetune config key(s): {sorted(unknown)}; "
+                             f"known: {sorted(FineTuneConfig.__dataclass_fields__)}")
+        fcfg = FineTuneConfig(**{k: v for k, v in base.items()
+                                 if k in FineTuneConfig.__dataclass_fields__})
+        # Seed before LoRA init + dropout so the same seed → identical adapters (rule 2).
+        seed_everything(fcfg.seed)
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        ds = ShardDataset(shard_dir)
+        result = LoRAFineTuner(model, fcfg, device=device).fit(ds, label_path)
+        ds.close()
+        return result
 
 
 def export(
@@ -525,19 +579,23 @@ def export(
     ONNX export runs on CPU (the dense graph and its constants are built on CPU and
     validated against onnxruntime's CPU provider); ``device`` must be ``"cpu"``.
     """
-    from pragmatiq.data.collate import VarlenCollator
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.inference.export import export_onnx
-    from pragmatiq.models.pragmatiq import PragmaModel
+    with _staging() as stage:
+        run = stage.input(run)  # type: ignore[assignment]
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        out = stage.output(out, is_dir=False)  # type: ignore[assignment]
+        from pragmatiq.data.collate import VarlenCollator
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.inference.export import export_onnx
+        from pragmatiq.models.pragmatiq import PragmaModel
 
-    if _resolve_device(device) != "cpu":
-        raise ValueError(f"ONNX export runs on CPU; pass device='cpu' (got {device!r})")
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device="cpu")
-    ds = ShardDataset(shard_dir)
-    example = VarlenCollator()([ds.get(ds.user_ids[0])])
-    ds.close()
-    return export_onnx(model, example, out)
+        if _resolve_device(device) != "cpu":
+            raise ValueError(f"ONNX export runs on CPU; pass device='cpu' (got {device!r})")
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device="cpu")
+        ds = ShardDataset(shard_dir)
+        example = VarlenCollator()([ds.get(ds.user_ids[0])])
+        ds.close()
+        return export_onnx(model, example, out)
 
 
 def benchmark(
@@ -548,15 +606,19 @@ def benchmark(
     max_users: int | None = None,
 ) -> dict[str, Any]:
     """Benchmark batch-embedding throughput and write RESULTS.md."""
-    from pragmatiq.inference.benchmark import benchmark_batch_embed, write_results
-    from pragmatiq.models.pragmatiq import PragmaModel
+    with _staging() as stage:
+        run = stage.input(run)  # type: ignore[assignment]
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        out = stage.output(out, is_dir=False)  # type: ignore[assignment]
+        from pragmatiq.inference.benchmark import benchmark_batch_embed, write_results
+        from pragmatiq.models.pragmatiq import PragmaModel
 
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users)
-    write_results(stats, out)
-    return stats
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users)
+        write_results(stats, out)
+        return stats
 
 
 def gnn(
@@ -579,29 +641,36 @@ def gnn(
     that history was observed through (not a point-in-time cut), so the embedding
     timestamp is ignored here. See MODEL_CARD.md.
     """
-    from pragmatiq.data.dataset import ShardDataset
-    from pragmatiq.models.gnn import run_aml_ablation
-    from pragmatiq.models.pragmatiq import PragmaModel
-    from pragmatiq.training.probe import _load_label_table, embed_users
+    with _staging() as stage:
+        shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        run = stage.input(run)  # type: ignore[assignment]
+        transfers_path = stage.input(transfers_path)  # type: ignore[assignment]
+        aml_label_path = stage.input(aml_label_path)  # type: ignore[assignment]
+        from pragmatiq.data.dataset import ShardDataset
+        from pragmatiq.models.gnn import run_aml_ablation
+        from pragmatiq.models.pragmatiq import PragmaModel
+        from pragmatiq.training.probe import _load_label_table, embed_users
 
-    device = _resolve_device(device)
-    _ensure_shard_tokenizer_matches_run(shard_dir, run)
-    model = PragmaModel.from_pretrained(run, device=device)
-    ds = ShardDataset(shard_dir)
-    emb = embed_users(model, ds, device=device)
-    uids, labels, _ = _load_label_table(aml_label_path)
-    label_map = {u: int(lab) for u, lab in zip(uids, labels)}
-    ds.close()
-    return run_aml_ablation(transfers_path, emb, label_map, seeds=seeds, epochs=epochs)
+        device = _resolve_device(device)
+        _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        model = PragmaModel.from_pretrained(run, device=device)
+        ds = ShardDataset(shard_dir)
+        emb = embed_users(model, ds, device=device)
+        uids, labels, _ = _load_label_table(aml_label_path)
+        label_map = {u: int(lab) for u, lab in zip(uids, labels)}
+        ds.close()
+        return run_aml_ablation(transfers_path, emb, label_map, seeds=seeds, epochs=epochs)
 
 
 def validate(data_dir: str | Path) -> dict[str, Any]:
     """Validate a raw dataset against the data contract."""
-    from pragmatiq.validate import validate_dataset
+    with _staging() as stage:
+        data_dir = stage.input(data_dir)  # type: ignore[assignment]
+        from pragmatiq.validate import validate_dataset
 
-    report = validate_dataset(data_dir)
-    return {"ok": report.ok, "errors": report.errors, "warnings": report.warnings,
-            "summary": report.summary()}
+        report = validate_dataset(data_dir)
+        return {"ok": report.ok, "errors": report.errors, "warnings": report.warnings,
+                "summary": report.summary()}
 
 
 def quickstart(
@@ -637,16 +706,20 @@ def quickstart(
 
 def runs_list(runs_root: str | Path = "runs") -> list[dict[str, Any]]:
     """List runs under ``runs_root`` with their last logged step/loss/metrics."""
-    from pragmatiq.experiments.run import list_runs
+    with _staging() as stage:
+        runs_root = stage.input(runs_root)  # type: ignore[assignment]
+        from pragmatiq.experiments.run import list_runs
 
-    return list_runs(runs_root)
+        return list_runs(runs_root)
 
 
 def runs_compare(names: list[str], runs_root: str | Path = "runs") -> list[dict[str, Any]]:
     """Compare several runs' last metrics side by side (missing runs flagged)."""
-    from pragmatiq.experiments.compare import compare_runs
+    with _staging() as stage:
+        runs_root = stage.input(runs_root)  # type: ignore[assignment]
+        from pragmatiq.experiments.compare import compare_runs
 
-    return compare_runs(names, runs_root)
+        return compare_runs(names, runs_root)
 
 
 def calibrate(
@@ -659,16 +732,19 @@ def calibrate(
     Returns the calibrated WorldConfig as a dict; if ``out`` is given, also
     writes it as YAML ready for ``pragmatiq synth --config``.
     """
-    from pragmatiq.data.synthetic.calibrate import calibrate_config
+    with _staging() as stage:
+        stats = stage.input(stats)  # type: ignore[assignment]
+        out = stage.output(out, is_dir=False) if out is not None else None
+        from pragmatiq.data.synthetic.calibrate import calibrate_config
 
-    base: dict[str, Any] = {}
-    if isinstance(config, (str, Path)):
-        base = _load_yaml(config)
-    elif isinstance(config, dict):
-        base = dict(config)
-    result = calibrate_config(_load_yaml(stats), base)
-    if out is not None:
-        from omegaconf import OmegaConf
+        base: dict[str, Any] = {}
+        if isinstance(config, (str, Path)):
+            base = _load_yaml(config)
+        elif isinstance(config, dict):
+            base = dict(config)
+        result = calibrate_config(_load_yaml(stats), base)
+        if out is not None:
+            from omegaconf import OmegaConf
 
-        OmegaConf.save(OmegaConf.create(result), Path(out))
-    return result
+            OmegaConf.save(OmegaConf.create(result), Path(out))
+        return result

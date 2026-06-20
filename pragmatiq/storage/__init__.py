@@ -27,7 +27,10 @@ Thin ops:
     :func:`write_text`, :func:`open_file`
 
 Cache / local materialisation:
-    :func:`local_path`, :func:`materialize_dir`
+    :func:`local_path`, :func:`materialize_dir`, :func:`put_dir`
+
+Stage-in / stage-out:
+    :func:`staging`, :class:`Stage`
 
 Artifact helpers:
     :func:`read_json`, :func:`write_json`, :func:`atomic_write`,
@@ -43,6 +46,7 @@ from pragmatiq.storage.artifacts import (
 from pragmatiq.storage.cache import (
     local_path,
     materialize_dir,
+    put_dir,
 )
 from pragmatiq.storage.fs import (
     exists,
@@ -58,6 +62,7 @@ from pragmatiq.storage.fs import (
     write_bytes,
     write_text,
 )
+from pragmatiq.storage.staging import Stage, staging
 
 __all__: list[str] = [
     # fs.py
@@ -76,6 +81,10 @@ __all__: list[str] = [
     # cache.py
     "local_path",
     "materialize_dir",
+    "put_dir",
+    # staging.py
+    "staging",
+    "Stage",
     # artifacts.py
     "read_json",
     "write_json",
