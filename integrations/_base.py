@@ -162,5 +162,4 @@ __all__ = [
     "Artifact",
     "MissingExtraError",
     "CloudAdapter",
-    "_require",
 ]

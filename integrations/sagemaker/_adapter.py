@@ -280,6 +280,9 @@ class SageMakerAdapter:
             Body=payload,
         )
         body = response["Body"].read()
-        # Expect a flat float32 array back (1 user × dim)
+        # BYOC assumption: SageMaker-Triton wire format returns a raw float32
+        # buffer (no envelope); this is a LIVE-path assumption and is not
+        # unit-tested.  If the serving contract changes to add an envelope,
+        # update this to use contract.decode_response() instead.
         arr = np.frombuffer(body, dtype=np.float32)
         return arr.ndim >= 1 and arr.size > 0
