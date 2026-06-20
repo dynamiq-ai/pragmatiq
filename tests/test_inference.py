@@ -403,6 +403,6 @@ class TestTritonServingContract:
         responses = model.execute([{"payload": json.dumps(records)}])
         captured["emb"] = responses[0].output_tensors[0].arr
         emb = captured["emb"]
-        assert emb.shape == (2, model.model.config.dim)
+        assert emb.shape == (2, model.runtime.model.config.dim)
         assert emb.dtype == np.float32 and np.isfinite(emb).all()
         model.finalize()

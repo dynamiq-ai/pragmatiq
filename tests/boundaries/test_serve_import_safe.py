@@ -83,7 +83,24 @@ assert emb.shape == (2, cfg.dim), (
 )
 assert np.isfinite(emb).all(), "embedding contains non-finite values"
 
-# ── Step 4: assert blocked modules were NOT imported ─────────────────────
+# ── Step 4: verify contract + runtime import under slim constraints ────────
+# contract.py is json+numpy only; runtime.py is torch+PragmaModel+numpy+storage+contract.
+# Both MUST import without touching the blocked heavy packages.
+from pragmatiq.inference.serve import contract as serve_contract
+from pragmatiq.inference.serve import runtime as serve_runtime
+
+# Smoke the contract helpers
+raw = serve_contract.encode_request(records)
+decoded = serve_contract.decode_request(raw)
+assert decoded == records, "contract round-trip mismatch"
+
+# Smoke runtime.Runtime with the nano model (no from_pretrained needed here)
+rt = serve_runtime.Runtime(model=model, device="cpu")
+rt_emb = rt.embed(records)
+assert rt_emb.shape == (2, cfg.dim), f"Runtime.embed shape mismatch: {{rt_emb.shape}}"
+assert rt_emb.dtype == np.float32, f"Runtime.embed must return float32, got {{rt_emb.dtype}}"
+
+# ── Step 5: assert blocked modules were NOT imported ─────────────────────
 leaked = [
     m for m in sys.modules
     if any(m == b or m.startswith(b + ".") for b in BLOCKED)

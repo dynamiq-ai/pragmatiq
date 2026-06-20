@@ -20,9 +20,20 @@ automatically on every CI run and gate 9.
   new runs only); shipped checkpoints embed identically forever (checkpoint
   format + tokenizer-hash guard frozen).
 
-> TODO (W4): A `tests/contract/test_serving_contract.py`
-> (records_json → embeddings [n_users, dim]) will be added when
-> `inference/serve/contract.py` exists — leave this note until then.
+## E. Serving Contract (W4 — frozen)
+
+The serving wire format is defined once in `pragmatiq/inference/serve/contract.py`
+and pinned by `tests/contract/test_serving_contract.py`.  All adapters (Triton,
+REST, gRPC, cloud) MUST use the constants from that module.
+
+| Symbol | Value | Notes |
+|---|---|---|
+| `INPUT_NAME` | `"records_json"` | Input tensor name (BYTES / JSON-encoded list of dicts) |
+| `OUTPUT_NAME` | `"embeddings"` | Output tensor name (float32) |
+| Output shape | `[n_users, dim]` | C-contiguous float32; `dim` comes from model config |
+
+Renaming `INPUT_NAME` or `OUTPUT_NAME`, or changing the output dtype, is a
+**MAJOR** contract break and requires a version bump.
 
 ---
 
