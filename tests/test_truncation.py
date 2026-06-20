@@ -14,7 +14,7 @@ import pytest
 from pragmatiq import api
 from pragmatiq.data.collate import TruncatingCollator, VarlenCollator
 from pragmatiq.data.dataset import ShardDataset
-from pragmatiq.data.schema import UserRecord
+from pragmatiq.core.schema import UserRecord
 from pragmatiq.data.tokenizer import PragmaTokenizer, TokenizerConfig, time_encode, truncate_record
 
 

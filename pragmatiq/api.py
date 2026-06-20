@@ -15,32 +15,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from pragmatiq.core.config import load_yaml as _load_yaml
+from pragmatiq.core.env import resolve_device as _resolve_device
 from pragmatiq.progress import progress
-
-
-def _load_yaml(path: str | Path) -> dict[str, Any]:
-    from omegaconf import OmegaConf
-
-    cfg = OmegaConf.load(path)
-    out = OmegaConf.to_container(cfg, resolve=True)
-    if not isinstance(out, dict):
-        raise ValueError(f"config {path} must contain a top-level mapping, got {type(out).__name__}")
-    return {str(k): v for k, v in out.items()}
-
-
-def _resolve_device(device: str) -> str:
-    """Resolve ``"auto"`` to CUDA when present, else CPU; pass other values through.
-
-    CPU is always a correct target (global rule 5); ``"auto"`` uses the GPU purely
-    as an acceleration when one is available, so embedding/probing/fine-tuning on a
-    GPU host runs on the GPU instead of CPU. An explicit ``"cpu"`` or ``"cuda"`` is
-    honored as given.
-    """
-    if device == "auto":
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    return device
 
 
 def _read_shard_tokenizer_hash(shard_dir: str | Path) -> str:

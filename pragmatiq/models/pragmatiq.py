@@ -323,11 +323,11 @@ class PragmaModel(nn.Module):
         """Embed plain-dict user records (no shard pipeline) → ``[N, d]``.
 
         Each dict has ``user_id`` and ``events`` (+ optional ``attributes``,
-        ``lifelong``, ``as_of``); see :class:`~pragmatiq.data.schema.UserRecord`.
+        ``lifelong``, ``as_of``); see :class:`~pragmatiq.core.schema.UserRecord`.
         Requires a model loaded via :meth:`from_pretrained` (carries a tokenizer).
         """
         from ..data.collate import VarlenCollator
-        from ..data.schema import UserRecord
+        from pragmatiq.core.schema import UserRecord
 
         tok = getattr(self, "_tokenizer", None)
         if tok is None:

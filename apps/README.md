@@ -1,0 +1,1 @@
+UI seam. Apps consume the serving HTTP API only; they MUST NOT import pragmatiq.training. Populated in W5.

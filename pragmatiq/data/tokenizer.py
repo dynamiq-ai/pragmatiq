@@ -40,7 +40,7 @@ import pyarrow.parquet as pq
 
 from ..progress import progress
 from ..registry import get_value_encoder, register_value_encoder
-from .schema import UserRecord
+from pragmatiq.core.schema import UserRecord
 
 log = logging.getLogger(__name__)
 
@@ -455,7 +455,7 @@ class PragmaTokenizer:
         """Tokenize one user's raw history (unseen → [UNK] + warning)."""
         if not self._fitted:
             raise RuntimeError("tokenizer is not fitted; call fit() or load()")
-        from .schema import SOURCES
+        from pragmatiq.core.schema import SOURCES
 
         k_l: list[int] = []
         v_l: list[int] = []

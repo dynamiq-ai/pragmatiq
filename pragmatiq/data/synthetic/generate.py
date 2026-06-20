@@ -29,7 +29,7 @@ import pyarrow.parquet as pq
 
 from ... import __version__
 from ...progress import progress
-from ..schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, SOURCES, TRANSFERS_SCHEMA, label_schema
+from pragmatiq.core.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, SOURCES, TRANSFERS_SCHEMA, label_schema
 from .config import WorldConfig
 from .labels import LabelOracle, LabelRows
 from .simulator import UserSimulator, UserTrace
