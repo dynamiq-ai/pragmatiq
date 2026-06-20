@@ -8,7 +8,7 @@
 #     2. the Triton python-backend request path (PragmaModel.embed_records on
 #        plain dicts) end to end against a freshly trained nano checkpoint
 #     3. deploy manifests are well-formed (compose services, Triton config)
-#     4. demo/app.py imports/compiles
+#     4. apps/demo/app.py imports/compiles
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 source scripts/gates/_env.sh
@@ -77,7 +77,7 @@ print("deploy manifests OK")
 EOF
 
 echo "=== demo compiles ==="
-$PY -m py_compile demo/app.py && echo "  demo/app.py compiles OK"
+$PY -m py_compile apps/demo/app.py && echo "  apps/demo/app.py compiles OK"
 
 echo ""
 echo "INFERENCE CHECKS GREEN"

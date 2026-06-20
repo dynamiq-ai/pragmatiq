@@ -187,7 +187,7 @@ pragmatiq/
 │   └── experiments/         # run directories, metric logging, run comparison
 ├── configs/                 # model / pretrain / tokenizer / synthetic / finetune YAMLs
 ├── notebooks/               # 01–04 guided walkthroughs (see Notebooks below)
-├── demo/app.py              # Streamlit demo
+├── apps/demo/app.py         # Streamlit demo
 ├── deploy/                  # Triton model repo, docker-compose, Prometheus, demo Dockerfile
 ├── scripts/                 # runpod_launch.py (GPU rental), gates/ (maintainer validation)
 └── tests/                   # the spec in executable form — useful usage examples
@@ -872,7 +872,7 @@ Pick Triton for throughput, ONNX for portability.
 
 ## Streamlit demo
 
-[`demo/app.py`](demo/app.py) is a small Streamlit app over a trained run and a
+[`apps/demo/app.py`](apps/demo/app.py) is a small Streamlit app over a trained run and a
 generated dataset: pick a synthetic user in the sidebar and see their **event
 timeline** (recent transactions with amount/merchant), their **embedding
 computed live** via `embed_records` (the raw embedding and its norm — attach
@@ -885,7 +885,7 @@ per-event explanations, the library ships integrated-gradients attribution in
 ```bash
 pip install -e ".[demo]"
 pragmatiq quickstart          # or point the env vars at existing artifacts
-PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run demo/app.py
+PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run apps/demo/app.py
 ```
 
 `PRAGMATIQ_RUN` (default `runs/quickstart`) is the trained run directory,
