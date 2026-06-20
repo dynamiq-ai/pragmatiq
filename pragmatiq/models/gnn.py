@@ -160,7 +160,11 @@ class AmlGNN(nn.Module):
     def __init__(self, in_dim: int, hidden: int = 128, n_layers: int = 2, dropout: float = 0.15,
                  n_classes: int = 2) -> None:
         super().__init__()
-        from torch_geometric.nn import SAGEConv
+        try:
+            from torch_geometric.nn import SAGEConv
+        except ImportError as _e:
+            from pragmatiq.core.errors import MissingExtraError
+            raise MissingExtraError.for_extra("aml", "torch_geometric") from _e
 
         if not 2 <= n_layers <= 3:
             raise ValueError("GraphSAGE uses 2 or 3 layers")

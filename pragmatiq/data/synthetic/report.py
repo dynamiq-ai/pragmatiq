@@ -19,7 +19,11 @@ import numpy as np
 def _fig_to_b64(fig: Any) -> str:
     buf = io.BytesIO()
     fig.savefig(buf, format="png", dpi=110, bbox_inches="tight")
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError as _e:
+        from pragmatiq.core.errors import MissingExtraError
+        raise MissingExtraError.for_extra("data", "matplotlib") from _e
 
     plt.close(fig)
     return base64.b64encode(buf.getvalue()).decode("ascii")
@@ -100,10 +104,13 @@ def realism_metrics(agg: Any, manifest: dict[str, Any]) -> dict[str, Any]:
 
 def write_realism_report(agg: Any, manifest: dict[str, Any], path: str | Path) -> None:
     """Render the aggregates collected during generation into an HTML report."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError as _e:
+        from pragmatiq.core.errors import MissingExtraError
+        raise MissingExtraError.for_extra("data", "matplotlib") from _e
 
     imgs: list[tuple[str, str]] = []
 

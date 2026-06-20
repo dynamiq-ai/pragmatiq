@@ -40,7 +40,10 @@ class MetricLogger:
         if wandb:
             try:
                 import wandb as _wandb
-
+            except ImportError as _e:
+                from pragmatiq.core.errors import MissingExtraError
+                raise MissingExtraError.for_extra("tracking", "wandb") from _e
+            try:
                 self._wandb = _wandb
                 _wandb.init(project=wandb_project, name=run_name, config=config or {},
                             dir=str(self.dir), resume="allow")

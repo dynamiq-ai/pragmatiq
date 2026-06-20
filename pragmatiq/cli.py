@@ -75,7 +75,7 @@ def pretrain_cmd(
     runs_root: Path = typer.Option(Path("runs"), help="Runs root directory."),
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
     wandb: bool = typer.Option(False, "--wandb",
-                               help="Mirror metrics to Weights & Biases (needs the [extras] extra)."),
+                               help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."),
 ) -> None:
     """Pretrain a pragmatiq model (MLM) on tokenized shards."""
     from pragmatiq import api

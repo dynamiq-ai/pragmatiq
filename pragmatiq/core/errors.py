@@ -12,7 +12,7 @@ class PragmatiqError(Exception):
     """Base exception for all pragmatiq errors."""
 
 
-class MissingExtraError(ImportError):
+class MissingExtraError(PragmatiqError, ImportError):
     """Raised when an optional install extra is required but not installed.
 
     Subclasses ``ImportError`` so ``except ImportError`` handlers still catch
@@ -20,7 +20,7 @@ class MissingExtraError(ImportError):
     """
 
     @classmethod
-    def for_extra(cls, extra: str, missing: str) -> "MissingExtraError":
+    def for_extra(cls, extra: str, missing: str) -> MissingExtraError:
         """Return a :class:`MissingExtraError` with a clear pip-install remedy.
 
         Args:

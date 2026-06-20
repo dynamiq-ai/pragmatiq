@@ -99,9 +99,11 @@ pip install -e ".[dev]"
 
 The full pipeline — including the gradient-boosting probe and the AML transfer-graph
 GraphSAGE ablation — works with the plain install. Optional extras add focused
-tooling: `.[serve]` for ONNX/Triton export and serving, `.[demo]` for the Streamlit
-demo, `.[extras]` for the frozen text embedder plus experiment tracking (Weights &
-Biases, TensorBoard), and `.[full]` for all of them.
+tooling: `.[serve]` for slim ONNX/Triton export and serving (no Lightning /
+torch-geometric / transformers), `.[train]` for Lightning distributed pretraining,
+`.[aml]` for the GraphSAGE transfer-graph ablation, `.[text]` for the frozen
+Nemotron text encoder, `.[tracking]` for Weights & Biases and TensorBoard mirrors,
+`.[demo]` for the Streamlit demo, and `.[full]` for all of them.
 
 The same workflow is available from Python:
 
@@ -730,7 +732,7 @@ It is switchable from the data step alone. Tokenize in embed mode and `pretrain`
 auto-builds the matching frozen encoder and MSE reconstruction head — no model flags:
 
 ```bash
-pip install -e ".[extras]"   # adds transformers (the frozen embedder)
+pip install -e ".[text]"     # adds transformers (the frozen embedder)
 pragmatiq tokenize data/synth --out data/tokenized --config configs/data/tokenizer_nemotron.yaml
 pragmatiq pretrain data/tokenized --name nemo --model-size medium   # text branch auto-wired
 ```
@@ -909,10 +911,10 @@ of the tokenizer. On top of that:
   `tokenize --n-workers` fan out across processes but produce byte-identical
   output for any worker count (CI-enforced), so you can scale CPU phases
   freely without losing reproducibility.
-- **TensorBoard**: `pip install -e ".[extras]"`, then
+- **TensorBoard**: `pip install -e ".[tracking]"`, then
   `tensorboard --logdir runs/<name>/tb`. The mirror is on whenever the
   `tensorboard` package is installed; otherwise it is a silent no-op.
-- **Weights & Biases**: `pip install -e ".[extras]"`, then set `wandb: true`
+- **Weights & Biases**: `pip install -e ".[tracking]"`, then set `wandb: true`
   (and optionally `wandb_project`) in the pretrain config, or pass `--wandb`
   to `pragmatiq pretrain`.
 

@@ -58,7 +58,7 @@ sa = api.pretrain("data/tok", "gpu-auto", model_size="small", config="auto",
 print("auto-config + grad-accum pretrain:", sa["last_metrics"])
 
 # PRAGMA+Nemotron variant: embed-mode tokenization auto-wires the MSE text branch.
-# The `hash` stand-in keeps this leg fast; for the real embedder install ".[extras]"
+# The `hash` stand-in keeps this leg fast; for the real embedder install ".[text]"
 # and set text_encoder="nemotron" (text_encoder_dim is read from the model).
 api.tokenize("data/synth", "data/tok_embed",
              config={"text_value_mode": "embed", "text_encoder": "hash"})
