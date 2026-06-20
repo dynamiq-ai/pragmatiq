@@ -117,10 +117,9 @@ def test_all_command_paths_present(cli_command_map: dict[str, list[str]]) -> Non
 
 
 def test_no_accidental_command_removal(cli_command_map: dict[str, list[str]]) -> None:
-    """The live app must contain at least every pinned command (may have more)."""
-    actual_paths = set(cli_command_map)
-    missing = GOLDEN_COMMAND_PATHS - actual_paths
-    assert not missing, f"Removed CLI commands: {sorted(missing)}"
+    """The live app must not contain extra unknown command paths beyond the golden set."""
+    extra = set(cli_command_map) - GOLDEN_COMMAND_PATHS
+    assert not extra, f"Added unexpected CLI commands: {sorted(extra)}"
 
 
 @pytest.mark.parametrize("cmd_path", sorted(GOLDEN_COMMAND_PARAMS))
@@ -143,11 +142,20 @@ def test_command_param_names(cmd_path: str, cli_command_map: dict[str, list[str]
 
 
 def test_root_callback_verbose_option() -> None:
-    """The root --verbose/--quiet option must exist on the app callback."""
+    """The root --verbose/--quiet option must exist on the app callback with default True."""
     from pragmatiq.cli import _setup
     sig = inspect.signature(_setup)
     assert "verbose" in sig.parameters, (
         "Root callback lost the 'verbose' parameter (--verbose/--quiet option)"
+    )
+    verbose_param = sig.parameters["verbose"]
+    # The default is wrapped in a typer.OptionInfo object; extract the actual value
+    option_info = verbose_param.default
+    assert hasattr(option_info, "default"), (
+        "Root callback 'verbose' parameter missing OptionInfo.default"
+    )
+    assert option_info.default is True, (
+        f"Root callback 'verbose' parameter default must be True, got {option_info.default}"
     )
 
 
