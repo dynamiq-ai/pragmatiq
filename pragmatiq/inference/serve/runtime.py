@@ -172,6 +172,7 @@ def load(
     )
 
     run_str = str(run_dir)
+    tmp: str = ""
 
     if is_local(run_str):
         # Local path: use directly (strip file:// prefix if present)
@@ -185,7 +186,7 @@ def load(
     model = PragmaModel.from_pretrained(local_run, device=resolved_device)
     runtime = Runtime(model=model, device=resolved_device)
     if not is_local(run_str):
-        runtime._staging_dir = tmp  # type: ignore[assignment]  # tmp set for remote path
+        runtime._staging_dir = tmp
     return runtime
 
 

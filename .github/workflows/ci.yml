@@ -194,9 +194,12 @@ jobs:
         run: bash scripts/gates/gate_7.sh
       - name: Validate / nano e2e / packaging
         run: bash scripts/gates/gate_8.sh
+      - name: BYOC hardening
+        run: bash scripts/gates/gate_10_byoc.sh
 
   supply-chain:
     runs-on: ubuntu-latest
+    needs: [quality]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6

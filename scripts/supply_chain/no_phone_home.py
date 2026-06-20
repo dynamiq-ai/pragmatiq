@@ -81,9 +81,6 @@ _PATTERNS = [
 ]
 
 # Compile patterns for efficiency (word-sensitive where needed)
-_COMPILED = [(p, re.compile(re.escape(p) if not p.startswith("r") else p[1:]))
-             for p in _PATTERNS]
-# Re-compile properly
 _COMPILED = [(p, re.compile(p)) for p in _PATTERNS]
 
 

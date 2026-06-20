@@ -47,4 +47,4 @@ echo "Generating SBOM → $OUTFILE"
 
 echo ""
 echo "SBOM generated: $OUTFILE"
-echo "Entries: $(python -c "import json; d=json.load(open('$OUTFILE')); print(len(d.get('components', [])))" 2>/dev/null || echo '(count unavailable)')"
+echo "Entries: $("$PY" -c "import json; d=json.load(open('$OUTFILE')); print(len(d.get('components', [])))" 2>/dev/null || echo '(count unavailable)')"
