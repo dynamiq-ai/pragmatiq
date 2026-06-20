@@ -129,7 +129,7 @@ class TrainConfig:
     """Pretraining hyperparameters (GUESS defaults per SPEC, all in config)."""
 
     max_steps: int = 1000
-    token_budget: int = 16_384
+    token_budget: int = 16_384  # GUESS: fits a `small` model on a 16 GiB GPU with optimizer-state headroom
     # Micro-batches accumulated per optimizer step. The effective batch is
     # grad_accum_steps × token_budget × world_size, so a large, stable batch can be
     # reached on a memory-bound device without raising token_budget (the per-forward

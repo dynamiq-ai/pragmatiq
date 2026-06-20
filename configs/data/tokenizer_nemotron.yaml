@@ -6,7 +6,7 @@
 # with MSE. pretrain() detects text_value_mode=="embed" on the loaded tokenizer and
 # builds the model's text branch with the matching encoder + width automatically.
 #
-# Requires the optional dependency:  pip install -e ".[extras]"
+# Requires the optional dependency:  pip install -e ".[text]"
 
 n_buckets: 64
 categorical_threshold: 1000   # text fields above this stay textual → frozen embedding

@@ -36,7 +36,7 @@ the checkpoint format.
   the checkpoint-format version. `tests/contract/` enforces the contract on
   every CI run and gate 9.
 - **`# GUESS` hyperparameter catalog** — README section "Paper-silent (`#
-  GUESS`) hyperparameters" documents all 9 unique paper-silent defaults (17
+  GUESS`) hyperparameters" documents all 9 unique paper-silent defaults (13
   source markers), their config keys, and one-line rationale. These defaults
   are embedded in every run's `run.yaml` / `meta.json` so shipped checkpoints
   reproduce regardless of future default changes.

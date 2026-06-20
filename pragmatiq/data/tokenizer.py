@@ -70,7 +70,7 @@ class TokenizerConfig:
     # GUESS: a float-parsing field is treated as a continuous numeric (percentile
     # binned) only above this distinct-value count; below it, low-cardinality
     # codes (MCC, version strings) stay categorical. None ⇒ 4 × n_buckets.
-    numeric_min_cardinality: int | None = None
+    numeric_min_cardinality: int | None = None  # GUESS: separates low-cardinality codes from continuous magnitudes
     # Per-key overrides for the field-kind heuristic (rule 8): force keys
     # categorical (e.g. an MCC/ZIP/BIN code that parses as a number) or numeric
     # (a magnitude with few distinct values). Empty ⇒ the heuristic decides.

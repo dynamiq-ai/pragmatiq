@@ -194,6 +194,10 @@ jobs:
         run: bash scripts/gates/gate_7.sh
       - name: Validate / nano e2e / packaging
         run: bash scripts/gates/gate_8.sh
+      - name: Public-API contract
+        run: bash scripts/gates/gate_9_contract.sh
+      - name: Integration adapters
+        run: bash scripts/gates/gate_integrations.sh
       - name: BYOC hardening
         run: bash scripts/gates/gate_10_byoc.sh
 
