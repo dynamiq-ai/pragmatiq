@@ -23,6 +23,7 @@ This module MUST import cleanly under the slim ``[serve]`` install:
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -89,6 +90,7 @@ class Runtime:
     def __init__(self, model: PragmaModel, device: str) -> None:
         self._model = model
         self._device = device
+        self._staging_dir: str | None = None
 
     @property
     def model(self) -> PragmaModel:
@@ -99,6 +101,22 @@ class Runtime:
     def device(self) -> str:
         """The device string on which the model is running."""
         return self._device
+
+    def close(self) -> None:
+        """Release resources held by this Runtime.
+
+        For remote runs, the staging temp-dir is deleted.  Safe to call more
+        than once (subsequent calls are no-ops).
+        """
+        if self._staging_dir is not None:
+            shutil.rmtree(self._staging_dir, ignore_errors=True)
+            self._staging_dir = None
+
+    def __enter__(self) -> Runtime:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def embed(self, records: list[dict]) -> np.ndarray:
         """Embed *records* and return a contiguous float32 ``[n_users, dim]`` array.
@@ -165,7 +183,10 @@ def load(
         local_run = tmp
 
     model = PragmaModel.from_pretrained(local_run, device=resolved_device)
-    return Runtime(model=model, device=resolved_device)
+    runtime = Runtime(model=model, device=resolved_device)
+    if not is_local(run_str):
+        runtime._staging_dir = tmp  # type: ignore[assignment]  # tmp set for remote path
+    return runtime
 
 
 __all__ = [
