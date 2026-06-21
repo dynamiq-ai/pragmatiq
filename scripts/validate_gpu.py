@@ -379,8 +379,15 @@ def _run_leg_with_timeout(
     cmd: list[str],
     timeout_sec: float,
     label: str,
+    log_dir: Path | None = None,
 ) -> tuple[int, bool]:
     """Run a leg subprocess with a per-leg timeout.
+
+    Stdout and stderr are redirected to a log FILE (not a PIPE) so the OS
+    pipe buffer can never fill and deadlock the parent — a leg emitting
+    megabytes of training logs will never block.  The log file path is
+    ``<log_dir>/<label>.log`` when *log_dir* is given; otherwise a temporary
+    file is used and discarded after the leg finishes.
 
     Uses ``start_new_session=True`` so the child gets its own process group,
     allowing ``os.killpg`` to reap orphaned GPU processes on timeout.
@@ -388,10 +395,44 @@ def _run_leg_with_timeout(
     Returns:
         (returncode, timed_out) — on timeout returncode is -1.
     """
+    import tempfile  # noqa: PLC0415 — intentional late import to keep top-level lean
+
+    log_path: Path | None = None
+    _tmp_fh = None
     try:
-        proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
+        if log_dir is not None:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            log_path = log_dir / f"{label}.log"
+            log_fh = log_path.open("wb")
+        else:
+            # Use a temporary file; no name needed, the fd is enough.
+            _tmp_fh = tempfile.TemporaryFile()
+            log_fh = _tmp_fh
+
+        try:
+            proc = subprocess.Popen(  # noqa: S603
+                cmd,
+                start_new_session=True,
+                stdout=log_fh,
+                stderr=log_fh,
+            )
+        finally:
+            # The child inherited the fd; we can close our copy now so the
+            # file is flushed/released when the child exits (not when we exit).
+            log_fh.close()
+
         try:
             proc.wait(timeout=timeout_sec)
+            if log_path is not None:
+                # Tail the log to the orchestrator's stdout so progress is
+                # visible (keep last 50 lines to avoid flooding on dry-run).
+                try:
+                    lines = log_path.read_bytes().decode(errors="replace").splitlines()
+                    tail = lines[-50:] if len(lines) > 50 else lines
+                    for line in tail:
+                        print(f"  [{label}] {line}", flush=True)
+                except Exception:  # noqa: BLE001
+                    pass
             return proc.returncode, False
         except subprocess.TimeoutExpired:
             print(
@@ -439,7 +480,7 @@ def _run_pretrain_leg(
     with _monitor_workload(f"pretrain_d{devices}", out_dir, util_records):
         t0 = time.time()
         returncode, timed_out = _run_leg_with_timeout(
-            cmd, leg_timeout_sec, f"pretrain_d{devices}"
+            cmd, leg_timeout_sec, f"pretrain_d{devices}", log_dir=out_dir / "leg_logs"
         )
         elapsed = time.time() - t0
 
@@ -603,7 +644,7 @@ def _run_finetune_leg(
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
         t0 = time.time()
         returncode, timed_out = _run_leg_with_timeout(
-            cmd, leg_timeout_sec, f"finetune_d{devices}"
+            cmd, leg_timeout_sec, f"finetune_d{devices}", log_dir=out_dir / "leg_logs"
         )
         elapsed = time.time() - t0
 
@@ -1534,6 +1575,70 @@ def _write_report(
 
 
 # ---------------------------------------------------------------------------
+# Bug-3 guard: high-output pipe-deadlock stress test
+# ---------------------------------------------------------------------------
+
+
+def _run_high_output_emitter() -> None:
+    """Emit >256 KB of stdout lines, then exit.
+
+    This is the hidden worker subprocess used by ``--high-output-test``.
+    With the old PIPE-capturing code the pipe buffer (~64 KB on Linux) would
+    fill and this process would block on ``write`` forever.  With the
+    file-redirect fix the output goes straight to a file and never deadlocks.
+    """
+    # 300 bytes per line × 1000 lines = 300 KB — well above the 64 KB pipe buffer.
+    line = "X" * 298 + "\n"
+    for i in range(1000):
+        sys.stdout.write(f"{i:06d} {line}")
+        sys.stdout.flush()
+
+
+def _high_output_test() -> None:
+    """Invoke ``_run_high_output_emitter`` via ``_run_leg_with_timeout`` and verify
+    it completes without deadlocking.
+
+    The test uses a 60-second timeout (the emitter should finish in <1 s on any
+    machine).  Exits 0 on success, 1 on failure.
+    """
+    import tempfile  # noqa: PLC0415
+
+    print("[high-output-test] launching high-output subprocess (>256 KB stdout) ...",
+          flush=True)
+
+    cmd = [sys.executable, __file__, "--_high-output-emitter"]
+
+    with tempfile.TemporaryDirectory(prefix="pq_hot_") as tmp:
+        log_dir = Path(tmp)
+        t0 = time.time()
+        returncode, timed_out = _run_leg_with_timeout(
+            cmd, timeout_sec=60.0, label="high_output_emitter", log_dir=log_dir
+        )
+        elapsed = time.time() - t0
+
+    if timed_out:
+        print(
+            "[high-output-test] FAIL — subprocess TIMED OUT (pipe deadlock likely); "
+            "Bug 1 is NOT fixed.",
+            flush=True,
+        )
+        sys.exit(1)
+
+    if returncode != 0:
+        print(
+            f"[high-output-test] FAIL — subprocess exited with rc={returncode}",
+            flush=True,
+        )
+        sys.exit(1)
+
+    print(
+        f"[high-output-test] PASS — high-output subprocess completed in {elapsed:.2f}s "
+        "with no pipe deadlock (Bug 1 fix confirmed).",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Main CLI
 # ---------------------------------------------------------------------------
 
@@ -1583,10 +1688,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--dry-run", action="store_true",
                     help="Tiny CPU run (~300 users, nano model, 5 steps) — exercises every "
                          "code path locally for free before any GPU spend")
+    ap.add_argument("--high-output-test", action="store_true",
+                    help="Self-contained stress test: run a subprocess that emits >256 KB of "
+                         "stdout and confirm it completes without deadlocking.  This exercises "
+                         "the file-redirect fix for the pipe-buffer deadlock (Bug 1 in the "
+                         "audit).  Exits 0 on success, 1 on failure.  No GPU or network needed.")
 
     # Hidden leg modes (invoked by orchestrator as subprocesses)
     ap.add_argument("--_leg-pretrain", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--_leg-finetune", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--_high-output-emitter", action="store_true", help=argparse.SUPPRESS)
 
     # Leg mode shared args
     ap.add_argument("--devices", type=int, default=1, help=argparse.SUPPRESS)
@@ -1612,6 +1723,16 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
 
     if getattr(args, "_leg_finetune", False):
         _leg_finetune(args)
+        return
+
+    # Hidden emitter invoked by --high-output-test
+    if getattr(args, "_high_output_emitter", False):
+        _run_high_output_emitter()
+        return
+
+    # Bug-3 guard: high-output pipe-deadlock stress test
+    if args.high_output_test:
+        _high_output_test()
         return
 
     # ---- Orchestrator mode ----

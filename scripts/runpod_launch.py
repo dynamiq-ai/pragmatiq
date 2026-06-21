@@ -28,6 +28,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -212,6 +213,67 @@ def _terminate_pod(pod_id: str, key: str) -> None:
             f"    (error: {exc})",
             file=sys.stderr,
         )
+
+
+def _start_pod_watchdog(
+    pod_id: str,
+    key: str,
+    deadline: float,
+    ssh_proc_ref: list[subprocess.Popen | None],
+    done_event: threading.Event,
+) -> threading.Thread:
+    """Start a daemon watchdog thread that hard-terminates the pod at *deadline*.
+
+    The watchdog is independent of the SSH command subprocess: even if the SSH
+    connection is wedged (e.g., the remote harness is deadlocked), the pod is
+    deleted at ``deadline`` (= ``create_ts + max_runtime_min * 60``).
+
+    Args:
+        pod_id:        RunPod pod ID to DELETE.
+        key:           RunPod API key.
+        deadline:      ``time.time()`` timestamp at which the pod must die.
+        ssh_proc_ref:  Single-element list; element 0 is the SSH subprocess (or
+                       None before it starts).  The watchdog kills it after
+                       deleting the pod so ``subprocess.run`` unblocks promptly.
+        done_event:    Set by the caller when the run finishes normally; causes
+                       the watchdog to exit without firing.
+
+    Returns:
+        The started daemon thread (already running; join it after the run to
+        ensure clean teardown).
+    """
+    def _watch() -> None:
+        remaining = deadline - time.time()
+        if remaining > 0:
+            # Wait until the deadline OR until the run finishes normally.
+            done_event.wait(timeout=remaining)
+
+        if done_event.is_set():
+            # Run finished cleanly before the deadline — nothing to do.
+            return
+
+        # ---- WATCHDOG FIRES ----
+        print(
+            f"\n[WATCHDOG] deadline reached; hard-terminating pod {pod_id} "
+            "regardless of SSH command state ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        _terminate_pod(pod_id, key)
+
+        # Kill the SSH subprocess so subprocess.run() unblocks in the main thread.
+        proc = ssh_proc_ref[0]
+        if proc is not None:
+            try:
+                proc.kill()
+                print("[WATCHDOG] SSH subprocess killed.", file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WATCHDOG] could not kill SSH subprocess: {exc}",
+                      file=sys.stderr, flush=True)
+
+    t = threading.Thread(target=_watch, name="pod-watchdog", daemon=True)
+    t.start()
+    return t
 
 
 def _pull_artifacts(
@@ -472,23 +534,50 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
 
         on_pod = f"set -euo pipefail\n{INSTALL}\n{run_cmd}"
 
-        # ---- run on pod (with optional timeout) -----------------------
-        # Fix B: compute remaining seconds from pod-creation so that sync +
-        # install time counts against the wall-clock cap, not just this command.
+        # ---- run on pod with independent watchdog -----------------------
+        # Bug 2 fix: the watchdog is a daemon thread that fires at
+        # create_ts + max_runtime_min*60 and DELETEs the pod + kills the SSH
+        # subprocess — independently of subprocess.run's own timeout.  This
+        # ensures the pod is destroyed at the deadline even when the SSH
+        # command is wedged (e.g., the remote harness is deadlocked).
+        _watchdog_thread: threading.Thread | None = None
+        _ssh_proc_ref: list[subprocess.Popen | None] = [None]
+        _run_done = threading.Event()
+
         if args.max_runtime_min > 0:
-            remaining_sec = max(60.0, create_ts + args.max_runtime_min * 60 - time.time())
-        else:
-            remaining_sec = None
-        try:
-            subprocess.run(
-                ssh_base + [on_pod],
-                check=True,
-                timeout=remaining_sec,
+            watchdog_deadline = create_ts + args.max_runtime_min * 60
+            remaining_for_log = watchdog_deadline - time.time()
+            print(
+                f"[watchdog] armed — pod will be HARD-terminated at deadline "
+                f"(~{remaining_for_log / 60:.1f} min from now, measured from pod creation)",
+                flush=True,
             )
-        except subprocess.TimeoutExpired:
-            print(f"[timeout] max-runtime-min={args.max_runtime_min} wall-clock exceeded "
-                  "(measured from pod creation); "
-                  "pulling artifacts and terminating ...", file=sys.stderr)
+            _watchdog_thread = _start_pod_watchdog(
+                pod_id=pod_id,
+                key=key,
+                deadline=watchdog_deadline,
+                ssh_proc_ref=_ssh_proc_ref,
+                done_event=_run_done,
+            )
+
+        try:
+            ssh_cmd = ssh_base + [on_pod]
+            ssh_proc = subprocess.Popen(ssh_cmd)  # noqa: S603
+            _ssh_proc_ref[0] = ssh_proc
+            # Wait without a Python-level timeout; the watchdog provides the
+            # hard deadline via pod-delete + proc.kill().
+            ssh_proc.wait()
+            if ssh_proc.returncode != 0:
+                print(
+                    f"[run] SSH command exited with rc={ssh_proc.returncode}",
+                    file=sys.stderr,
+                )
+        finally:
+            # Signal the watchdog that the run is done so it doesn't fire.
+            _run_done.set()
+            if _watchdog_thread is not None:
+                _watchdog_thread.join(timeout=5)
+
         print(f"run complete (pod {pod_id})")
 
     except KeyboardInterrupt:
