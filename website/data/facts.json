@@ -52,6 +52,10 @@
       "title": "Acceptance check \u2014 synthetic data generator."
     },
     {
+      "id": "gate_10_byoc",
+      "title": "Acceptance check \u2014 BYOC security / compliance (W7)."
+    },
+    {
       "id": "gate_2",
       "title": "Acceptance check \u2014 key-value-time tokenizer."
     },
@@ -78,6 +82,22 @@
     {
       "id": "gate_8",
       "title": "Acceptance check \u2014 nano end-to-end on CPU, validate, packaging."
+    },
+    {
+      "id": "gate_9_contract",
+      "title": "Acceptance check \u2014 public-API stability contract harness."
+    },
+    {
+      "id": "gate_integrations",
+      "title": "Acceptance check \u2014 cloud adapter integrations (W6a + W6b)."
+    },
+    {
+      "id": "gate_serve_slim",
+      "title": "Acceptance check \u2014 slim-serve install boundary."
+    },
+    {
+      "id": "gate_storage",
+      "title": "Acceptance check \u2014 object-store staging at the api boundary."
     }
   ],
   "model_sizes": [
