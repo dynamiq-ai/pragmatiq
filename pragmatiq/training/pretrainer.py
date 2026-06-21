@@ -55,6 +55,20 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
     restores the standard, faster path even if an earlier call enabled
     determinism in the same process. See :attr:`TrainConfig.deterministic` for
     the precision coupling.
+
+    CUDA-only side effects (H100 run findings 2026-06):
+
+    - ``TORCH_NCCL_ASYNC_ERROR_HANDLING`` and ``NCCL_ASYNC_ERROR_HANDLING`` are set
+      to ``1`` via ``os.environ.setdefault`` (no override of user-set values) so that
+      if a rank crashes mid-collective (e.g. OOM), the NCCL call aborts instead of all
+      ranks hanging forever (observed deadlock on 4-GPU `large` run).
+    - ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` (setdefault) reduces
+      fragmentation-driven OOM by allowing the allocator to expand existing segments
+      rather than requesting new ones. The H100 OOM error explicitly suggested this.
+    - ``torch.set_float32_matmul_precision("high")`` is set when CUDA is available
+      and ``deterministic=False`` to enable TF32 Tensor Core matmuls (free speedup on
+      Ampere/Hopper). In deterministic mode ``"highest"`` (default) is preserved so
+      fp32 reproducibility is not compromised.
     """
     import os
     import random
@@ -64,12 +78,20 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        # NCCL fail-fast: if a rank dies (e.g. OOM), abort the collective instead of
+        # hanging all other ranks. Use setdefault so a user-set value is not overridden.
+        os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")  # legacy alias
+        # Reduce fragmentation-driven OOM by reusing existing segment memory.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         os.environ["PRAGMATIQ_DETERMINISTIC"] = "1"
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # Preserve "highest" (default) fp32 precision in deterministic mode so the
+        # gradient is fully reproducible on fp32 runs (TF32 is an approximation).
     else:
         # Symmetric off-switch: a non-deterministic call clears any deterministic
         # state a prior call set, so the process never sticks on the slow path.
@@ -77,6 +99,12 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
         os.environ.pop("PRAGMATIQ_DETERMINISTIC", None)
         torch.use_deterministic_algorithms(False)
         torch.backends.cudnn.deterministic = False
+        if torch.cuda.is_available():
+            # TF32 Tensor Core matmuls: free ~10-20% speedup on Ampere/Hopper with
+            # negligible numerical impact (bf16 training already accepts that tolerance).
+            # Only set in non-deterministic mode; "highest" is the default so
+            # deterministic mode continues to produce bit-exact fp32 results.
+            torch.set_float32_matmul_precision("high")
 
 
 def _pack_numpy_state(state: Any) -> dict[str, Any]:
