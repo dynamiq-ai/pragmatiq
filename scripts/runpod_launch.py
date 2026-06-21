@@ -194,38 +194,70 @@ def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
 
 
 def _terminate_pod(pod_id: str, key: str) -> None:
-    """Terminate a pod, logging the outcome. Errors are surfaced but not raised."""
+    """Terminate a pod, logging the outcome. Errors are surfaced but not raised.
+
+    On ANY failure (API unreachable, HTTP error, network timeout) a loud warning
+    is printed to stderr so the operator can clean up manually.  The exception is
+    swallowed so it cannot mask an original exception in the caller's finally block.
+    """
     try:
         _req("DELETE", f"/pods/{pod_id}", key)
         print(f"[terminate] pod {pod_id} terminated.")
-    except SystemExit as exc:
-        print(f"[terminate] WARNING: could not terminate pod {pod_id}: {exc}", file=sys.stderr)
+    except Exception as exc:  # noqa: BLE001 — must not propagate; loud warning instead
+        print(
+            f"\n!!! POD TERMINATION FAILED for {pod_id} — "
+            f"MANUALLY TERMINATE: python scripts/runpod_launch.py --terminate {pod_id} !!!\n"
+            f"    (error: {exc})",
+            file=sys.stderr,
+        )
 
 
 def _pull_artifacts(
     ssh_base: list[str],
-    scp_base: list[str],
+    scp_base: list[str],  # kept for signature compatibility; not used (tar-over-ssh)
     ip: str,
     port: int,
     pull_glob: str,
     pull_dest: str,
 ) -> None:
-    """Best-effort: pull remote artifacts back to the local machine.
+    """Best-effort: pull remote artifacts back to the local machine via tar-over-ssh.
+
+    ``scp -r`` does NOT expand a remote glob when the path contains shell
+    metacharacters — the literal string is passed to the server and silently
+    pulls nothing.  Instead we stream a tar archive over SSH so the remote shell
+    expands the glob, then extract it locally.  The resulting archive is written
+    to ``<pull_dest>/pulled.tar.gz``.
 
     Failures are logged as warnings and do not raise, so partial results survive
     even when the pod terminates early.
     """
-    remote_path = f"/workspace/pragmatiq/{pull_glob}"
     local_dest = Path(pull_dest)
     local_dest.mkdir(parents=True, exist_ok=True)
+    archive = local_dest / "pulled.tar.gz"
+    # The remote shell expands the glob; 2>/dev/null suppresses "no match" noise.
+    remote_cmd = f"cd /workspace/pragmatiq && tar czf - {pull_glob} 2>/dev/null"
     try:
+        with archive.open("wb") as fh:
+            subprocess.run(
+                ssh_base + [remote_cmd],
+                stdout=fh,
+                check=True,
+                timeout=300,
+            )
+        # Zero-byte archive means the glob matched nothing — treat as warning.
+        if archive.stat().st_size == 0:
+            archive.unlink(missing_ok=True)
+            print(f"[pull] WARNING: no files matched glob '{pull_glob}' on the pod",
+                  file=sys.stderr)
+            return
+        # Extract in place so individual files are available alongside the archive.
         subprocess.run(
-            scp_base + ["-r", f"root@{ip}:{remote_path}", str(local_dest)],
+            ["tar", "xzf", str(archive), "-C", str(local_dest)],
             check=True, timeout=120,
         )
-        print(f"[pull] artifacts pulled from {remote_path} -> {local_dest}")
+        print(f"[pull] artifacts pulled (glob '{pull_glob}') -> {local_dest}")
     except Exception as exc:  # noqa: BLE001
-        print(f"[pull] WARNING: could not pull {remote_path}: {exc}", file=sys.stderr)
+        print(f"[pull] WARNING: could not pull glob '{pull_glob}': {exc}", file=sys.stderr)
 
 
 def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
@@ -355,6 +387,14 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     id_opt = ["-i", identity] if identity else []
     if args.no_run:
         print(f"skip run; SSH: ssh {' '.join(id_opt)} root@{ip} -p {port}".replace("  ", " "))
+        # CRITICAL: terminate before returning so --no-run --terminate-on-done
+        # does not leak a paid pod.  The try/finally below is never entered on
+        # this path, so termination must happen here explicitly.
+        if args.terminate_on_done:
+            _terminate_pod(pod_id, key)
+        else:
+            print(f"[info] pod still running; terminate with: "
+                  f"python scripts/runpod_launch.py --terminate {pod_id}")
         return
 
     ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", *id_opt, "-p", str(port), f"root@{ip}"]
