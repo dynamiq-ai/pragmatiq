@@ -413,6 +413,7 @@ class TestDeterminism:
         torch.use_deterministic_algorithms(False)
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("highest")  # global; reset like the det flags
         os.environ.pop("PRAGMATIQ_DETERMINISTIC", None)
 
     def test_default_leaves_deterministic_off(self) -> None:
@@ -482,6 +483,33 @@ class TestDeterminism:
         a = random.random()
         seed_everything(123)
         assert random.random() == a
+
+    def test_deterministic_resets_tf32_matmul_precision(self) -> None:
+        # Bug fix: the non-deterministic path enables TF32 ("high") fp32 matmuls; a
+        # later deterministic call in the SAME process must reset precision to
+        # "highest" or the bit-exact-in-fp32 determinism guarantee silently leaks TF32.
+        # The reset must hold regardless of CUDA (the global flag is hardware-agnostic),
+        # so simulate the prior non-det state directly rather than depend on a GPU.
+        try:
+            torch.set_float32_matmul_precision("high")  # as a prior non-det run leaves it
+            seed_everything(0, deterministic=True)
+            assert torch.get_float32_matmul_precision() == "highest", (
+                "deterministic mode leaked TF32 matmul precision"
+            )
+        finally:
+            self._restore()
+
+    def test_non_deterministic_sets_tf32_under_cuda(self) -> None:
+        # On a CUDA host the non-deterministic path opts into TF32 ("high") for the
+        # free Tensor-Core speedup. On CPU-only CI there is no Tensor Core, so the flag
+        # is left at its default — assert the CUDA behavior only where it applies.
+        try:
+            torch.set_float32_matmul_precision("highest")
+            seed_everything(0, deterministic=False)
+            if torch.cuda.is_available():
+                assert torch.get_float32_matmul_precision() == "high"
+        finally:
+            self._restore()
 
 
 # ---------------------------------------------------------------- gradient accumulation
