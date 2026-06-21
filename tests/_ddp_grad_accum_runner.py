@@ -13,6 +13,12 @@ float list under a stable key order) so the test can compare:
   the single-process grad-accum reference.
 - ``mode=ddp`` (run with ``devices=2``): the SAME ``N`` micro-batches sharded
   ``list[rank::world]`` across the gloo ranks, one window of ``N/world`` per rank.
+- ``mode=ddp_nan`` (run with ``devices=2``): like ``ddp`` but ONE rank's chosen
+  micro-batch is forced to a non-finite (NaN) loss while the other rank stays
+  finite — the rank-divergent NaN-skip case. Tests that the collective skip
+  decision keeps every rank from deadlocking on the per-window all-reduce, skips
+  the step on BOTH ranks together (replicas identical), and books the consecutive
+  skip consistently across ranks.
 
 With the deterministic content-keyed masker below, both paths mask each global
 micro-batch identically and the DDP run's all-reduced + globally-rescaled step must
@@ -47,6 +53,12 @@ N_MICRO = 4
 # The window index (in the global, pre-shard order) whose micro-batch is forced to
 # select nothing — the empty micro-batch that exercises the variable-contributing path.
 EMPTY_AT = 2
+# (ddp_nan mode) The rank whose micro-batch is forced non-finite, and the global
+# micro-batch index it happens on. Index 1 lands on rank 1 (1 % world==1) and selects
+# a non-empty batch (EMPTY_AT==2), so exactly ONE rank sees a non-finite loss while the
+# other rank's window is entirely finite — the rank-divergent skip the fix must survive.
+NAN_RANK = 1
+NAN_AT = 1
 
 
 class _DeterministicMasker:
@@ -139,9 +151,36 @@ def main() -> int:
     # (the bug) is genuinely exercised, not skipped.
     n_empty = sum(1 for g in global_order if g == EMPTY_AT)
 
-    trainer._train_step(window)
+    # (ddp_nan) Inject a non-finite loss on exactly ONE rank's chosen micro-batch so the
+    # ranks DIVERGE on the NaN-skip decision: the offending rank would (pre-fix) early-
+    # return before the per-window all-reduce while the other rank blocks on it forever —
+    # the deadlock. The fix makes the skip collective so both ranks skip together. We patch
+    # `mlm_loss` (used inside _micro_backward) to poison the loss only when THIS rank is the
+    # NaN rank and the masker is currently feeding global index NAN_AT.
+    if mode == "ddp_nan":
+        import pragmatiq.training.pretrainer as P
+        _orig_mlm_loss = P.mlm_loss
+
+        def _nan_mlm_loss(logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+            base = _orig_mlm_loss(logits, targets)
+            cur_global = masker._order[masker._idx - 1] if masker._idx > 0 else -1
+            if rank == NAN_RANK and cur_global == NAN_AT:
+                return base + float("nan")  # finite forward, non-finite loss on one rank
+            return base
+
+        P.mlm_loss = _nan_mlm_loss  # type: ignore[assignment]
+
+    metrics = trainer._train_step(window)
+    # Replicate fit()'s consecutive-skip bookkeeping so the test can assert it is CONSISTENT
+    # across ranks (both ranks must increment the counter, or neither — never one).
+    skipped = bool(metrics and metrics.get("skipped"))
+    if skipped:
+        trainer._consec_skips += 1
+    else:
+        trainer._consec_skips = 0
 
     payload = {"rank": rank, "world": world, "n_empty": n_empty, "n_micro": len(window),
+               "skipped": skipped, "consec_skips": trainer._consec_skips,
                "params": _flat_params(trainer)}
     ds.close()
     out_path = f"{out_dir}/result_{mode}_rank{rank}.json"

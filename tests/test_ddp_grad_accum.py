@@ -128,3 +128,53 @@ def test_ddp_grad_accum_completes_in_sync_and_matches_single_process(
         f"2-rank grad-accum step diverged from single-process reference (max |Δ|={vs_single:.3e}); "
         "the DDP rescale normalization is wrong"
     )
+
+
+def test_ddp_nan_on_one_rank_skips_collectively_without_deadlock(
+    gradaccum_fixture: dict[str, Path], tmp_path: Path,
+) -> None:
+    """One rank hits a non-finite (NaN) micro-batch loss and the other does not.
+
+    This is the DDP deadlock vector the audit follow-up fixes: the offending rank used to
+    early-return ``{"loss": nan}`` BEFORE the unconditional per-window ``all_reduce`` that
+    computes the global rescale, while the finite rank blocked on that collective forever.
+    The fix makes the skip decision COLLECTIVE — one combined all-reduce every rank always
+    reaches that propagates "any rank flagged non-finite" to all ranks — so both ranks
+    branch the same way. We assert:
+
+      (a) the 2-rank run COMPLETES (no hang — a deadlock would trip the subprocess timeout);
+      (b) BOTH ranks SKIP the optimizer step together, so their params stay byte-identical
+          (replicas in sync — no rank steps while another skipped); and
+      (c) the consecutive-skip bookkeeping is CONSISTENT across ranks (both report skipped
+          with the same consec_skips count).
+    """
+    # (a) Completes — a deadlock here trips the timeout in _run and never returns.
+    nan_results = _run(gradaccum_fixture, tmp_path, mode="ddp_nan", devices=2)
+    assert len(nan_results) == 2, (
+        f"expected a result from each of 2 ranks, got {len(nan_results)} "
+        "(a rank crashed or the collective hung — the deadlock this test guards against)"
+    )
+
+    # Exactly one rank divergently saw the non-finite loss — the bug's trigger condition.
+    # (b)+(c): both ranks must end up skipping the step regardless, in lockstep.
+    skipped = [r["skipped"] for r in nan_results]
+    assert all(skipped), (
+        f"NaN on one rank must make BOTH ranks skip the step, got skipped={skipped} "
+        "(a rank stepped while its peer skipped — replicas would desync)"
+    )
+
+    # (b) Replicas stayed in SYNC: skipping leaves params at their (identical) init, so the
+    # two ranks must match byte-for-byte.
+    r0, r1 = nan_results[0]["params"], nan_results[1]["params"]
+    cross_rank = _max_abs_diff(r0, r1)
+    assert cross_rank == 0.0, (
+        f"after a collective NaN-skip the 2-rank replicas DESYNCHRONIZED: max |Δ|={cross_rank:.3e} "
+        "(expected exactly 0 — both ranks must skip the step identically)"
+    )
+
+    # (c) Consecutive-skip bookkeeping consistent across ranks (both incremented to 1).
+    consec = [r["consec_skips"] for r in nan_results]
+    assert consec == [1, 1], (
+        f"consecutive-skip counter diverged across ranks: {consec} "
+        "(both ranks must book the skip the same way or the run aborts inconsistently)"
+    )
