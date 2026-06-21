@@ -111,7 +111,6 @@ class LoRAFineTuner:
         from .pretrainer import _make_fabric, seed_everything
 
         self.fabric = _make_fabric(config.devices, num_nodes=config.num_nodes)
-        self.device = str(self.fabric.device)
         # Per-rank seed offset so LoRA init / any sampling draws an independent
         # stream on each rank (the global seed was already applied by the caller;
         # single-process keeps the base seed via the world==1 branch above).
@@ -295,7 +294,7 @@ class LoRAFineTuner:
                 # With a subset over `users`, batches always carry a selected user;
                 # this guard is defensive only and never skips under DDP (skipping
                 # would desynchronize the per-rank backward count and deadlock).
-                continue
+                raise RuntimeError("DDP fine-tune: empty batch on a rank would desync gradient all-reduce; the subset sampler should prevent this")
             batch = batch.to(self.fabric.device)
             with torch.set_grad_enabled(train):
                 z = self.model.embed_users(batch)
