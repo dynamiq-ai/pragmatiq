@@ -36,6 +36,9 @@ realism_report.html
 *.key
 secrets/
 
+# RunPod pod-info sidecar (written by runpod_launch.py for external monitoring)
+.runpod_last.json
+
 # OS / editors
 .DS_Store
 .idea/

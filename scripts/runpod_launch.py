@@ -36,12 +36,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
 # Flash-attn prebuilt wheel for runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel
-# torch==2.4.0, cuda==12.4, python==3.11, abi=FALSE
+# torch==2.4.0, python==3.11, abi=FALSE.
+# flash-attn 2.6.3 ships cu118 and cu123 wheels only (no cu124); the cu123
+# wheel runs correctly on a cu124 runtime.  Using cu124 in the URL → 404.
 # Source: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.6.3
 # ---------------------------------------------------------------------------
 _FLASH_ATTN_WHEEL = (
     "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/"
-    "flash_attn-2.6.3+cu124torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+    "flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
 )
 
 # Common install block executed on the pod before any command.
@@ -366,6 +368,9 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
                      min_vcpu=args.min_vcpu, gpu_count=gpu_count)
     pod_id = pod.get("id")
+    # Fix B: record creation timestamp so that sync+install time counts against
+    # the wall-clock budget, not just command execution time.
+    create_ts = time.time()
     print(f"pod {pod_id} created; polling for SSH ...")
 
     ssh = None
@@ -383,6 +388,22 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         sys.exit(f"pod {pod_id} did not expose SSH in time; check the RunPod console")
     ip, port = ssh
     print(f"pod ready at {ip}:{port}")
+
+    # Fix D: write a gitignored sidecar so external monitoring can find the pod
+    # even when this launcher's stdout is buffered.  Best-effort: never fatal.
+    _sidecar = REPO_ROOT / ".runpod_last.json"
+    try:
+        _sidecar_data = {
+            "pod_id": pod_id,
+            "ip": ip,
+            "ssh_port": port,
+            "created": create_ts,
+        }
+        _sidecar.write_text(json.dumps(_sidecar_data, indent=2))
+        print(f"[pod-info] sidecar written: {_sidecar}")
+        print(f"[pod-info] {json.dumps(_sidecar_data)}")
+    except Exception as _sidecar_exc:  # noqa: BLE001
+        print(f"[pod-info] WARNING: could not write sidecar: {_sidecar_exc}", file=sys.stderr)
 
     id_opt = ["-i", identity] if identity else []
     if args.no_run:
@@ -417,7 +438,6 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     signal.signal(signal.SIGTERM, _handle_signal)
 
     start_time = time.monotonic()
-    timeout_sec = args.max_runtime_min * 60 if args.max_runtime_min > 0 else None
 
     import tempfile
 
@@ -453,14 +473,21 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         on_pod = f"set -euo pipefail\n{INSTALL}\n{run_cmd}"
 
         # ---- run on pod (with optional timeout) -----------------------
+        # Fix B: compute remaining seconds from pod-creation so that sync +
+        # install time counts against the wall-clock cap, not just this command.
+        if args.max_runtime_min > 0:
+            remaining_sec = max(60.0, create_ts + args.max_runtime_min * 60 - time.time())
+        else:
+            remaining_sec = None
         try:
             subprocess.run(
                 ssh_base + [on_pod],
                 check=True,
-                timeout=timeout_sec,
+                timeout=remaining_sec,
             )
         except subprocess.TimeoutExpired:
-            print(f"[timeout] max-runtime-min={args.max_runtime_min} exceeded; "
+            print(f"[timeout] max-runtime-min={args.max_runtime_min} wall-clock exceeded "
+                  "(measured from pod creation); "
                   "pulling artifacts and terminating ...", file=sys.stderr)
         print(f"run complete (pod {pod_id})")
 

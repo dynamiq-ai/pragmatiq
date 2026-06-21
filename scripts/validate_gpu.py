@@ -31,6 +31,7 @@ import csv
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -374,6 +375,41 @@ def _data_prep(
 # ---------------------------------------------------------------------------
 
 
+def _run_leg_with_timeout(
+    cmd: list[str],
+    timeout_sec: float,
+    label: str,
+) -> tuple[int, bool]:
+    """Run a leg subprocess with a per-leg timeout.
+
+    Uses ``start_new_session=True`` so the child gets its own process group,
+    allowing ``os.killpg`` to reap orphaned GPU processes on timeout.
+
+    Returns:
+        (returncode, timed_out) — on timeout returncode is -1.
+    """
+    try:
+        proc = subprocess.Popen(cmd, start_new_session=True)  # noqa: S603
+        try:
+            proc.wait(timeout=timeout_sec)
+            return proc.returncode, False
+        except subprocess.TimeoutExpired:
+            print(
+                f"[{label}] TIMEOUT after {timeout_sec / 60:.1f} min; "
+                "killing process group ...",
+                flush=True,
+            )
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # already gone
+            proc.wait()
+            return -1, True
+    except Exception as exc:  # noqa: BLE001
+        print(f"[{label}] subprocess launch error: {exc}", flush=True)
+        return -1, False
+
+
 def _run_pretrain_leg(
     *,
     devices: int,
@@ -385,6 +421,7 @@ def _run_pretrain_leg(
     token_budget: int,
     out_dir: Path,
     util_records: list[dict[str, Any]],
+    leg_timeout_sec: float,
 ) -> dict[str, Any]:
     """Run one pretrain leg via subprocess, sample GPU utilisation, parse metrics."""
     print(f"[pretrain] leg devices={devices} run={run_name}", flush=True)
@@ -401,7 +438,9 @@ def _run_pretrain_leg(
     ]
     with _monitor_workload(f"pretrain_d{devices}", out_dir, util_records):
         t0 = time.time()
-        proc = subprocess.run(cmd, capture_output=False)
+        returncode, timed_out = _run_leg_with_timeout(
+            cmd, leg_timeout_sec, f"pretrain_d{devices}"
+        )
         elapsed = time.time() - t0
 
     run_dir = runs_root / run_name
@@ -409,15 +448,18 @@ def _run_pretrain_leg(
     rows = _parse_metrics_jsonl(metrics_path)
     ss = _steady_state_metrics(rows)
 
-    return {
+    result: dict[str, Any] = {
         "devices": devices,
         "run_name": run_name,
         "run_dir": str(run_dir),
-        "returncode": proc.returncode,
+        "returncode": returncode,
         "elapsed_s": round(elapsed, 1),
         "tokens_per_sec": ss["tokens_per_sec"],
         "gpu_mem_gb": ss["gpu_mem_gb"],
     }
+    if timed_out:
+        result["status"] = "timeout"
+    return result
 
 
 def _training_sweep(
@@ -430,12 +472,24 @@ def _training_sweep(
     token_budget: int,
     out_dir: Path,
     util_records: list[dict[str, Any]],
+    leg_timeout_sec: float,
+    run_start: float,
+    max_runtime_sec: float,
 ) -> list[dict[str, Any]]:
     """Run the training scaling sweep legs and return per-leg results."""
     results: list[dict[str, Any]] = []
     tps_1: float = float("nan")
 
     for d in devices_sweep:
+        # Overall harness wall-clock cap: skip remaining legs if exceeded.
+        if max_runtime_sec > 0 and (time.time() - run_start) >= max_runtime_sec:
+            print(
+                f"[pretrain] max-runtime-min exceeded before d={d}; "
+                "skipping remaining legs",
+                flush=True,
+            )
+            break
+
         run_name = f"sweep_d{d}"
         # Try with the current token_budget; on OOM retry at half budget
         for attempt, tb in enumerate([token_budget, token_budget // 2]):
@@ -449,7 +503,16 @@ def _training_sweep(
                 token_budget=tb,
                 out_dir=out_dir,
                 util_records=util_records,
+                leg_timeout_sec=leg_timeout_sec,
             )
+            if result.get("status") == "timeout":
+                # Timed-out leg: record it and continue to next d (no retry).
+                print(
+                    f"[pretrain] d={d} TIMED OUT after {leg_timeout_sec / 60:.1f} min; "
+                    "continuing to next leg",
+                    flush=True,
+                )
+                break
             if result["returncode"] == 0:
                 if attempt > 0:
                     result["oom_fallback"] = True
@@ -468,6 +531,7 @@ def _training_sweep(
                     token_budget=tb,
                     out_dir=out_dir,
                     util_records=util_records,
+                    leg_timeout_sec=leg_timeout_sec,
                 )
                 result["oom_fallback_model_size"] = "medium"
                 break
@@ -484,7 +548,10 @@ def _training_sweep(
         result["efficiency"] = eff
         results.append(result)
         rc = result.get("returncode", 0)
-        if rc != 0:
+        status = result.get("status", "")
+        if status == "timeout":
+            print(f"[pretrain] d={d} TIMEOUT", flush=True)
+        elif rc != 0:
             print(f"[pretrain] d={d} FAILED (rc={rc})", flush=True)
         elif tps == tps and eff == eff:
             print(f"[pretrain] d={d} tps={tps:,.0f} eff={eff:.1%}", flush=True)
@@ -519,6 +586,7 @@ def _run_finetune_leg(
     steps: int,
     out_dir: Path,
     util_records: list[dict[str, Any]],
+    leg_timeout_sec: float,
 ) -> dict[str, Any]:
     """Run one finetune leg via subprocess; return timing + AUC."""
     result_json = out_dir / f"finetune_d{devices}_result.json"
@@ -534,7 +602,9 @@ def _run_finetune_leg(
     ]
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
         t0 = time.time()
-        proc = subprocess.run(cmd, capture_output=False)
+        returncode, timed_out = _run_leg_with_timeout(
+            cmd, leg_timeout_sec, f"finetune_d{devices}"
+        )
         elapsed = time.time() - t0
 
     ft_result: dict[str, Any] = {}
@@ -544,14 +614,17 @@ def _run_finetune_leg(
         except json.JSONDecodeError:
             pass
 
-    return {
+    result: dict[str, Any] = {
         "devices": devices,
         "wall_time_s": round(elapsed, 1),
-        "returncode": proc.returncode,
+        "returncode": returncode,
         "best_val_auc": ft_result.get("best_val_auc", float("nan")),
         "epochs_run": ft_result.get("epochs_run", 0),
         "val_auc_history": ft_result.get("val_auc_history", []),
     }
+    if timed_out:
+        result["status"] = "timeout"
+    return result
 
 
 def _finetune_sweep(
@@ -563,10 +636,22 @@ def _finetune_sweep(
     finetune_steps: int,
     out_dir: Path,
     util_records: list[dict[str, Any]],
+    leg_timeout_sec: float,
+    run_start: float,
+    max_runtime_sec: float,
 ) -> list[dict[str, Any]]:
     """Run fine-tuning legs and return per-leg results."""
     results: list[dict[str, Any]] = []
     for d in finetune_devices:
+        # Overall harness wall-clock cap: skip remaining legs if exceeded.
+        if max_runtime_sec > 0 and (time.time() - run_start) >= max_runtime_sec:
+            print(
+                f"[finetune] max-runtime-min exceeded before d={d}; "
+                "skipping remaining legs",
+                flush=True,
+            )
+            break
+
         print(f"[finetune] devices={d}", flush=True)
         result = _run_finetune_leg(
             devices=d,
@@ -576,13 +661,17 @@ def _finetune_sweep(
             steps=finetune_steps,
             out_dir=out_dir,
             util_records=util_records,
+            leg_timeout_sec=leg_timeout_sec,
         )
-        print(
-            f"[finetune] d={d} best_val_auc={result['best_val_auc']:.4f} "
-            f"wall={result['wall_time_s']:.0f}s" if result["best_val_auc"] == result["best_val_auc"]
-            else f"[finetune] d={d} failed (rc={result['returncode']})",
-            flush=True,
-        )
+        if result.get("status") == "timeout":
+            print(f"[finetune] d={d} TIMEOUT", flush=True)
+        else:
+            print(
+                f"[finetune] d={d} best_val_auc={result['best_val_auc']:.4f} "
+                f"wall={result['wall_time_s']:.0f}s" if result["best_val_auc"] == result["best_val_auc"]
+                else f"[finetune] d={d} failed (rc={result['returncode']})",
+                flush=True,
+            )
         results.append(result)
 
     # Save CSV
@@ -1260,11 +1349,13 @@ def _write_report(
             eff = r.get("efficiency", float("nan"))
             elapsed = r.get("elapsed_s", float("nan"))
             notes = ""
-            if r.get("oom_fallback"):
+            if r.get("status") == "timeout":
+                notes = "TIMEOUT (leg killed; harness continued)"
+            elif r.get("oom_fallback"):
                 notes = f"OOM fallback token_budget={r.get('token_budget_used')}"
-            if r.get("oom_fallback_model_size"):
+            elif r.get("oom_fallback_model_size"):
                 notes = "OOM fallback to model_size=medium"
-            if r.get("returncode", 0) != 0:
+            elif r.get("returncode", 0) != 0:
                 notes = f"FAILED (rc={r.get('returncode')})"
             lines.append(
                 f"| {r['devices']} | {_fmt(tps, ',.0f')} | {_fmt(mem)} | "
@@ -1474,6 +1565,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "(default: 1,4,16,64)")
     ap.add_argument("--max-runtime-min", type=int, default=0,
                     help="Hard wall-clock timeout in minutes (0 = unlimited)")
+    ap.add_argument("--leg-timeout-min", type=int, default=10,
+                    help="Per-leg subprocess timeout in minutes (default: 10). "
+                         "On expiry the leg's process group is killed, the leg is "
+                         "recorded as 'timeout', and the harness continues to the "
+                         "next leg.")
     ap.add_argument("--skip-serving", action="store_true",
                     help="Skip the serving measurement")
     ap.add_argument("--skip-finetune", action="store_true",
@@ -1549,6 +1645,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
     finetune_devices = [int(d) for d in args.finetune_devices.split(",") if d.strip()]
     serving_concurrency = [int(c) for c in args.serving_concurrency.split(",") if c.strip()]
 
+    leg_timeout_sec = args.leg_timeout_min * 60
+    run_start = time.time()
+    max_runtime_sec = args.max_runtime_min * 60  # 0 means unlimited
+
     util_records: list[dict[str, Any]] = []
 
     # -- Data prep --
@@ -1566,6 +1666,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         token_budget=args.token_budget,
         out_dir=out_dir,
         util_records=util_records,
+        leg_timeout_sec=leg_timeout_sec,
+        run_start=run_start,
+        max_runtime_sec=max_runtime_sec,
     )
 
     # Identify the pretrained run to use for finetune (prefer sweep_d8 or sweep_d1)
@@ -1591,6 +1694,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
                 finetune_steps=args.finetune_steps,
                 out_dir=out_dir,
                 util_records=util_records,
+                leg_timeout_sec=leg_timeout_sec,
+                run_start=run_start,
+                max_runtime_sec=max_runtime_sec,
             )
     else:
         print("[main] finetune skipped (--skip-finetune)", flush=True)
