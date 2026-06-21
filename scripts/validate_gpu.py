@@ -1308,6 +1308,114 @@ def _measure_serving(
 
 
 # ---------------------------------------------------------------------------
+# Flash-attn ≡ SDPA numeric equivalence check (GPU-only)
+# ---------------------------------------------------------------------------
+
+
+def _check_flash_vs_sdpa() -> dict[str, Any]:
+    """Compare flash-attn kernel output to the SDPA fallback on small varlen inputs.
+
+    Only runs when CUDA is available.  Forces the SDPA path by temporarily
+    setting ``pragmatiq.models.layers._HAS_FLASH = False``, then restores the
+    original value.  Uses ``dropout_p=0.0`` so both paths are deterministic.
+
+    Returns a dict with keys:
+        skipped (bool), skip_reason (str),
+        flash_available (bool), passed (bool),
+        max_abs_diff (float), mean_abs_diff (float), tol (float),
+        error (str | None)
+    """
+    result: dict[str, Any] = {
+        "skipped": False,
+        "skip_reason": "",
+        "flash_available": False,
+        "passed": False,
+        "max_abs_diff": float("nan"),
+        "mean_abs_diff": float("nan"),
+        "tol": 1e-2,
+        "error": None,
+    }
+
+    try:
+        import torch  # noqa: PLC0415
+        if not torch.cuda.is_available():
+            result["skipped"] = True
+            result["skip_reason"] = "no CUDA"
+            return result
+
+        import pragmatiq.models.layers as _layers  # noqa: PLC0415
+        from pragmatiq.models.layers import varlen_self_attention  # noqa: PLC0415
+
+        has_flash_orig: bool = _layers._HAS_FLASH
+        result["flash_available"] = has_flash_orig
+
+        if not has_flash_orig:
+            result["skipped"] = True
+            result["skip_reason"] = "flash unavailable — SDPA only, check skipped"
+            return result
+
+        # Build small varlen inputs: 3 segments of lengths [5, 3, 7] → total=15 tokens
+        torch.manual_seed(42)
+        segment_lens = [5, 3, 7]
+        total_t = sum(segment_lens)
+        n_heads = 4
+        head_dim = 16  # small enough for a quick CPU-equivalent check
+        n_seg = len(segment_lens)
+
+        # cu_seqlens: int32 prefix-sum [0, 5, 8, 15]
+        cu = torch.zeros(n_seg + 1, dtype=torch.int32, device="cuda")
+        for i, ll in enumerate(segment_lens):
+            cu[i + 1] = cu[i] + ll
+        max_seqlen = max(segment_lens)
+
+        # Random bf16 tensors on CUDA (flash-attn requires bf16/fp16)
+        q = torch.randn(total_t, n_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+        k = torch.randn(total_t, n_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+        v = torch.randn(total_t, n_heads, head_dim, dtype=torch.bfloat16, device="cuda")
+
+        # (1) Flash-attn path — _HAS_FLASH is True, tensors are CUDA + bf16
+        with torch.no_grad():
+            out_flash = varlen_self_attention(
+                q, k, v, cu, max_seqlen, rope=None, rope_pos=None, dropout_p=0.0
+            )
+        torch.cuda.synchronize()
+
+        # (2) SDPA fallback — temporarily suppress flash
+        _layers._HAS_FLASH = False
+        try:
+            with torch.no_grad():
+                out_sdpa = varlen_self_attention(
+                    q, k, v, cu, max_seqlen, rope=None, rope_pos=None, dropout_p=0.0
+                )
+            torch.cuda.synchronize()
+        finally:
+            _layers._HAS_FLASH = has_flash_orig  # always restore
+
+        diff = (out_flash.float() - out_sdpa.float()).abs()
+        max_abs = float(diff.max().item())
+        mean_abs = float(diff.mean().item())
+        tol = result["tol"]
+
+        result["max_abs_diff"] = max_abs
+        result["mean_abs_diff"] = mean_abs
+        result["passed"] = max_abs <= tol
+
+        status = "PASS" if result["passed"] else "FAIL"
+        print(
+            f"[flash-check] {status}: max_abs={max_abs:.2e} mean_abs={mean_abs:.2e} "
+            f"tol={tol:.0e}",
+            flush=True,
+        )
+
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+        result["passed"] = False
+        print(f"[flash-check] ERROR: {exc}", flush=True)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Report writer
 # ---------------------------------------------------------------------------
 
@@ -1327,6 +1435,7 @@ def _write_report(
     triton_results: list[dict[str, Any]],
     triton_skip_reason: str,
     util_records: list[dict[str, Any]],
+    flash_check_result: dict[str, Any] | None = None,
 ) -> Path:
     """Write REPORT.md and return its path."""
     report_path = out_dir / "REPORT.md"
@@ -1536,6 +1645,42 @@ def _write_report(
     else:
         lines += ["*No utilisation data collected.*", ""]
 
+    # ---- Flash-attn ≡ SDPA section ----
+    lines += ["## flash-attn ≡ SDPA", ""]
+    fc = flash_check_result or {}
+    if not fc:
+        lines += ["*Flash-attn check not requested.*", ""]
+    elif fc.get("skipped"):
+        reason = fc.get("skip_reason", "unknown reason")
+        lines += [f"**Skipped:** {reason}", ""]
+    elif fc.get("error"):
+        lines += [
+            f"**Error during check:** `{fc['error']}`",
+            "",
+            "*Check did not complete; see stdout for details.*",
+            "",
+        ]
+    else:
+        flash_avail = fc.get("flash_available", False)
+        passed = fc.get("passed", False)
+        max_diff = fc.get("max_abs_diff", float("nan"))
+        mean_diff = fc.get("mean_abs_diff", float("nan"))
+        tol = fc.get("tol", 1e-2)
+        verdict = "PASS" if passed else "FAIL"
+        lines += [
+            f"**Result: {verdict}**  ",
+            f"- flash-attn available on pod: {flash_avail}  ",
+            f"- max abs diff (flash vs SDPA): {max_diff:.3e}  ",
+            f"- mean abs diff: {mean_diff:.3e}  ",
+            f"- tolerance (bf16 budget): {tol:.0e}  ",
+            "",
+            "Inputs: `[total=15, n_heads=4, head_dim=16]` bf16 on CUDA, "
+            "3 varlen segments `[5, 3, 7]`, `dropout_p=0.0`.  "
+            "The SDPA path was forced by temporarily setting "
+            "`pragmatiq.models.layers._HAS_FLASH = False` (restored after).",
+            "",
+        ]
+
     # ---- Verdict section ----
     lines += ["## Verdict", ""]
     if dry_run:
@@ -1688,6 +1833,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--dry-run", action="store_true",
                     help="Tiny CPU run (~300 users, nano model, 5 steps) — exercises every "
                          "code path locally for free before any GPU spend")
+    ap.add_argument("--skip-flash-check", action="store_true",
+                    help="Skip the flash-attn ≡ SDPA numeric equivalence check "
+                         "(GPU-only; automatically skipped in --dry-run or when CUDA "
+                         "is unavailable)")
     ap.add_argument("--high-output-test", action="store_true",
                     help="Self-contained stress test: run a subprocess that emits >256 KB of "
                          "stdout and confirm it completes without deadlocking.  This exercises "
@@ -1844,6 +1993,28 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         print("[main] serving skipped (--skip-serving)", flush=True)
         triton_skip_reason = "--skip-serving flag set"
 
+    # -- Flash-attn ≡ SDPA check (GPU-only, skipped in dry-run and when no CUDA) --
+    flash_check_result: dict[str, Any] | None = None
+    _skip_flash = getattr(args, "skip_flash_check", False)
+    if args.dry_run:
+        flash_check_result = {"skipped": True, "skip_reason": "skipped (dry-run mode)"}
+        print("[flash-check] skipped (dry-run mode)", flush=True)
+    elif _skip_flash:
+        flash_check_result = {"skipped": True, "skip_reason": "skipped (--skip-flash-check)"}
+        print("[flash-check] skipped (--skip-flash-check)", flush=True)
+    else:
+        try:
+            import torch as _torch  # noqa: PLC0415
+            _has_cuda = _torch.cuda.is_available()
+        except Exception:  # noqa: BLE001
+            _has_cuda = False
+        if not _has_cuda:
+            flash_check_result = {"skipped": True, "skip_reason": "skipped (no CUDA)"}
+            print("[flash-check] skipped (no CUDA)", flush=True)
+        else:
+            print("[main] === Flash-attn ≡ SDPA equivalence check ===", flush=True)
+            flash_check_result = _check_flash_vs_sdpa()
+
     # -- Report --
     end_ts = datetime.now().isoformat(timespec="seconds")
     report_path = _write_report(
@@ -1860,6 +2031,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         triton_results=triton_results,
         triton_skip_reason=triton_skip_reason,
         util_records=util_records,
+        flash_check_result=flash_check_result,
     )
 
     print("\n[main] === DONE ===", flush=True)
