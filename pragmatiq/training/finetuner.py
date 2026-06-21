@@ -319,16 +319,19 @@ class LoRAFineTuner:
         bucket: list[Any] = [None] * world
         dist.all_gather_object(bucket, list(zip(local_uids, local_probs, local_ys)))
         # De-duplicate on user_id: the sampler's replica padding can repeat a few
-        # batches, so a user may appear on >1 rank; keep one entry per user so the
-        # global AUC equals the single-process AUC over the same val users.
-        seen: dict[str, tuple[float, int]] = {}
+        # batches, so a user may appear on >1 rank.  Average the duplicate probs
+        # (rather than keeping the first-seen entry) so the result is deterministic
+        # regardless of bucket / shard iteration order.
+        prob_acc: dict[str, list[float]] = {}
+        label_map: dict[str, int] = {}
         for shard in bucket:
             for uid, prob, label in shard:  # type: ignore[union-attr]
-                seen.setdefault(uid, (prob, label))
-        if not seen:
+                prob_acc.setdefault(uid, []).append(prob)
+                label_map[uid] = label
+        if not prob_acc:
             return float("nan")
-        probs = [p for p, _ in seen.values()]
-        ys = [yy for _, yy in seen.values()]
+        probs = [sum(vs) / len(vs) for vs in prob_acc.values()]
+        ys = [label_map[uid] for uid in prob_acc]
         if len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))
         return float("nan")

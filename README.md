@@ -453,7 +453,7 @@ key can be overridden via `--config` or programmatically through
 | `grad_accum_steps` | `1` | Micro-batches per optimizer step. Effective batch = `token_budget × grad_accum × world_size`; raise it for a large, stable batch on a memory-bound GPU without raising `token_budget`. |
 | `devices` / `num_nodes` | `auto` / `1` | Fabric DDP: per-node device count and host count (multi-node). |
 | `lr_muon` / `lr_adamw` | `3e-3` / `3e-4` | Muon drives 2-D hidden weights; AdamW drives embeddings/norms/biases. |
-| `warmup_steps` | `500` | Linear warmup before the cosine decay. |
+| `warmup_steps` | `100` (dataclass) / `500` (pretrain.yaml) | Linear warmup before the cosine decay. The YAML value wins when using the CLI or `api.pretrain()` without an override; the dataclass default applies only in unit tests and direct Python use. |
 | `weight_decay` / `grad_clip` | `0.01` / `1.0` | Applied to both optimizers. |
 | `checkpoint_every_min` | `15.0` | Wall-clock minutes between full checkpoints. |
 | `log_every` | `20` | Steps between metric logs and the stderr heartbeat. |
