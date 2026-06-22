@@ -49,4 +49,6 @@ class TritonPythonModel:
         return responses
 
     def finalize(self):
+        if self.runtime is not None:
+            self.runtime.close()
         self.runtime = None

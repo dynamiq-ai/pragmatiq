@@ -224,10 +224,13 @@ def pretrain(
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
         _orig_runs_root = str(runs_root)
         runs_root = stage.output(runs_root, is_dir=True)  # type: ignore[assignment]
-        # Resume pre-population: if runs_root was staged (remote), materialize
-        # the existing run dir so the trainer can resume from it.
+        # Resume pre-population: if runs_root was staged (remote) AND the caller
+        # explicitly requested resume, materialize the existing remote run dir so
+        # the trainer can resume from it.  A fresh run (resume is None or missing)
+        # must NOT pull a pre-existing remote run — that would silently inject stale
+        # checkpoints into what should be a clean start (see docs/STORAGE.md).
         _runs_root_staged = str(runs_root) != _orig_runs_root
-        if _runs_root_staged:
+        if _runs_root_staged and resume == "auto":
             from pragmatiq.storage.cache import materialize_dir as _mat_dir
             from pragmatiq.storage.fs import exists as _st_exists
 
