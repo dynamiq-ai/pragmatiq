@@ -52,3 +52,4 @@ docs/SPEC.md
 
 # agent working scratch (never commit)
 .superpowers/
+docs/audit/AUDIT-VERDICT-*.md
