@@ -500,3 +500,78 @@ class TestCloudAdapterProtocolConformance:
             assert isinstance(adapter, CloudAdapter), (
                 f"{type(adapter).__name__} does not satisfy the CloudAdapter Protocol"
             )
+
+
+# ===========================================================================
+# Regression: Nebius batch-embed command uses the real CLI flag contract
+# (Bugbot PR #10 — issue 1)
+# ===========================================================================
+
+
+class TestNebiusBatchEmbedCliFlags:
+    """Generated Nebius batch-embed YAML must use the real pragmatiq CLI flags.
+
+    The ``embed`` command signature is::
+
+        pragmatiq embed <shard_dir> --run <run_dir> --out <out.parquet>
+
+    The old (wrong) flags ``--run-dir`` / ``--output`` do NOT exist on the CLI
+    and would cause a ``No such option`` error on the Soperator pod.
+    """
+
+    def _get_batch_job_yaml(self) -> str:
+        from integrations.nebius import NebiusAdapter
+
+        run_dir = _make_fake_run_dir()
+        dest = Path(tempfile.mkdtemp(prefix="pragmatiq-neb-cliflags-")) / "specs"
+        adapter = NebiusAdapter(image="cr.eu-north1.nebius.cloud/pragmatiq:latest")
+        adapter.package(run_dir, dest=str(dest), image="cr.eu-north1.nebius.cloud/pragmatiq:latest")
+        return (dest / "batch_embed_job.yaml").read_text()
+
+    def test_batch_job_uses_run_flag_not_run_dir(self) -> None:
+        """batch_embed_job.yaml must use '--run', not '--run-dir'."""
+        content = self._get_batch_job_yaml()
+        assert "--run-dir" not in content, (
+            "batch_embed_job.yaml uses wrong flag '--run-dir'; CLI expects '--run'"
+        )
+        assert "--run" in content, (
+            "batch_embed_job.yaml is missing the '--run' flag for the run directory"
+        )
+
+    def test_batch_job_uses_out_flag_not_output(self) -> None:
+        """batch_embed_job.yaml must use '--out', not '--output'."""
+        content = self._get_batch_job_yaml()
+        assert "--output" not in content, (
+            "batch_embed_job.yaml uses wrong flag '--output'; CLI expects '--out'"
+        )
+        assert "--out" in content, (
+            "batch_embed_job.yaml is missing the '--out' flag for the output parquet"
+        )
+
+    def test_batch_job_has_positional_shard_dir(self) -> None:
+        """batch_embed_job.yaml must include the positional shard_dir argument."""
+        content = self._get_batch_job_yaml()
+        # The shard_dir mount path must appear as a positional arg in the command
+        assert "/opt/pragmatiq/shard_dir" in content, (
+            "batch_embed_job.yaml is missing the positional shard_dir mount path"
+        )
+
+    def test_manifest_command_uses_correct_cli_flags(self) -> None:
+        """manifest()['soperator_batch']['command'] must use '--run' and '--out'."""
+        from integrations.nebius import NebiusAdapter
+
+        adapter = NebiusAdapter(image="cr.eu-north1.nebius.cloud/pragmatiq:latest")
+        cmd = adapter.manifest()["soperator_batch"]["command"]
+        cmd_str = " ".join(cmd)
+        assert "--run-dir" not in cmd_str, (
+            "manifest() soperator_batch command uses wrong flag '--run-dir'"
+        )
+        assert "--output" not in cmd_str, (
+            "manifest() soperator_batch command uses wrong flag '--output'"
+        )
+        assert "--run" in cmd, (
+            "manifest() soperator_batch command is missing '--run' flag"
+        )
+        assert "--out" in cmd, (
+            "manifest() soperator_batch command is missing '--out' flag"
+        )

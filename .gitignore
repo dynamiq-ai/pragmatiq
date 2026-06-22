@@ -49,3 +49,6 @@ docs/SPEC.md
 
 # Local-only copy of the inspiration paper (not redistributable)
 /paper/
+
+# agent working scratch (never commit)
+.superpowers/

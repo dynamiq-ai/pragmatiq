@@ -105,6 +105,8 @@ _BATCH_JOB_TMPL = """\
 # Or via Soperator API:
 #   kubectl apply -f batch_embed_job.yaml
 # See docs/INTEGRATIONS.md for the full runbook.
+#
+# CLI usage: pragmatiq embed <shard_dir> --run <run_dir> --out <output.parquet>
 
 apiVersion: soperator.nebius.com/v1alpha1
 kind: SlurmJob
@@ -118,9 +120,10 @@ spec:
     - -m
     - pragmatiq.cli
     - embed
-    - --run-dir
+    - "{shard_dir_mount}"
+    - --run
     - "{run_dir_mount}"
-    - --output
+    - --out
     - "{s3_output_path}"
   resources:
     gpuType: "{gpu_type}"
@@ -242,7 +245,9 @@ class NebiusAdapter:
                 "image": self._image,
                 "command": [
                     "python", "-m", "pragmatiq.cli", "embed",
-                    "--run-dir", "/opt/pragmatiq/run_dir",
+                    "/opt/pragmatiq/shard_dir",
+                    "--run", "/opt/pragmatiq/run_dir",
+                    "--out", "s3://pragmatiq-runs/embeddings/",
                 ],
                 "resources": {
                     "gpu_type": self._gpu_type,
@@ -304,6 +309,7 @@ class NebiusAdapter:
         dest_path.mkdir(parents=True, exist_ok=True)
 
         run_dir_mount = "/opt/pragmatiq/run_dir"
+        shard_dir_mount = "/opt/pragmatiq/shard_dir"
         s3_output = f"s3://{self._s3_bucket}/embeddings/"
 
         common_kw = dict(
@@ -323,6 +329,7 @@ class NebiusAdapter:
             s3_output_path=s3_output,
             region=self._region,
             run_dir_mount=run_dir_mount,
+            shard_dir_mount=shard_dir_mount,
         )
 
         # 1. Token Factory serving spec

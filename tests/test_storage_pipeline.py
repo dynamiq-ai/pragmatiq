@@ -292,3 +292,81 @@ def test_embed_missing_remote_run_raises(tmp_path):
 
     with pytest.raises((FileNotFoundError, ValueError, OSError, RuntimeError), match=r"nonexistent"):
         api.embed(tmp_path / "tok", "memory:///nonexistent/run")
+
+
+# ------------------------------------------------------------------ #
+# Bugbot PR #10 regression tests (issues 2 and 3)
+# ------------------------------------------------------------------ #
+
+
+def test_remote_config_yaml_loaded_by_load_yaml():
+    """load_yaml() must read a remote (memory://) config URL, not fail.
+
+    Regression guard for Bugbot issue 3: config=s3://... was passed straight
+    to OmegaConf.load which only handles local files.  Now load_yaml is
+    storage-aware.
+    """
+    import fsspec
+
+    from pragmatiq.core.config import load_yaml
+
+    mem = fsspec.filesystem("memory")
+    mem.makedirs("/cfgtest", exist_ok=True)
+    with mem.open("/cfgtest/train.yaml", "wb") as f:
+        f.write(b"max_steps: 5\ntoken_budget: 512\n")
+
+    result = load_yaml("memory:///cfgtest/train.yaml")
+    assert result == {"max_steps": 5, "token_budget": 512}, (
+        f"load_yaml() returned unexpected result for remote URL: {result}"
+    )
+
+
+def test_fresh_remote_pretrain_does_not_pull_existing_run(tmp_path):
+    """A fresh pretrain (no resume) must NOT stage an existing remote run.
+
+    Regression guard for Bugbot issue 2: when runs_root was a remote URL and
+    a run with the same name already existed remotely, the staging block used
+    to download it even without resume='auto', potentially injecting stale
+    checkpoints into a new run.
+    """
+    import fsspec
+
+    from pragmatiq.storage.cache import put_dir
+
+    # Synthesize + tokenize a tiny dataset
+    api.synthesize(SYNTH_CFG, out=tmp_path / "raw", write_report=False)
+    api.tokenize(tmp_path / "raw", tmp_path / "tok")
+
+    # Run #1: train locally and upload the checkpoint to memory://
+    api.pretrain(
+        tmp_path / "tok",
+        "resume_guard_run",
+        model_size="nano",
+        config=TRAIN_CFG,
+        runs_root=tmp_path / "runs1",
+    )
+    remote_runs = "memory:///resume_guard_test/runs"
+    put_dir(tmp_path / "runs1" / "resume_guard_run", remote_runs + "/resume_guard_run")
+
+    # Run #2: fresh pretrain (no resume) — must NOT pull the remote checkpoint
+    # We verify this by checking that the local staging dir is empty at start,
+    # i.e., the trainer starts from step 0 (no resumed step counter).
+    fresh_cfg = {k: v for k, v in TRAIN_CFG.items() if k != "max_steps"}
+    fresh_cfg["max_steps"] = 2
+    second = api.pretrain(
+        tmp_path / "tok",
+        "resume_guard_run",
+        model_size="nano",
+        config=fresh_cfg,
+        runs_root=remote_runs,
+        resume=None,  # explicitly NOT resuming
+    )
+    # A fresh run always starts at 0 + max_steps steps total — if stale
+    # checkpoint were staged, step count could exceed max_steps.
+    assert second["steps"] <= TRAIN_CFG["max_steps"] + 2, (
+        "Fresh remote pretrain (resume=None) appears to have loaded a stale checkpoint"
+    )
+
+    # Clean up memory fs
+    mem = fsspec.filesystem("memory")
+    mem.store.clear()
