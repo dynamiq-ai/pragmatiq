@@ -44,7 +44,7 @@ class MetricLogger:
                 import logging as _logging
                 _logging.getLogger(__name__).warning(
                     "wandb requested but not installed; "
-                    "install pragmatiq[wandb]; continuing with JSONL-only logging"
+                    "install pragmatiq[tracking]; continuing with JSONL-only logging"
                 )
                 _wandb = None  # type: ignore[assignment]
             if _wandb is not None:

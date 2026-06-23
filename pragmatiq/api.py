@@ -307,7 +307,7 @@ def _pretrain_inner(
         prev = Run.open(run_name, runs_root).read_config()
         model_size = str(prev.get("model_size", model_size))
         arch = set(ModelConfig.__dataclass_fields__) - {"vocab_size"}
-        explicit = dict(overrides) if config == "auto" else base
+        explicit = dict(overrides) if is_auto else base
         merged = {k: v for k, v in prev.items() if k in known}
         merged.update(explicit)  # explicit caller intent wins for non-architecture knobs
         merged.update({k: prev[k] for k in arch if k in prev})  # architecture stays the checkpoint's
