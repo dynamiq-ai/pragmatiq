@@ -40,15 +40,20 @@ class MetricLogger:
         if wandb:
             try:
                 import wandb as _wandb
-            except ImportError as _e:
-                from pragmatiq.core.errors import MissingExtraError
-                raise MissingExtraError.for_extra("tracking", "wandb") from _e
-            try:
-                self._wandb = _wandb
-                _wandb.init(project=wandb_project, name=run_name, config=config or {},
-                            dir=str(self.dir), resume="allow")
-            except Exception:
-                self._wandb = None
+            except ImportError:
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "wandb requested but not installed; "
+                    "install pragmatiq[wandb]; continuing with JSONL-only logging"
+                )
+                _wandb = None  # type: ignore[assignment]
+            if _wandb is not None:
+                try:
+                    self._wandb = _wandb
+                    _wandb.init(project=wandb_project, name=run_name, config=config or {},
+                                dir=str(self.dir), resume="allow")
+                except Exception:
+                    self._wandb = None
 
     def log(self, step: int, metrics: dict[str, Any]) -> None:
         """Record one step's scalars to every active backend."""
