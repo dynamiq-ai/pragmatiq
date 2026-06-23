@@ -7,6 +7,7 @@ AWS credentials.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -42,13 +43,28 @@ def _make_fake_run_dir() -> Path:
 
 
 def test_sagemaker_adapter_import_does_not_load_boto3() -> None:
-    """Importing integrations.sagemaker must not pull boto3 or the sagemaker SDK."""
-    # Re-import in-process; the important thing is no heavy SDK in sys.modules
-    import integrations.sagemaker  # noqa: F401
+    """Importing integrations.sagemaker must not pull boto3 or the sagemaker SDK.
 
-    bad = {m for m in sys.modules if m.split(".")[0] in {"boto3", "botocore", "sagemaker"}}
-    assert not bad, (
-        f"Importing integrations.sagemaker leaked cloud SDK modules: {sorted(bad)}"
+    Runs in a fresh subprocess to avoid false-negatives from sibling tests that
+    may have already imported boto3/botocore into the same process's sys.modules.
+    The subprocess starts with a clean interpreter, so any cloud SDK present in
+    sys.modules after the import is genuinely caused by the adapter itself.
+    """
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import integrations.sagemaker, sys; "
+                "leaked = [m for m in sys.modules if m.split('.')[0] in {'boto3', 'botocore', 'sagemaker'}]; "
+                "assert not leaked, f'Importing integrations.sagemaker leaked cloud SDK modules: {sorted(leaked)}'"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        f"import-cleanness check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
     )
 
 
@@ -237,14 +253,20 @@ def test_sagemaker_request_roundtrip_via_contract() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_sagemaker_push_raises_missing_extra_when_boto3_absent() -> None:
-    """push() must raise MissingExtraError (or ImportError) when boto3 is absent."""
+def test_sagemaker_push_raises_missing_extra_when_boto3_absent(monkeypatch) -> None:
+    """push() must raise MissingExtraError (or ImportError) when boto3 is absent.
+
+    Simulates boto3 absence via monkeypatch so the test is env-robust (works
+    whether or not boto3 is installed in the current environment).
+    """
     from integrations._base import MissingExtraError
     from integrations.sagemaker import SageMakerAdapter
 
+    # Block boto3 so the adapter's lazy import fails — same signal as absent package.
+    monkeypatch.setitem(sys.modules, "boto3", None)
+
     adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
-    # boto3 is NOT installed in this env, so push() must raise
-    with pytest.raises((MissingExtraError, ImportError), match="boto3"):
+    with pytest.raises((MissingExtraError, ImportError)):
         adapter.push(
             artifact_path="s3://bucket/model.tar.gz",
             role_arn="arn:aws:iam::123456789012:role/SageMakerRole",

@@ -72,16 +72,32 @@ class TestGetFs:
         assert isinstance(fs, MemoryFileSystem)
         assert path == "/bucket/key"
 
-    def test_s3_missing_raises_missing_extra(self):
-        """s3fs is NOT installed — expect MissingExtraError naming pragmatiq[s3]."""
+    def test_s3_missing_raises_missing_extra(self, monkeypatch):
+        """get_fs('s3://...') raises MissingExtraError naming pragmatiq[s3] and s3fs.
+
+        The test simulates s3fs absence via monkeypatch so it is robust whether
+        or not s3fs is installed in the current environment (CI installs the full
+        extras; local dev does not).  Setting sys.modules['s3fs'] = None makes
+        any ``import s3fs`` raise ImportError, which is the same signal that
+        get_fs relies on to detect the missing extra.
+        """
+        monkeypatch.setitem(sys.modules, "s3fs", None)
+        # Also block the s3fs subpackage so fsspec cannot import it via s3fs.core.
+        monkeypatch.setitem(sys.modules, "s3fs.core", None)
         with pytest.raises(MissingExtraError) as exc_info:
             get_fs("s3://my-bucket/my-key")
         msg = str(exc_info.value)
         assert "pragmatiq[s3]" in msg
         assert "s3fs" in msg
 
-    def test_s3_error_is_also_import_error(self):
-        """MissingExtraError must be catchable as ImportError (backward compat)."""
+    def test_s3_error_is_also_import_error(self, monkeypatch):
+        """MissingExtraError must be catchable as ImportError (backward compat).
+
+        Uses the same monkeypatch trick as test_s3_missing_raises_missing_extra
+        so the test is env-independent (works with or without s3fs installed).
+        """
+        monkeypatch.setitem(sys.modules, "s3fs", None)
+        monkeypatch.setitem(sys.modules, "s3fs.core", None)
         with pytest.raises(ImportError):
             get_fs("s3://bucket/key")
 
