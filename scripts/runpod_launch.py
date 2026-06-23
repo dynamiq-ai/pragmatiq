@@ -510,6 +510,12 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
 
     start_time = time.monotonic()
 
+    # Exit-code tracking: stays 0 for a clean run; set to 1 on SSH non-zero,
+    # watchdog kill, or any unhandled exception.  Pod termination in the
+    # finally block is UNCONDITIONAL — the exit code is propagated only AFTER
+    # cleanup so a failed pod run doesn't leak a paid instance.
+    _exit_code = 0
+
     import tempfile
 
     try:
@@ -577,6 +583,8 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
             # hard deadline via pod-delete + proc.kill().
             ssh_proc.wait()
             if ssh_proc.returncode != 0:
+                # rc=-9 indicates a watchdog kill; any non-zero rc is a failure.
+                _exit_code = 1
                 print(
                     f"[run] SSH command exited with rc={ssh_proc.returncode}",
                     file=sys.stderr,
@@ -587,12 +595,15 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
             if _watchdog_thread is not None:
                 _watchdog_thread.join(timeout=5)
 
-        print(f"run complete (pod {pod_id})")
+        if _exit_code == 0:
+            print(f"run complete (pod {pod_id})")
 
     except KeyboardInterrupt:
         print("[interrupt] KeyboardInterrupt caught; running cleanup ...", file=sys.stderr)
+        _exit_code = 1
     except Exception as exc:
         print(f"[error] {exc}", file=sys.stderr)
+        _exit_code = 1
     finally:
         # ---- pull artifacts (best-effort, always) --------------------
         _pull_artifacts(ssh_base, scp_base, ip, port, args.pull, args.pull_dest)
@@ -610,6 +621,11 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         else:
             print(f"[info] pod still running; terminate with: "
                   f"python scripts/runpod_launch.py --terminate {pod_id}")
+
+    # Propagate the remote result to the caller AFTER cleanup is done.
+    if _exit_code:
+        print(f"[main] exit={_exit_code} (remote run failed)", flush=True)
+        sys.exit(_exit_code)
 
 
 if __name__ == "__main__":

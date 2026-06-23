@@ -2134,6 +2134,37 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
     print(f"[main] Report: {report_path}", flush=True)
     print(f"[main] Output: {out_dir}", flush=True)
 
+    # -- Exit-code accounting --
+    # A fully-successful (or dry-run) run exits 0; any failed/timed-out leg or
+    # a flash-check FAIL exits 1 so CI and automation can detect the failure.
+    # REPORT.md has already been written above regardless of the exit code.
+    if args.dry_run:
+        print("[main] exit=0 (dry-run)", flush=True)
+        return
+
+    failed_legs = 0
+    for r in training_results:
+        if r.get("status") == "timeout" or r.get("returncode", 0) != 0:
+            failed_legs += 1
+    for r in finetune_results:
+        if r.get("status") == "timeout" or r.get("returncode", 0) != 0:
+            failed_legs += 1
+    # flash_check_result is None when skipped at the top level (dry-run / no CUDA
+    # without the explicit skip flag) and a dict otherwise.  A skipped check is
+    # not a failure; only an attempted check that returned passed=False is.
+    flash_failed = (
+        flash_check_result is not None
+        and not flash_check_result.get("skipped", False)
+        and not flash_check_result.get("passed", True)
+    )
+    if flash_failed:
+        failed_legs += 1
+
+    if failed_legs:
+        print(f"[main] exit=1 ({failed_legs} leg(s) failed)", flush=True)
+        sys.exit(1)
+    print("[main] exit=0 (all legs passed)", flush=True)
+
 
 if __name__ == "__main__":
     main()

@@ -185,8 +185,8 @@ class LoRAFineTuner:
         history = []
         run_epoch = self._run_epoch_ddp if self._ddp else self._run_epoch
         for _epoch in range(self.config.max_epochs):
-            run_epoch(dataset, train_users, label_of, opt, train=True)
-            val_auc = run_epoch(dataset, val_users, label_of, opt, train=False)
+            run_epoch(dataset, train_users, label_of, opt, train=True, epoch=_epoch)
+            val_auc = run_epoch(dataset, val_users, label_of, opt, train=False, epoch=_epoch)
             history.append(val_auc)
             log.info("finetune epoch %d/%d  val_auc %.4f  best %.4f",
                      _epoch + 1, self.config.max_epochs, val_auc, max(best_auc, val_auc))
@@ -215,14 +215,14 @@ class LoRAFineTuner:
                 "val_auc_history": history}
 
     def _run_epoch(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
-                   opt: torch.optim.Optimizer, train: bool) -> float:
+                   opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
         from sklearn.metrics import roc_auc_score
 
         self.model.train(train)
         self.head.train(train)
         sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
                                       shuffle=train, seed=self.config.seed)
-        sampler.set_epoch(0)
+        sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
@@ -250,7 +250,7 @@ class LoRAFineTuner:
         return float("nan")
 
     def _run_epoch_ddp(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
-                       opt: torch.optim.Optimizer, train: bool) -> float:
+                       opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
         """DDP epoch: each rank trains a disjoint, equal-length slice and the
         validation AUC is computed over the FULL val set gathered across ranks.
 
@@ -281,7 +281,7 @@ class LoRAFineTuner:
         sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
                                       shuffle=train, seed=self.config.seed, subset=subset)
         sampler.set_replica_info(int(self.fabric.world_size), int(self.fabric.global_rank))
-        sampler.set_epoch(0)
+        sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
