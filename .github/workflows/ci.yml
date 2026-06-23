@@ -25,7 +25,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+          pip install -e ".[dev,train]"
       - name: Ruff
         run: ruff check pragmatiq tests
       - name: Mypy
@@ -55,6 +55,8 @@ jobs:
     # The full test suite — the `quality` job above runs only a fast smoke subset,
     # so unit tests for finetuner / uplift / multitask / inference would otherwise
     # never run in CI. This job closes that coverage gap.
+    # Install .[dev,full] so lightning/torch-geometric/matplotlib/transformers/etc.
+    # are present and the 385-test suite (which exercises those paths) stays green.
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -67,9 +69,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,serve]"
+          pip install -e ".[dev,full]"
       - name: Full pytest
         run: pytest tests/ -q --durations=15
+
+  serve-slim:
+    # Prove that `pip install pragmatiq[serve]` is genuinely slim: no lightning,
+    # no torch-geometric, no transformers. Two checks:
+    #   1. Import-blocker subprocess test (fast, portable).
+    #   2. Shell assert that `import lightning` fails in the slim venv.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install slim serve env (CPU torch + .[serve] only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[serve]"
+          pip install pytest
+      - name: Boundary test (import-blocker subprocess)
+        run: python -m pytest tests/boundaries/test_serve_import_safe.py -q
+      - name: Assert lightning is absent from slim install
+        run: "! python -c \"import lightning\""
 
   python-compat:
     runs-on: ubuntu-latest
@@ -151,7 +177,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev,serve]"
+          pip install -e ".[dev,full]"
       - name: Synthetic data
         run: bash scripts/gates/gate_1.sh
       - name: Tokenizer
@@ -168,3 +194,42 @@ jobs:
         run: bash scripts/gates/gate_7.sh
       - name: Validate / nano e2e / packaging
         run: bash scripts/gates/gate_8.sh
+      - name: Public-API contract
+        run: bash scripts/gates/gate_9_contract.sh
+      - name: Integration adapters
+        run: bash scripts/gates/gate_integrations.sh
+      - name: BYOC hardening
+        run: bash scripts/gates/gate_10_byoc.sh
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    needs: [quality]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev,full]"
+          pip install pip-audit pip-licenses cyclonedx-bom
+      - name: Vulnerability scan
+        run: |
+          # Audit resolved third-party deps. Strip local version tags (e.g. torch==2.12.1+cpu -> 2.12.1)
+          # so pip-audit's resolver can find them on PyPI; exclude the editable pragmatiq (not on PyPI).
+          # CVE-2025-3000 (torch.jit.script memory corruption) has no upstream fix and pragmatiq never
+          # uses torch.jit.script (eager + torch.onnx only), so it is ignored with this documented reason.
+          pip freeze --exclude-editable | sed -E 's/(==[^+[:space:]]+)\+[A-Za-z0-9._]+/\1/' > /tmp/pragmatiq-reqs.txt
+          pip-audit --strict --desc -r /tmp/pragmatiq-reqs.txt --ignore-vuln CVE-2025-3000
+      - name: License check
+        run: pip-licenses --from=mixed --order=license --format=markdown
+      - name: Generate SBOM
+        run: bash scripts/supply_chain/gen_sbom.sh
+      - name: Static no-phone-home audit
+        run: python scripts/supply_chain/no_phone_home.py
+      - name: Dynamic no-phone-home test
+        run: python -m pytest tests/boundaries/test_no_phone_home.py -q

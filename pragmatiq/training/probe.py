@@ -155,10 +155,8 @@ def build_probe_classifier(model: str, seed: int, max_iter: int = 1000, C: float
         try:
             from lightgbm import LGBMClassifier
         except ImportError as exc:  # optional dependency, shipped in the [gbdt] extra
-            raise ImportError(
-                "probe_model='lightgbm' needs the optional extra: pip install 'pragmatiq[gbdt]'. "
-                "The default probe_model='gbdt' (sklearn HistGradientBoosting) needs no extra."
-            ) from exc
+            from pragmatiq.core.errors import MissingExtraError
+            raise MissingExtraError.for_extra("gbdt", "lightgbm") from exc
         return LGBMClassifier(random_state=seed, verbosity=-1), False
     if model == "logistic":
         from sklearn.linear_model import LogisticRegression

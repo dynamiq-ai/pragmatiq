@@ -7,9 +7,9 @@ import logging
 
 import pytest
 
-import pragmatiq.data.schema as schema
+import pragmatiq.core.schema as schema
 from pragmatiq import api
-from pragmatiq.data.schema import UserRecord
+from pragmatiq.core.schema import UserRecord
 
 
 def test_load_yaml_rejects_non_mapping(tmp_path) -> None:

@@ -5,7 +5,64 @@
 
 All notable changes to pragmatiq are documented in this file. This project
 follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
-the public API may change.
+the public API may change. From **1.0.0** onward the public API is frozen and
+SemVer applies (see [`docs/STABILITY.md`](docs/STABILITY.md)).
+
+## [1.0.0] — 1.0 production release
+
+First stable release. The public API, CLI, serving contract, and checkpoint
+format are now **frozen** under the SemVer policy in `docs/STABILITY.md`.
+
+### BREAKING (install behavior)
+
+`torch-geometric`, `lightning`, and `matplotlib` are no longer installed by
+default. They moved to optional extras so that a plain `pip install pragmatiq`
+gives a slim inference-capable install:
+
+- **training** now requires `pip install 'pragmatiq[train]'`
+- **AML GraphSAGE** requires `pip install 'pragmatiq[aml]'`
+- **serving / ONNX export** requires `pip install 'pragmatiq[serve]'`
+
+**Migration:** `pip install 'pragmatiq[full]'` reproduces the old all-in
+install with every optional dependency. No change to the Python API, CLI
+command names, `from_pretrained` / `embed_records`, the serving contract, or
+the checkpoint format.
+
+### Added
+
+- **Public-API stability contract** — `docs/STABILITY.md` (frozen at 1.0.0)
+  enumerates the 15 `pragmatiq.api.*` functions, `PragmaModel.from_pretrained`
+  / `embed_records`, the full CLI command tree, the serving wire format, and
+  the checkpoint-format version. `tests/contract/` enforces the contract on
+  every CI run and gate 9.
+- **`# GUESS` hyperparameter catalog** — README section "Paper-silent (`#
+  GUESS`) hyperparameters" documents all 9 unique paper-silent defaults (13
+  source markers), their config keys, and one-line rationale. These defaults
+  are embedded in every run's `run.yaml` / `meta.json` so shipped checkpoints
+  reproduce regardless of future default changes.
+- **Pluggable object-store storage** (`fsspec`) — `pragmatiq.storage`
+  abstracts run/checkpoint/shard I/O over any fsspec-compatible backend (local
+  file, S3, GCS, Azure Blob). Use `[s3]`, `[gcs]`, or `[azure]` extras.
+- **Serving glue extracted** — `pragmatiq.inference.serve` owns the single
+  serving contract (`records_json → embeddings [n_users, dim]`); the Triton
+  `model.py` and REST/gRPC adapters delegate to it.
+- **Cloud-adapter seams** — `integrations/` holds real SageMaker and
+  Databricks adapters plus documented stubs for Azure ML and Nebius; see
+  `docs/INTEGRATIONS.md`.
+- **`apps/` UI seam** — the Streamlit demo relocated to `apps/demo`; a thin
+  `apps/` namespace provides a stable hook for future UIs.
+- **BYOC hardening** — verified no-phone-home behavior, offline / air-gapped
+  install path, locked dependencies (`uv.lock`), SBOM generation
+  (`scripts/supply_chain/gen_sbom.sh`), and license + vulnerability scan in CI.
+- **RELEASING.md** updated with the 1.0 release procedure (uv.lock
+  regeneration, SBOM, full validation, tag + build + publish steps).
+
+### No API changes
+
+The Python API (`pragmatiq.api.*`), CLI command names, `from_pretrained` /
+`embed_records`, the serving wire contract, and the checkpoint format are
+unchanged from 0.1.0b4. All existing code and shipped checkpoints continue to
+work without modification.
 
 ## [0.1.0b4] — Hardening and the SageMaker guide
 

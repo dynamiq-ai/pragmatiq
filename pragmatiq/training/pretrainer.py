@@ -129,7 +129,7 @@ class TrainConfig:
     """Pretraining hyperparameters (GUESS defaults per SPEC, all in config)."""
 
     max_steps: int = 1000
-    token_budget: int = 16_384
+    token_budget: int = 16_384  # GUESS: fits a `small` model on a 16 GiB GPU with optimizer-state headroom
     # Micro-batches accumulated per optimizer step. The effective batch is
     # grad_accum_steps × token_budget × world_size, so a large, stable batch can be
     # reached on a memory-bound device without raising token_budget (the per-forward
@@ -158,7 +158,7 @@ class TrainConfig:
     # divergence and should fail loud rather than burn compute to max_steps.
     max_consecutive_skips: int = 50
     # Observability: a one-line stderr heartbeat every log_every steps, and an
-    # optional Weights & Biases mirror (needs `pip install -e ".[extras]"`).
+    # optional Weights & Biases mirror (needs `pip install -e ".[tracking]"`).
     # metrics.jsonl and the TensorBoard mirror (runs/{name}/tb, active when the
     # `tensorboard` package is installed) are always on.
     verbose: bool = True
@@ -200,7 +200,11 @@ def resolve_device_count(devices: int | str, use_cuda: bool) -> int:
 
 def _make_fabric(devices: int | str = "auto", precision: str | None = None,
                  deterministic: bool = False, num_nodes: int = 1):
-    from lightning.fabric import Fabric
+    try:
+        from lightning.fabric import Fabric
+    except ImportError as _e:
+        from pragmatiq.core.errors import MissingExtraError
+        raise MissingExtraError.for_extra("train", "lightning") from _e
 
     use_cuda = torch.cuda.is_available()
     if precision is None:

@@ -4,7 +4,7 @@ Pick a synthetic user → see their event timeline → the model's user embeddin
 (attach a fine-tuned head via ``pragmatiq finetune`` for calibrated
 fraud / credit / churn scores) → their ego transfer graph.
 
-Run:  streamlit run demo/app.py
+Run:  streamlit run apps/demo/app.py
 Env:  PRAGMATIQ_OUT   (quickstart output dir, default runs/quickstart) — set this to
                       switch the whole layout: the demo reads the trained run from
                       <out>/runs/quickstart and raw data from <out>/raw.

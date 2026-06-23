@@ -106,6 +106,8 @@ records = [
      "attributes": {}, "lifelong": []},
 ]
 body = {"inputs": [{"name": "records_json", "datatype": "BYTES", "shape": [1],
+                    # Tensor names are frozen in pragmatiq.inference.serve.contract
+                    # (INPUT_NAME="records_json", OUTPUT_NAME="embeddings").
                     "data": [json.dumps(records)]}]}
 url = f"http://localhost:{port}/v2/models/pragmatiq_embedder/infer"
 req = urllib.request.Request(url, data=json.dumps(body).encode(),

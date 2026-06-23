@@ -6,6 +6,10 @@ target_vocab: 28000      # GUESS: total vocab size; BPE fills the remainder
 bpe_min_frequency: 2
 lowercase_text: false    # statement strings stay uppercase
 max_numeric_sample: 100000   # reservoir size per key for percentile fitting
+# GUESS: float-parsing fields with fewer than this many distinct values are treated as
+# categorical rather than binned; None ⇒ 4 × n_buckets (256 with the default bucket count).
+# Use force_categorical / force_numeric per key to override the heuristic.
+numeric_min_cardinality: null  # GUESS
 calendar_tz: UTC         # IANA zone for the hour/day-of-week/day-of-month features;
                          #   set a local zone (e.g. Europe/London) for local-time data
 # Pre-training sequence caps (paper defaults) — keep training tractable on long

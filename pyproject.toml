@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pragmatiq"
-version = "0.1.0b4"
+version = "1.0.0"
 description = "Independent banking event-sequence modeling toolkit inspired by arXiv:2604.08649; not affiliated with or endorsed by Revolut."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -13,7 +13,7 @@ authors = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
 maintainers = [{ name = "Dynamiq", email = "support@getdynamiq.ai" }]
 keywords = ["foundation-model", "banking", "transformers", "synthetic-data", "fraud", "credit-risk"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
     "Intended Audience :: Financial and Insurance Industry",
     "License :: OSI Approved :: Apache Software License",
@@ -34,24 +34,35 @@ dependencies = [
     "omegaconf>=2.3",
     "pyyaml>=6.0",
     "scikit-learn>=1.3",
-    "torch-geometric>=2.4",
-    "lightning>=2.2",
-    "matplotlib>=3.9",
     "tqdm>=4.66",
+    "fsspec>=2024.2",
 ]
 
 [project.optional-dependencies]
-# Serving / export, the Streamlit demo, and a single `extras` group for the
-# frozen text encoder and experiment tracking. `full` pulls them all; `dev` is
-# the contributor toolchain. The DEFAULT gradient-boosting probe (sklearn
-# HistGradientBoosting) and the AML GNN need no extra — they are core. The
-# optional `gbdt` extra only adds LightGBM for `probe_model="lightgbm"`.
-serve = ["onnx>=1.16", "onnxscript>=0.1", "onnxruntime>=1.18", "tritonclient[http]>=2.40"]
-demo = ["streamlit>=1.30", "plotly>=5.18"]
-extras = ["transformers>=4.40", "wandb>=0.16", "tensorboard>=2.16"]
-gbdt = ["lightgbm>=4.0"]
-full = ["pragmatiq[serve,demo,extras,gbdt]"]
-dev = ["pytest>=7.4", "pytest-cov", "ruff>=0.4", "mypy>=1.8", "types-PyYAML"]
+# Extras taxonomy (W2):
+#   data     — matplotlib for realism reports
+#   train    — Lightning fabric for distributed pretraining + matplotlib
+#   serve    — ONNX / ONNX Runtime / Triton export and serving (SLIM: no Lightning/torch-geometric/transformers)
+#   aml      — torch-geometric for the GraphSAGE transfer-graph ablation
+#   text     — transformers for the frozen Nemotron text encoder
+#   tracking — Weights & Biases + TensorBoard experiment mirrors
+#   gbdt     — LightGBM for probe_model="lightgbm" (default probe uses sklearn, no extra needed)
+#   demo     — Streamlit + Plotly interactive demo
+#   full     — all of the above
+#   dev      — contributor toolchain (pytest, ruff, mypy)
+data     = ["matplotlib>=3.9"]
+train    = ["lightning>=2.2", "matplotlib>=3.9"]
+serve    = ["onnx>=1.16", "onnxscript>=0.1", "onnxruntime>=1.18", "tritonclient[http]>=2.40"]
+aml      = ["torch-geometric>=2.4"]
+text     = ["transformers>=4.40"]
+tracking = ["wandb>=0.16", "tensorboard>=2.16"]
+gbdt     = ["lightgbm>=4.0"]
+demo     = ["streamlit>=1.30", "plotly>=5.18"]
+s3       = ["s3fs>=2024.2"]
+gcs      = ["gcsfs>=2024.2"]
+azure    = ["adlfs>=2024.2"]
+full     = ["pragmatiq[data,train,serve,aml,text,tracking,gbdt,demo,s3,gcs,azure]"]
+dev      = ["pytest>=7.4", "pytest-cov", "ruff>=0.4", "mypy>=1.8", "types-PyYAML"]
 
 [project.scripts]
 pragmatiq = "pragmatiq.cli:app"
@@ -92,3 +103,4 @@ disallow_untyped_defs = false
 testpaths = ["tests"]
 addopts = "-ra"
 filterwarnings = ["ignore::DeprecationWarning"]
+markers = ["slow: marks tests as slow (deselect with '-m \"not slow\"')"]
