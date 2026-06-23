@@ -12,6 +12,8 @@ Usage:
     export RUNPOD_API_KEY=...            # or put it in .env (gitignored)
     python scripts/runpod_launch.py --gpu "NVIDIA A100 80GB PCIe" --run-name a100-smoke
     python scripts/runpod_launch.py --terminate <pod_id>
+    python scripts/runpod_launch.py --dry-run --gpu-count 8 --gpu "NVIDIA H100 80GB HBM3" \\
+        --cloud-type SECURE --remote-script scripts/validate_gpu.py --terminate-on-done
 
 Requires outbound access to rest.runpod.io. In a restricted/sandboxed network
 environment this host may be blocked by the environment's network egress policy —
@@ -21,14 +23,48 @@ run this from a machine with RunPod access, or add rest.runpod.io to the allow-l
 from __future__ import annotations
 
 import argparse
+import json
 import os
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 REST = "https://rest.runpod.io/v1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# ---------------------------------------------------------------------------
+# Flash-attn prebuilt wheel for runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel
+# torch==2.4.0, python==3.11, abi=FALSE.
+# flash-attn 2.6.3 ships cu118 and cu123 wheels only (no cu124); the cu123
+# wheel runs correctly on a cu124 runtime.  Using cu124 in the URL → 404.
+# Source: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.6.3
+# ---------------------------------------------------------------------------
+_FLASH_ATTN_WHEEL = (
+    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/"
+    "flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+)
+
+# Common install block executed on the pod before any command.
+# - Installs [dev,train,serve] extras so Lightning and training deps are present.
+# - Attempts to install the prebuilt flash-attn wheel; falls back to source build;
+#   a failure is non-fatal (SDPA fallback exists in the model).
+INSTALL = f"""
+set -uo pipefail
+cd /workspace/pragmatiq
+pip install -q -e ".[dev,train,serve]"
+echo "=== installing flash-attn ==="
+pip install -q "{_FLASH_ATTN_WHEEL}" || {{
+    echo "Prebuilt wheel not found; trying source build (slow)..."
+    pip install flash-attn==2.6.3 --no-build-isolation -q || \
+        echo "WARNING: flash-attn install failed; SDPA fallback will be used"
+}}
+python -c "import torch; print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available(), 'devices', torch.cuda.device_count())"
+python -c "import flash_attn; print('flash', flash_attn.__version__)" || \
+    echo "flash-attn unavailable -> SDPA"
+""".strip()
 
 PIPELINE = r"""
 set -euo pipefail
@@ -38,7 +74,6 @@ cd /workspace/pragmatiq
 # a many-core host and stall on thread-pool contention.
 export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 NUMEXPR_NUM_THREADS=8
 export TOKENIZERS_PARALLELISM=false
-pip install -q -e ".[dev,serve]"
 python -X faulthandler -u - <<'PY'
 from pragmatiq import api
 m = api.synthesize({"n_users": 50000, "seed": 0}, out="data/synth", n_workers=8, write_report=True)
@@ -93,7 +128,6 @@ def _api_key() -> str:
 
 
 def _req(method: str, path: str, key: str, body: dict | None = None) -> dict:
-    import json
     import urllib.request
 
     req = urllib.request.Request(
@@ -130,21 +164,37 @@ def _public_key_file(path: str | None) -> str | None:
 
 
 def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
-               pubkey: str | None = None, min_vcpu: int = 8) -> dict:
+               pubkey: str | None = None, min_vcpu: int = 8,
+               gpu_count: int = 1) -> dict:
     """Create an on-demand PyTorch pod with the requested GPU type(s).
 
     ``gpu`` may be a comma-separated preference list, e.g.
     "NVIDIA A100 80GB PCIe,NVIDIA A100 SXM 80GB". ``min_vcpu`` is plumbed to
     RunPod's ``minVCPUPerGPU`` filter (8 covers the 8-core throughput
     benchmark; higher counts speed up the CPU-bound tokenize stages).
+    ``gpu_count`` sets the number of GPUs per pod; disk is scaled up for
+    large-model checkpoints + flash-attn when gpu_count is large.
     """
+    # Scale container disk with GPU count (checkpoints + flash-attn cache).
+    # Cap at 500 GB to stay within typical RunPod limits.
+    container_disk = min(max(80, 30 * gpu_count), 500)
+
+    # NOTE on /dev/shm size: The RunPod REST v1 pod-create body does NOT expose
+    # a shmSize or equivalent field (unlike docker run --shm-size).  The container
+    # gets whatever RunPod provisions by default (typically 64 MB), which is too
+    # small for NCCL shared-memory transport on multi-GPU pods and causes the
+    # NCCLUtils.hpp ncclUnhandledCudaError at d>=4 init.  The harness works around
+    # this by setting NCCL_SHM_DISABLE=1 + NCCL_P2P_DISABLE=1 + NCCL_IB_DISABLE=1
+    # in the DDP leg subprocess env (--nccl-safe=on, default).  If RunPod ever
+    # adds a shmSize knob to their REST API, set it here (e.g., "shmSizeGb": 8)
+    # and remove the NCCL_SHM_DISABLE env var to get NVLink-optimal throughput.
     body = {
         "name": name,
         "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
         "cloudType": cloud,
         "gpuTypeIds": [g.strip() for g in gpu.split(",") if g.strip()],
-        "gpuCount": 1,
-        "containerDiskInGb": 80,
+        "gpuCount": gpu_count,
+        "containerDiskInGb": container_disk,
         "volumeInGb": 100,
         "minVCPUPerGPU": min_vcpu,
         "ports": ["22/tcp"],
@@ -155,10 +205,140 @@ def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
     return _req("POST", "/pods", key, body)
 
 
-def main() -> None:
+def _terminate_pod(pod_id: str, key: str) -> None:
+    """Terminate a pod, logging the outcome. Errors are surfaced but not raised.
+
+    On ANY failure (API unreachable, HTTP error, network timeout) a loud warning
+    is printed to stderr so the operator can clean up manually.  The exception is
+    swallowed so it cannot mask an original exception in the caller's finally block.
+    """
+    try:
+        _req("DELETE", f"/pods/{pod_id}", key)
+        print(f"[terminate] pod {pod_id} terminated.")
+    except Exception as exc:  # noqa: BLE001 — must not propagate; loud warning instead
+        print(
+            f"\n!!! POD TERMINATION FAILED for {pod_id} — "
+            f"MANUALLY TERMINATE: python scripts/runpod_launch.py --terminate {pod_id} !!!\n"
+            f"    (error: {exc})",
+            file=sys.stderr,
+        )
+
+
+def _start_pod_watchdog(
+    pod_id: str,
+    key: str,
+    deadline: float,
+    ssh_proc_ref: list[subprocess.Popen | None],
+    done_event: threading.Event,
+) -> threading.Thread:
+    """Start a daemon watchdog thread that hard-terminates the pod at *deadline*.
+
+    The watchdog is independent of the SSH command subprocess: even if the SSH
+    connection is wedged (e.g., the remote harness is deadlocked), the pod is
+    deleted at ``deadline`` (= ``create_ts + max_runtime_min * 60``).
+
+    Args:
+        pod_id:        RunPod pod ID to DELETE.
+        key:           RunPod API key.
+        deadline:      ``time.time()`` timestamp at which the pod must die.
+        ssh_proc_ref:  Single-element list; element 0 is the SSH subprocess (or
+                       None before it starts).  The watchdog kills it after
+                       deleting the pod so ``subprocess.run`` unblocks promptly.
+        done_event:    Set by the caller when the run finishes normally; causes
+                       the watchdog to exit without firing.
+
+    Returns:
+        The started daemon thread (already running; join it after the run to
+        ensure clean teardown).
+    """
+    def _watch() -> None:
+        remaining = deadline - time.time()
+        if remaining > 0:
+            # Wait until the deadline OR until the run finishes normally.
+            done_event.wait(timeout=remaining)
+
+        if done_event.is_set():
+            # Run finished cleanly before the deadline — nothing to do.
+            return
+
+        # ---- WATCHDOG FIRES ----
+        print(
+            f"\n[WATCHDOG] deadline reached; hard-terminating pod {pod_id} "
+            "regardless of SSH command state ...",
+            file=sys.stderr,
+            flush=True,
+        )
+        _terminate_pod(pod_id, key)
+
+        # Kill the SSH subprocess so subprocess.run() unblocks in the main thread.
+        proc = ssh_proc_ref[0]
+        if proc is not None:
+            try:
+                proc.kill()
+                print("[WATCHDOG] SSH subprocess killed.", file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[WATCHDOG] could not kill SSH subprocess: {exc}",
+                      file=sys.stderr, flush=True)
+
+    t = threading.Thread(target=_watch, name="pod-watchdog", daemon=True)
+    t.start()
+    return t
+
+
+def _pull_artifacts(
+    ssh_base: list[str],
+    scp_base: list[str],  # kept for signature compatibility; not used (tar-over-ssh)
+    ip: str,
+    port: int,
+    pull_glob: str,
+    pull_dest: str,
+) -> None:
+    """Best-effort: pull remote artifacts back to the local machine via tar-over-ssh.
+
+    ``scp -r`` does NOT expand a remote glob when the path contains shell
+    metacharacters — the literal string is passed to the server and silently
+    pulls nothing.  Instead we stream a tar archive over SSH so the remote shell
+    expands the glob, then extract it locally.  The resulting archive is written
+    to ``<pull_dest>/pulled.tar.gz``.
+
+    Failures are logged as warnings and do not raise, so partial results survive
+    even when the pod terminates early.
+    """
+    local_dest = Path(pull_dest)
+    local_dest.mkdir(parents=True, exist_ok=True)
+    archive = local_dest / "pulled.tar.gz"
+    # The remote shell expands the glob; 2>/dev/null suppresses "no match" noise.
+    remote_cmd = f"cd /workspace/pragmatiq && tar czf - {pull_glob} 2>/dev/null"
+    try:
+        with archive.open("wb") as fh:
+            subprocess.run(
+                ssh_base + [remote_cmd],
+                stdout=fh,
+                check=True,
+                timeout=300,
+            )
+        # Zero-byte archive means the glob matched nothing — treat as warning.
+        if archive.stat().st_size == 0:
+            archive.unlink(missing_ok=True)
+            print(f"[pull] WARNING: no files matched glob '{pull_glob}' on the pod",
+                  file=sys.stderr)
+            return
+        # Extract in place so individual files are available alongside the archive.
+        subprocess.run(
+            ["tar", "xzf", str(archive), "-C", str(local_dest)],
+            check=True, timeout=120,
+        )
+        print(f"[pull] artifacts pulled (glob '{pull_glob}') -> {local_dest}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[pull] WARNING: could not pull glob '{pull_glob}': {exc}", file=sys.stderr)
+
+
+def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--gpu", default="NVIDIA A100 80GB PCIe,NVIDIA A100-SXM4-80GB",
                     help="RunPod GPU type id(s), comma-separated by preference.")
+    ap.add_argument("--gpu-count", type=int, default=1, metavar="N",
+                    help="Number of GPUs per pod (default 1; use 8 for 8×H100).")
     ap.add_argument("--cloud-type", default="COMMUNITY", choices=["COMMUNITY", "SECURE"],
                     help="COMMUNITY is cheaper; SECURE has vetted datacenter hosts.")
     ap.add_argument("--public-key-file", default=None,
@@ -169,24 +349,101 @@ def main() -> None:
     ap.add_argument("--run-name", default="pragmatiq-smoke")
     ap.add_argument("--terminate", metavar="POD_ID", help="Terminate a pod and exit.")
     ap.add_argument("--no-run", action="store_true", help="Create the pod but don't run the pipeline.")
+    # Remote script / harness
+    ap.add_argument("--remote-script", default=None, metavar="PATH",
+                    help="Local path to a script to upload and run on the pod instead of "
+                         "the default PIPELINE (e.g. scripts/validate_gpu.py). "
+                         "The repo is synced to /workspace/pragmatiq so the script is "
+                         "available at /workspace/pragmatiq/<PATH>.")
+    ap.add_argument("--remote-args", default="", metavar="ARGS",
+                    help="Extra arguments to pass to --remote-script (quoted string).")
+    # Artifact pull-back
+    ap.add_argument("--pull", default="outputs/gpu-validation-*", metavar="GLOB",
+                    help="Remote glob (relative to /workspace/pragmatiq) to pull back "
+                         "after the run (default: outputs/gpu-validation-*).")
+    ap.add_argument("--pull-dest", default=".", metavar="DIR",
+                    help="Local directory to write pulled artifacts (default: current dir).")
+    # Auto-terminate / safety
+    ap.add_argument("--terminate-on-done", action="store_true",
+                    help="DELETE the pod on every exit path: success, exception, timeout, "
+                         "or Ctrl-C. CRITICAL for cost control (~$30-40/hr for 8×H100).")
+    ap.add_argument("--max-runtime-min", type=int, default=0, metavar="N",
+                    help="Hard wall-clock timeout in minutes (0 = unlimited). "
+                         "On expiry, artifacts are pulled and the pod is terminated.")
+    ap.add_argument("--usd-per-hour", type=float, default=35.0, metavar="RATE",
+                    help="Hourly cost estimate for the pod (default 35 for 8×H100); "
+                         "used only for the informational cost printout.")
+    # Dry-run
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Print the resolved create-pod body, INSTALL block, and command "
+                         "that WOULD run, then exit without calling RunPod.")
     args = ap.parse_args()
-    key = _api_key()
 
+    # ------------------------------------------------------------------
+    # Standalone terminate mode (existing behaviour, unchanged)
+    # ------------------------------------------------------------------
     if args.terminate:
+        key = _api_key()
         _req("DELETE", f"/pods/{args.terminate}", key)
         print(f"terminated pod {args.terminate}")
         return
+
+    # ------------------------------------------------------------------
+    # Build resolved pod body and command for display / dry-run
+    # ------------------------------------------------------------------
+    gpu_count = args.gpu_count
+    container_disk = min(max(80, 30 * gpu_count), 500)
+    pod_body_preview = {
+        "name": args.run_name,
+        "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+        "cloudType": args.cloud_type,
+        "gpuTypeIds": [g.strip() for g in args.gpu.split(",") if g.strip()],
+        "gpuCount": gpu_count,
+        "containerDiskInGb": container_disk,
+        "volumeInGb": 100,
+        "minVCPUPerGPU": args.min_vcpu,
+    }
+
+    if args.remote_script:
+        remote_path = f"/workspace/pragmatiq/{args.remote_script}"
+        extra = f" {args.remote_args}" if args.remote_args.strip() else ""
+        run_command = f"python -X faulthandler -u {remote_path}{extra}"
+    else:
+        run_command = "(default PIPELINE)"
+
+    # ------------------------------------------------------------------
+    # --dry-run: print and exit without touching the network
+    # ------------------------------------------------------------------
+    if args.dry_run:
+        print("=== DRY RUN — no network calls will be made ===\n")
+        print("--- resolved create_pod body ---")
+        print(json.dumps(pod_body_preview, indent=2))
+        print("\n--- INSTALL block ---")
+        print(INSTALL)
+        print("\n--- command that would run ---")
+        print(run_command)
+        sys.exit(0)
+
+    # ------------------------------------------------------------------
+    # Live run — require API key only here
+    # ------------------------------------------------------------------
+    key = _api_key()
 
     pub_file = _public_key_file(args.public_key_file)
     pubkey = Path(pub_file).read_text().strip() if pub_file else None
     identity = pub_file[:-4] if pub_file and pub_file.endswith(".pub") else None
     if pubkey is None:
         print("warning: no SSH public key found; relying on keys registered in the RunPod account")
-    print(f"creating pod ({args.gpu}, {args.cloud_type}) ...")
+
+    print(f"creating pod ({args.gpu} ×{gpu_count}, {args.cloud_type}) ...")
     pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
-                     min_vcpu=args.min_vcpu)
+                     min_vcpu=args.min_vcpu, gpu_count=gpu_count)
     pod_id = pod.get("id")
+    # Fix B: record creation timestamp so that sync+install time counts against
+    # the wall-clock budget, not just command execution time.
+    create_ts = time.time()
     print(f"pod {pod_id} created; polling for SSH ...")
+
     ssh = None
     for _ in range(60):
         info = _req("GET", f"/pods/{pod_id}", key)
@@ -197,40 +454,178 @@ def main() -> None:
             break
         time.sleep(10)
     if ssh is None:
+        if args.terminate_on_done:
+            _terminate_pod(pod_id, key)
         sys.exit(f"pod {pod_id} did not expose SSH in time; check the RunPod console")
     ip, port = ssh
     print(f"pod ready at {ip}:{port}")
 
+    # Fix D: write a gitignored sidecar so external monitoring can find the pod
+    # even when this launcher's stdout is buffered.  Best-effort: never fatal.
+    _sidecar = REPO_ROOT / ".runpod_last.json"
+    try:
+        _sidecar_data = {
+            "pod_id": pod_id,
+            "ip": ip,
+            "ssh_port": port,
+            "created": create_ts,
+        }
+        _sidecar.write_text(json.dumps(_sidecar_data, indent=2))
+        print(f"[pod-info] sidecar written: {_sidecar}")
+        print(f"[pod-info] {json.dumps(_sidecar_data)}")
+    except Exception as _sidecar_exc:  # noqa: BLE001
+        print(f"[pod-info] WARNING: could not write sidecar: {_sidecar_exc}", file=sys.stderr)
+
     id_opt = ["-i", identity] if identity else []
     if args.no_run:
         print(f"skip run; SSH: ssh {' '.join(id_opt)} root@{ip} -p {port}".replace("  ", " "))
+        # CRITICAL: terminate before returning so --no-run --terminate-on-done
+        # does not leak a paid pod.  The try/finally below is never entered on
+        # this path, so termination must happen here explicitly.
+        if args.terminate_on_done:
+            _terminate_pod(pod_id, key)
+        else:
+            print(f"[info] pod still running; terminate with: "
+                  f"python scripts/runpod_launch.py --terminate {pod_id}")
         return
-
-    # Sync the repo (no GitHub needed): write a local tarball, copy it as a file,
-    # and verify the byte count survived before extracting. A streamed `tar -x`
-    # over SSH can truncate on a community-host network blip, so we copy a file
-    # and check its size rather than piping bytes through the connection.
-    import tempfile
 
     ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", *id_opt, "-p", str(port), f"root@{ip}"]
     scp_base = ["scp", "-o", "StrictHostKeyChecking=no", *id_opt, "-P", str(port)]
-    with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
-        subprocess.run(["git", "archive", "--format=tar", "-o", tf.name, "HEAD"],
-                       cwd=REPO_ROOT, check=True)
-        local_size = Path(tf.name).stat().st_size
-        subprocess.run(ssh_base + ["mkdir -p /workspace/pragmatiq"], check=True)
-        subprocess.run(scp_base + [tf.name, f"root@{ip}:/workspace/pragmatiq.tar"], check=True)
-        remote_size = int(subprocess.run(
-            ssh_base + ["stat -c %s /workspace/pragmatiq.tar"],
-            capture_output=True, text=True, check=True).stdout.strip())
-        if remote_size != local_size:
-            sys.exit(f"repo tarball truncated in transit ({remote_size} != {local_size} bytes); re-run")
-        subprocess.run(ssh_base + [
-            "tar -x -C /workspace/pragmatiq -f /workspace/pragmatiq.tar && rm /workspace/pragmatiq.tar"
-        ], check=True)
-    print("repo synced; running pipeline (this trains on the GPU) ...")
-    subprocess.run(ssh_base + [PIPELINE], check=True)
-    print(f"done. terminate with: python scripts/runpod_launch.py --terminate {pod_id}")
+
+    # ------------------------------------------------------------------
+    # Install SIGINT/SIGTERM handlers so Ctrl-C / kill → finally block
+    # runs (and terminates the pod when --terminate-on-done).
+    # ------------------------------------------------------------------
+    _interrupted = False
+
+    def _handle_signal(signum: int, _frame: object) -> None:
+        nonlocal _interrupted
+        print(f"\n[signal] received signal {signum}; cleaning up ...", file=sys.stderr)
+        _interrupted = True
+        # Raise KeyboardInterrupt so the try/finally fires.
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, _handle_signal)
+    signal.signal(signal.SIGTERM, _handle_signal)
+
+    start_time = time.monotonic()
+
+    # Exit-code tracking: stays 0 for a clean run; set to 1 on SSH non-zero,
+    # watchdog kill, or any unhandled exception.  Pod termination in the
+    # finally block is UNCONDITIONAL — the exit code is propagated only AFTER
+    # cleanup so a failed pod run doesn't leak a paid instance.
+    _exit_code = 0
+
+    import tempfile
+
+    try:
+        # ---- sync repo ------------------------------------------------
+        with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
+            subprocess.run(["git", "archive", "--format=tar", "-o", tf.name, "HEAD"],
+                           cwd=REPO_ROOT, check=True)
+            local_size = Path(tf.name).stat().st_size
+            subprocess.run(ssh_base + ["mkdir -p /workspace/pragmatiq"], check=True)
+            subprocess.run(scp_base + [tf.name, f"root@{ip}:/workspace/pragmatiq.tar"], check=True)
+            remote_size = int(subprocess.run(
+                ssh_base + ["stat -c %s /workspace/pragmatiq.tar"],
+                capture_output=True, text=True, check=True).stdout.strip())
+            if remote_size != local_size:
+                raise RuntimeError(
+                    f"repo tarball truncated in transit ({remote_size} != {local_size} bytes)"
+                )
+            subprocess.run(ssh_base + [
+                "tar -x -C /workspace/pragmatiq -f /workspace/pragmatiq.tar "
+                "&& rm /workspace/pragmatiq.tar"
+            ], check=True)
+        print("repo synced; running install + command ...")
+
+        # ---- build the on-pod shell command ---------------------------
+        if args.remote_script:
+            remote_path = f"/workspace/pragmatiq/{args.remote_script}"
+            extra = f" {args.remote_args}" if args.remote_args.strip() else ""
+            run_cmd = f"python -X faulthandler -u {remote_path}{extra}"
+        else:
+            run_cmd = PIPELINE
+
+        on_pod = f"set -euo pipefail\n{INSTALL}\n{run_cmd}"
+
+        # ---- run on pod with independent watchdog -----------------------
+        # Bug 2 fix: the watchdog is a daemon thread that fires at
+        # create_ts + max_runtime_min*60 and DELETEs the pod + kills the SSH
+        # subprocess — independently of subprocess.run's own timeout.  This
+        # ensures the pod is destroyed at the deadline even when the SSH
+        # command is wedged (e.g., the remote harness is deadlocked).
+        _watchdog_thread: threading.Thread | None = None
+        _ssh_proc_ref: list[subprocess.Popen | None] = [None]
+        _run_done = threading.Event()
+
+        if args.max_runtime_min > 0:
+            watchdog_deadline = create_ts + args.max_runtime_min * 60
+            remaining_for_log = watchdog_deadline - time.time()
+            print(
+                f"[watchdog] armed — pod will be HARD-terminated at deadline "
+                f"(~{remaining_for_log / 60:.1f} min from now, measured from pod creation)",
+                flush=True,
+            )
+            _watchdog_thread = _start_pod_watchdog(
+                pod_id=pod_id,
+                key=key,
+                deadline=watchdog_deadline,
+                ssh_proc_ref=_ssh_proc_ref,
+                done_event=_run_done,
+            )
+
+        try:
+            ssh_cmd = ssh_base + [on_pod]
+            ssh_proc = subprocess.Popen(ssh_cmd)  # noqa: S603
+            _ssh_proc_ref[0] = ssh_proc
+            # Wait without a Python-level timeout; the watchdog provides the
+            # hard deadline via pod-delete + proc.kill().
+            ssh_proc.wait()
+            if ssh_proc.returncode != 0:
+                # rc=-9 indicates a watchdog kill; any non-zero rc is a failure.
+                _exit_code = 1
+                print(
+                    f"[run] SSH command exited with rc={ssh_proc.returncode}",
+                    file=sys.stderr,
+                )
+        finally:
+            # Signal the watchdog that the run is done so it doesn't fire.
+            _run_done.set()
+            if _watchdog_thread is not None:
+                _watchdog_thread.join(timeout=5)
+
+        if _exit_code == 0:
+            print(f"run complete (pod {pod_id})")
+
+    except KeyboardInterrupt:
+        print("[interrupt] KeyboardInterrupt caught; running cleanup ...", file=sys.stderr)
+        _exit_code = 1
+    except Exception as exc:
+        print(f"[error] {exc}", file=sys.stderr)
+        _exit_code = 1
+    finally:
+        # ---- pull artifacts (best-effort, always) --------------------
+        _pull_artifacts(ssh_base, scp_base, ip, port, args.pull, args.pull_dest)
+
+        # ---- cost estimate ------------------------------------------
+        elapsed = time.monotonic() - start_time
+        hours = elapsed / 3600
+        cost = hours * args.usd_per_hour
+        print(f"[cost] elapsed {elapsed / 60:.1f} min; "
+              f"estimated cost ~${cost:.2f} at ${args.usd_per_hour:.0f}/hr")
+
+        # ---- auto-terminate (safety-critical) -----------------------
+        if args.terminate_on_done:
+            _terminate_pod(pod_id, key)
+        else:
+            print(f"[info] pod still running; terminate with: "
+                  f"python scripts/runpod_launch.py --terminate {pod_id}")
+
+    # Propagate the remote result to the caller AFTER cleanup is done.
+    if _exit_code:
+        print(f"[main] exit={_exit_code} (remote run failed)", flush=True)
+        sys.exit(_exit_code)
 
 
 if __name__ == "__main__":

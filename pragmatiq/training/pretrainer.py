@@ -55,6 +55,20 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
     restores the standard, faster path even if an earlier call enabled
     determinism in the same process. See :attr:`TrainConfig.deterministic` for
     the precision coupling.
+
+    CUDA-only side effects (H100 run findings 2026-06):
+
+    - ``TORCH_NCCL_ASYNC_ERROR_HANDLING`` and ``NCCL_ASYNC_ERROR_HANDLING`` are set
+      to ``1`` via ``os.environ.setdefault`` (no override of user-set values) so that
+      if a rank crashes mid-collective (e.g. OOM), the NCCL call aborts instead of all
+      ranks hanging forever (observed deadlock on 4-GPU `large` run).
+    - ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` (setdefault) reduces
+      fragmentation-driven OOM by allowing the allocator to expand existing segments
+      rather than requesting new ones. The H100 OOM error explicitly suggested this.
+    - ``torch.set_float32_matmul_precision("high")`` is set when CUDA is available
+      and ``deterministic=False`` to enable TF32 Tensor Core matmuls (free speedup on
+      Ampere/Hopper). In deterministic mode ``"highest"`` (default) is preserved so
+      fp32 reproducibility is not compromised.
     """
     import os
     import random
@@ -64,12 +78,23 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+        # NCCL fail-fast: if a rank dies (e.g. OOM), abort the collective instead of
+        # hanging all other ranks. Use setdefault so a user-set value is not overridden.
+        os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
+        os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")  # legacy alias
+        # Reduce fragmentation-driven OOM by reusing existing segment memory.
+        os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
     if deterministic:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         os.environ["PRAGMATIQ_DETERMINISTIC"] = "1"
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        # Reset fp32 matmul precision to "highest" so the switch is SYMMETRIC: a
+        # deterministic call after a non-deterministic one (which set "high"/TF32) in
+        # the same process must restore full-precision fp32 matmuls, or the "bit-exact
+        # in fp32" determinism guarantee silently leaks TF32 (an approximation).
+        torch.set_float32_matmul_precision("highest")
     else:
         # Symmetric off-switch: a non-deterministic call clears any deterministic
         # state a prior call set, so the process never sticks on the slow path.
@@ -77,6 +102,12 @@ def seed_everything(seed: int, deterministic: bool = False) -> None:
         os.environ.pop("PRAGMATIQ_DETERMINISTIC", None)
         torch.use_deterministic_algorithms(False)
         torch.backends.cudnn.deterministic = False
+        if torch.cuda.is_available():
+            # TF32 Tensor Core matmuls: free ~10-20% speedup on Ampere/Hopper with
+            # negligible numerical impact (bf16 training already accepts that tolerance).
+            # Only set in non-deterministic mode; "highest" is the default so
+            # deterministic mode continues to produce bit-exact fp32 results.
+            torch.set_float32_matmul_precision("high")
 
 
 def _pack_numpy_state(state: Any) -> dict[str, Any]:
@@ -271,7 +302,37 @@ class PreTrainer:
         self._epoch_produced = False
 
     # ------------------------------------------------------------------ step
-    def _micro_backward(self, batch: PackedBatch, accum: int, agg: dict[str, Any]) -> bool | None:
+    def _zero_graph_loss(self, out: Any) -> torch.Tensor:
+        """A graph-connected zero that flows through the SAME model+head graph as a real
+        micro-batch, contributing exactly zero gradient.
+
+        Under DDP every rank must call ``fabric.backward`` the same number of times per
+        window or the single per-window gradient all-reduce is skipped on some rank and
+        the collective deadlocks. When a rank's micro-batch selects nothing to learn from,
+        it backwards this instead of skipping. The loss MUST route through the autograd
+        graph of the ``out`` produced by ``self.model(...)``: DDP's reducer is armed by the
+        forward and waits for a gradient on every forward-touched parameter, so an
+        unrelated ``Σp`` loss (which never reaches the forward graph) would hang the
+        reduce. Selecting all tokens with all-``-100`` targets makes :func:`mlm_loss`
+        return its ``logits.sum()*0`` branch — graph-connected through the head + tied
+        embedding + the full model forward, hence the same reducer buckets a real
+        micro-batch fills, all with zero gradient.
+        """
+        n_tok = int(out.token_repr.shape[0])
+        sel = torch.arange(n_tok, device=self.fabric.device)
+        logits = self.head(out, self.model.embedding_weight, sel)
+        targets = torch.full((n_tok,), -100, dtype=torch.int64, device=self.fabric.device)
+        loss = mlm_loss(logits, targets)  # all-ignored -> graph-connected zero
+        if self.head.text_out is not None and out.text_vecs is not None:
+            # Keep the text-head bucket fed too (zero gradient) so DDP doesn't wait on it.
+            pred = self.head.reconstruct_text(out, out.text_token_idx)
+            loss = loss + pred.sum() * 0.0
+        return loss
+
+    def _micro_backward(
+        self, batch: PackedBatch, accum: int, agg: dict[str, Any],
+        *, sync: bool = True, ddp: bool = False,
+    ) -> bool | None:
         """One micro-batch: forward + scaled backward, folding metrics into ``agg``.
 
         Returns True if it contributed gradient, False on a non-finite loss (skip the
@@ -279,6 +340,18 @@ class PreTrainer:
         The loss is scaled by ``1/accum`` here; if fewer than ``accum`` micro-batches end
         up contributing, :meth:`_train_step` rescales the accumulated gradient to the mean
         over the contributing ones, so the step matches a single batch of that size.
+
+        ``sync`` is False for the non-final micro-batches of a DDP window: the backward
+        runs under ``fabric.no_backward_sync`` so the gradient all-reduce fires only on
+        the last (``sync=True``) micro-batch — once per optimizer step, the standard
+        Fabric grad-accum pattern. ``ddp`` requests the collectively-symmetric path so
+        every rank calls ``fabric.backward`` the same number of times regardless of its
+        local data: an empty micro-batch issues a zero-graph backward (rather than
+        returning None), AND a non-finite-loss micro-batch ALSO issues a zero-graph
+        backward (rather than skipping the backward) before returning the False skip flag.
+        The non-finite skip is then decided COLLECTIVELY in :meth:`_train_step`, so a NaN
+        on one rank never makes it early-return past the all-reduce the others are blocked
+        on (the DDP deadlock the audit follow-up fixes).
         """
         batch = batch.to(self.fabric.device)
         masked = self.masker(batch, self.gen)
@@ -290,6 +363,13 @@ class PreTrainer:
         sel = masked.selected_idx
         text_idx = masked.text_loss_idx
         if sel.numel() == 0 and text_idx.numel() == 0:
+            if not ddp:
+                return None
+            # DDP: keep the per-rank backward count symmetric. Backward a zero-graph loss
+            # routed through this micro-batch's own forward graph (no gradient
+            # contribution) so this rank still hits the all-reduce without orphaning the
+            # DDP-armed forward — see _zero_graph_loss.
+            self._backward(self._zero_graph_loss(out), sync=sync)
             return None
         logits = self.head(out, self.model.embedding_weight, sel)
         targets = masked.labels[sel]
@@ -302,8 +382,17 @@ class PreTrainer:
             text_mse = text_mse_loss(pred, self._text_targets(out, text_idx))
             loss = ce + self.config.text_loss_weight * text_mse
         if self.config.nan_skip and not torch.isfinite(loss):
+            if not ddp:
+                return False
+            # DDP: a non-finite loss on this rank must NOT skip the backward — every
+            # rank has to issue the same number of backwards so the single per-window
+            # gradient all-reduce fires symmetrically (else the others deadlock on it).
+            # Backward a zero-graph loss (no gradient) through this micro-batch's own
+            # forward graph and report the skip via the False flag; _train_step makes the
+            # actual skip decision COLLECTIVELY so all ranks branch together.
+            self._backward(self._zero_graph_loss(out), sync=sync)
             return False
-        self.fabric.backward(loss / accum)
+        self._backward(loss / accum, sync=sync)
         with torch.no_grad():
             agg["loss_sum"] += loss.item()
             agg["contributing"] += 1
@@ -324,32 +413,113 @@ class PreTrainer:
         self._tokens_seen += batch.n_tokens
         return True
 
+    def _backward(self, loss: torch.Tensor, *, sync: bool) -> None:
+        """``fabric.backward(loss)``; when ``sync`` is False defer the DDP gradient
+        all-reduce via ``no_backward_sync`` on both Fabric-wrapped modules (model + head
+        both receive gradients), so the reduce fires only on the final window backward."""
+        if sync:
+            self.fabric.backward(loss)
+            return
+        with self.fabric.no_backward_sync(self.model), self.fabric.no_backward_sync(self.head):
+            self.fabric.backward(loss)
+
     def _train_step(self, micro_batches: list[PackedBatch]) -> dict[str, float] | None:
         accum = len(micro_batches)
+        world_size = int(getattr(self.fabric, "world_size", 1))
+        ddp = world_size > 1
         for opt in self.optimizers:
             opt.zero_grad(set_to_none=True)
         agg: dict[str, Any] = {"loss_sum": 0.0, "contributing": 0, "acc_correct": 0.0,
                                "acc_total": 0, "text_mse_sum": 0.0, "text_mse_n": 0}
-        for mb in micro_batches:
-            result = self._micro_backward(mb, accum, agg)
+        local_skip = False  # this rank saw a non-finite micro-batch loss
+        for i, mb in enumerate(micro_batches):
+            # Under DDP defer the gradient all-reduce to the LAST micro-batch of the
+            # window (no_backward_sync on the rest) so it fires once per optimizer step;
+            # world_size==1 always syncs, leaving the single-process path byte-identical.
+            sync = (not ddp) or (i == accum - 1)
+            result = self._micro_backward(mb, accum, agg, sync=sync, ddp=ddp)
             if result is False:  # non-finite loss → dump + skip the whole window
-                self._dump_debug(agg["_last_batch"], agg["_last_masked"])
-                for opt in self.optimizers:
-                    opt.zero_grad(set_to_none=True)
-                return {"loss": float("nan"), "skipped": 1.0}
-        if agg["contributing"] == 0:
+                if not ddp:
+                    # Single-process: early-return is safe (no collective to deadlock on)
+                    # and keeps the byte-identical behavior the single-process NaN-skip
+                    # tests pin down.
+                    self._dump_debug(agg["_last_batch"], agg["_last_masked"])
+                    for opt in self.optimizers:
+                        opt.zero_grad(set_to_none=True)
+                    return {"loss": float("nan"), "skipped": 1.0}
+                # DDP: this rank backwarded a zero-graph loss (in _micro_backward) so the
+                # per-window all-reduce still fires symmetrically. Record the skip (and
+                # snapshot the offending micro-batch for the debug dump, since the loop
+                # keeps going and `_last_batch` would otherwise advance past it) and keep
+                # iterating — the skip decision is made COLLECTIVELY below so every rank
+                # branches together (no rank early-returns past a pending collective).
+                local_skip = True
+                agg.setdefault("_skip_batch", agg["_last_batch"])
+                agg.setdefault("_skip_masked", agg["_last_masked"])
+        # A finite loss can still produce non-finite grads (e.g. bf16 backward overflow);
+        # treat that like a NaN loss (dump + skip). Computed locally here, then folded into
+        # the same collective skip decision so a non-finite grad on ONE rank makes ALL
+        # ranks skip together. The per-window gradient all-reduce has already fired (the
+        # last backward synced), so grads are the post-reduce values on every rank.
+        local_grads_nonfinite = self.config.nan_skip and not self._grads_finite()
+        local_contributing = agg["contributing"]
+        if ddp:
+            # ONE combined per-window collective every rank ALWAYS reaches: sum the per-rank
+            # `contributing` count AND the skip flags so any rank's non-finite loss/grad
+            # propagates to all ranks (sum > 0 ⇒ "some rank flagged" ⇒ everyone skips). All
+            # three quantities ride one all-reduce to keep it to a single collective.
+            packed = self.fabric.all_reduce(
+                torch.tensor(
+                    [float(local_contributing),
+                     float(local_skip),
+                     float(local_grads_nonfinite)],
+                    device=self.fabric.device,
+                ),
+                reduce_op="sum",
+            )
+            global_contributing = int(round(float(packed[0])))
+            global_skip = float(packed[1]) > 0.0
+            global_grads_nonfinite = float(packed[2]) > 0.0
+        else:
+            global_contributing = local_contributing
+            global_skip = local_skip  # always False here (single-process took the early return)
+            global_grads_nonfinite = local_grads_nonfinite
+        # Branch the SAME way on every rank: any rank that saw a non-finite micro-batch
+        # loss makes all ranks skip the step (dump + zero grads + consistent skip return),
+        # so replicas stay in sync and no rank steps while another skipped.
+        if global_skip:
+            # Dump the offending micro-batch if THIS rank saw the non-finite loss; a rank
+            # that only skips because a PEER flagged it dumps its current last batch (best
+            # effort — its own data was finite).
+            self._dump_debug(
+                agg.get("_skip_batch", agg["_last_batch"]),
+                agg.get("_skip_masked", agg["_last_masked"]),
+            )
+            for opt in self.optimizers:
+                opt.zero_grad(set_to_none=True)
+            return {"loss": float("nan"), "skipped": 1.0}
+        if global_contributing == 0:
             return None
-        # Each micro-batch scaled its loss by 1/accum at backward time, but a micro-batch
-        # that selected nothing to learn from adds no gradient. Rescale to the mean over the
-        # micro-batches that actually contributed so the effective step is correct (a no-op
-        # when every micro-batch contributed, i.e. contributing == accum).
-        if agg["contributing"] < accum:
-            self._scale_grads(accum / agg["contributing"])
-        avg_loss = agg["loss_sum"] / agg["contributing"]
-        # A finite loss can still produce non-finite grads (e.g. bf16 backward
-        # overflow); treat that like a NaN loss (dump + skip) so a transient
-        # overflow does not abort the run.
-        if self.config.nan_skip and not self._grads_finite():
+        # Each micro-batch backward scaled its loss by 1/accum. DDP additionally
+        # mean-reduces gradients across `world_size` ranks, so after the window each
+        # parameter's grad is Σ(grad_i over all ranks) / (world_size·accum). We want the
+        # mean over the globally-contributing micro-batches, Σ(grad_i) / global_contributing
+        # — matching a single-process step over the same total data — so the rescale factor
+        # is (world_size·accum)/global_contributing, identical on every rank. With
+        # world_size==1 this is accum/contributing, the byte-identical single-process path;
+        # and when every micro-batch on every rank contributes it is 1.0 (a no-op).
+        rescale = (world_size * accum) / global_contributing
+        if rescale != 1.0:
+            self._scale_grads(rescale)
+        if local_contributing == 0:
+            # This rank's grad is purely zero-graph backwards (and the all-reduced share
+            # of other ranks); the loss metric below would divide by zero. Report the
+            # global average loss is unavailable here, so fall back to 0.0 for this rank.
+            avg_loss = 0.0
+        else:
+            avg_loss = agg["loss_sum"] / local_contributing
+        # Non-finite grad skip (decided collectively above): all ranks branch together.
+        if global_grads_nonfinite:
             self._dump_debug(agg["_last_batch"], agg["_last_masked"])
             for opt in self.optimizers:
                 opt.zero_grad(set_to_none=True)

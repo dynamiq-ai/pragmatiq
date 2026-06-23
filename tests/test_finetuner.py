@@ -43,7 +43,7 @@ def test_finetune_early_stops_and_restores_best(ft_work: Path, monkeypatch) -> N
     seq = iter([0.90, 0.92, 0.88, 0.86, 0.85, 0.84, 0.83])
     state = {"epoch": 0}
 
-    def fake_epoch(dataset, users, label_of, opt, train):  # replaces the bound method
+    def fake_epoch(dataset, users, label_of, opt, train, epoch=0):  # replaces the bound method
         if train:
             state["epoch"] += 1
             with torch.no_grad():
@@ -71,7 +71,7 @@ def test_finetune_restores_best_lora_adapters(ft_work: Path, monkeypatch) -> Non
     snapshots: list[dict[str, torch.Tensor]] = []
     head_snapshots: list[dict[str, torch.Tensor]] = []
 
-    def fake_epoch(dataset, users, label_of, opt, train):  # replaces the bound method
+    def fake_epoch(dataset, users, label_of, opt, train, epoch=0):  # replaces the bound method
         if train:
             with torch.no_grad():
                 for name, param in ft.model.named_parameters():
@@ -157,3 +157,93 @@ def test_stratified_split_never_empties_a_train_class() -> None:
     assert sum(labels[u] for u in train) >= 1, "train lost its only positives"
     assert sum(labels[u] for u in val) >= 1, "val lost its only positives"
     assert any(labels[u] == 0 for u in train), "train lost its negatives"
+
+
+def test_run_epoch_reshuffles_per_epoch(ft_work: Path) -> None:
+    """_run_epoch must produce a different batch order each epoch (not hardcoded 0).
+
+    DynamicBatchSampler uses (seed, epoch) as the RNG key, so set_epoch(0) every
+    call yields the same shuffle, while set_epoch(N) for increasing N changes it.
+    This test catches the regression of hardcoding set_epoch(0).
+
+    Determinism guarantee: running with the same epoch index twice must yield the
+    SAME order (so resume / repro still hold).
+    """
+    from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataset
+    from pragmatiq.data.tokenizer import PragmaTokenizer
+
+    ds = ShardDataset(ft_work / "tok")
+    try:
+        tok = PragmaTokenizer.load(ft_work / "tok" / "tokenizer")
+
+        # Collect the batch-user-id sequences produced by _run_epoch for epochs 0, 1, 2
+        # by instrumenting DynamicBatchSampler.set_epoch to record the epoch it receives.
+        epochs_seen: list[int] = []
+        real_set_epoch = DynamicBatchSampler.set_epoch
+
+        def spy_set_epoch(self: DynamicBatchSampler, epoch: int) -> None:
+            epochs_seen.append(epoch)
+            real_set_epoch(self, epoch)
+
+        # Patch the sampler's class method; ft._run_epoch creates a fresh sampler per call
+        import pragmatiq.data.dataset as _ds_mod
+        orig = _ds_mod.DynamicBatchSampler.set_epoch
+        _ds_mod.DynamicBatchSampler.set_epoch = spy_set_epoch  # type: ignore[method-assign]
+        try:
+            sampler0 = DynamicBatchSampler(ds.index, token_budget=8192, shuffle=True, seed=7)
+            sampler0.set_epoch(0)
+            order_epoch0_run1 = [list(b) for b in sampler0]
+
+            sampler0b = DynamicBatchSampler(ds.index, token_budget=8192, shuffle=True, seed=7)
+            sampler0b.set_epoch(0)
+            order_epoch0_run2 = [list(b) for b in sampler0b]
+
+            sampler1 = DynamicBatchSampler(ds.index, token_budget=8192, shuffle=True, seed=7)
+            sampler1.set_epoch(1)
+            order_epoch1 = [list(b) for b in sampler1]
+
+            sampler2 = DynamicBatchSampler(ds.index, token_budget=8192, shuffle=True, seed=7)
+            sampler2.set_epoch(2)
+            order_epoch2 = [list(b) for b in sampler2]
+        finally:
+            _ds_mod.DynamicBatchSampler.set_epoch = orig  # type: ignore[method-assign]
+
+        # Determinism: same epoch index → same order
+        assert order_epoch0_run1 == order_epoch0_run2, (
+            "set_epoch(0) is not deterministic — RNG must be seeded by (seed, epoch)"
+        )
+        # Epoch N vs N+1 must differ (the fix: pass the actual epoch number)
+        assert order_epoch0_run1 != order_epoch1, (
+            "epoch 0 and epoch 1 produced identical batch orders — "
+            "set_epoch is likely hardcoded to 0 (DDP reshuffle bug)"
+        )
+        assert order_epoch1 != order_epoch2, (
+            "epoch 1 and epoch 2 produced identical batch orders — "
+            "set_epoch is likely hardcoded to a constant"
+        )
+
+        # Verify _run_epoch passes the actual epoch number by running fit with a
+        # monkeypatched epoch recorder.
+        ft2 = LoRAFineTuner(
+            PragmaModel(ModelConfig.preset("nano", tok.vocab_size)),
+            FineTuneConfig(max_epochs=3, patience=10, lora_rank=4, seed=7),
+        )
+        epochs_passed: list[int] = []
+        real_run_epoch = ft2._run_epoch
+
+        def recording_run_epoch(dataset, users, label_of, opt, train, epoch=0):
+            epochs_passed.append(epoch)
+            return real_run_epoch(dataset, users, label_of, opt, train, epoch)
+
+        import unittest.mock as _mock
+        with _mock.patch.object(ft2, "_run_epoch", recording_run_epoch):
+            ft2.fit(ds, ft_work / "raw" / "labels" / "default_12m.parquet")
+
+        # fit calls _run_epoch twice per outer epoch (train=True + train=False)
+        # so epochs_passed contains [0, 0, 1, 1, 2, 2, ...] or truncated by early-stop.
+        train_epochs = epochs_passed[::2]  # every other call is the train pass
+        assert train_epochs == list(range(len(train_epochs))), (
+            f"_run_epoch must receive epoch=0, 1, 2, ... got train epochs: {train_epochs}"
+        )
+    finally:
+        ds.close()

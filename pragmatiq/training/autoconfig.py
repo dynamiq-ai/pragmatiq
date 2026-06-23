@@ -27,9 +27,18 @@ from typing import Any
 # Per-forward tokens a single GiB of accelerator memory comfortably holds, by model
 # size (activations scale with width × depth). Conservative so the auto budget leaves
 # headroom for the optimizer state and fragmentation; the OOM-retry path is the backstop.
-_TOKENS_PER_GIB: dict[str, int] = {"nano": 4096, "small": 1400, "medium": 480, "large": 200}
+#
+# H100 run finding (2026-06): `large` at 200 tok/GiB used 78.8/79.2 GB on a single 80 GB
+# device — essentially no free headroom. Reduced to 160 so single-GPU `large` leaves ~20%
+# free. `medium` reduced from 480 → 400 for the same reason (proportionally less severe but
+# consistent policy). These are GUESS values; expose them in config so users can override.
+_TOKENS_PER_GIB: dict[str, int] = {"nano": 4096, "small": 1400, "medium": 400, "large": 160}
 _CPU_TOKEN_BUDGET = 4096  # correctness-over-speed default when no accelerator is present
 _TOKEN_BUDGET_BOUNDS = (2048, 131_072)
+# Extra headroom factor when running DDP (world_size > 1): DDP gradient buckets add per-rank
+# memory proportional to model size; a 0.75× factor on the per-device token budget empirically
+# avoids OOM on 80 GB H100s in the 8-rank `large` configuration (H100 run finding 2026-06).
+_DDP_HEADROOM = 0.75
 # A stable optimizer-step batch for MLM at this scale (paper trained at ~16–32 H100s of
 # packed tokens); reached via accumulation when one device cannot hold it.
 _DEFAULT_EFFECTIVE_TOKENS = 262_144
@@ -67,12 +76,21 @@ def _device_memory_gib(device: str) -> float | None:
         return None
 
 
-def token_budget_for(device: str, model_size: str, mem_gib: float | None = None) -> int:
+def token_budget_for(
+    device: str,
+    model_size: str,
+    mem_gib: float | None = None,
+    world_size: int = 1,
+) -> int:
     """Pick a per-forward token budget for ``device`` and ``model_size``.
 
     On CPU returns a small correctness-first budget; on CUDA scales the per-GiB capacity
     by usable memory (≈80% of total, leaving room for optimizer state) and clamps to a
     sane range.
+
+    When ``world_size > 1`` (DDP), an additional :data:`_DDP_HEADROOM` factor is applied
+    to leave room for DDP gradient buckets that would otherwise push a rank over its memory
+    limit (H100 run finding 2026-06: OOM under DDP even when single-GPU barely fitted).
     """
     if not device.startswith("cuda"):
         return _CPU_TOKEN_BUDGET
@@ -81,6 +99,8 @@ def token_budget_for(device: str, model_size: str, mem_gib: float | None = None)
         return _TOKEN_BUDGET_BOUNDS[0]  # CUDA requested but unreadable → conservative floor
     per_gib = _TOKENS_PER_GIB.get(model_size, _TOKENS_PER_GIB["small"])
     raw = int(per_gib * gib * 0.8)
+    if world_size > 1:
+        raw = int(raw * _DDP_HEADROOM)
     lo, hi = _TOKEN_BUDGET_BOUNDS
     return max(lo, min(hi, (raw // 256) * 256))  # round to a multiple of 256
 
@@ -107,7 +127,7 @@ def autoconfigure(
         raise ValueError(f"no users indexed under {shard_dir}; nothing to size a run for")
 
     world_size = max(1, world_size)
-    token_budget = token_budget_for(device, model_size)
+    token_budget = token_budget_for(device, model_size, world_size=world_size)
     # Accumulate enough micro-batches (across the whole world) to reach the target batch.
     per_step_tokens = token_budget * world_size
     grad_accum_steps = max(1, math.ceil(target_effective_tokens / per_step_tokens))
