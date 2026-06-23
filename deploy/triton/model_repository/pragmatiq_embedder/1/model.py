@@ -27,6 +27,10 @@ from pragmatiq.inference.serve.contract import INPUT_NAME, OUTPUT_NAME
 class TritonPythonModel:
     """Loads a trained pragmatiq model once and embeds batched record requests."""
 
+    def __init__(self) -> None:
+        # Pre-initialize so finalize() is safe even if initialize() never ran or raised.
+        self.runtime = None
+
     def initialize(self, args):
         params = json.loads(args["model_config"]).get("parameters", {})
         run_dir = params.get("run_dir", {}).get("string_value", os.environ.get("PRAGMATIQ_RUN", "/models/run"))

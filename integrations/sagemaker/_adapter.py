@@ -231,6 +231,11 @@ class SageMakerAdapter:
         Raises:
             MissingExtraError: If boto3 is not installed.
         """
+        if not s3_bucket:
+            raise ValueError(
+                "s3_bucket must be supplied to push(); got None or empty string. "
+                "Pass the S3 bucket name as s3_bucket='my-bucket'."
+            )
         _require("boto3", "boto3")
         import os
 

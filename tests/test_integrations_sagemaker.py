@@ -270,4 +270,40 @@ def test_sagemaker_push_raises_missing_extra_when_boto3_absent(monkeypatch) -> N
         adapter.push(
             artifact_path="s3://bucket/model.tar.gz",
             role_arn="arn:aws:iam::123456789012:role/SageMakerRole",
+            s3_bucket="my-bucket",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Bugbot finding #3: push() with s3_bucket=None raises clear ValueError
+# ---------------------------------------------------------------------------
+
+
+def test_sagemaker_push_raises_valueerror_when_bucket_none() -> None:
+    """push() must raise ValueError with a clear message when s3_bucket is None.
+
+    Previously the None would propagate to boto3.upload_file() causing an opaque
+    error.  The fix adds an early guard that names the missing argument.
+    """
+    from integrations.sagemaker import SageMakerAdapter
+
+    adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
+    with pytest.raises(ValueError, match="s3_bucket"):
+        adapter.push(
+            artifact_path="/tmp/model.tar.gz",
+            role_arn="arn:aws:iam::123456789012:role/SageMakerRole",
+            s3_bucket=None,
+        )
+
+
+def test_sagemaker_push_raises_valueerror_when_bucket_empty() -> None:
+    """push() must also reject an empty string for s3_bucket."""
+    from integrations.sagemaker import SageMakerAdapter
+
+    adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
+    with pytest.raises(ValueError, match="s3_bucket"):
+        adapter.push(
+            artifact_path="/tmp/model.tar.gz",
+            role_arn="arn:aws:iam::123456789012:role/SageMakerRole",
+            s3_bucket="",
         )
