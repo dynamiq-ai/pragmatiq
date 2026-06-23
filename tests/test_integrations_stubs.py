@@ -12,6 +12,7 @@ Coverage:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -49,16 +50,29 @@ class TestAzureAdapterImport:
     """Import-cleanness: no Azure/cloud SDK must leak into sys.modules."""
 
     def test_import_does_not_load_azure_sdk(self) -> None:
-        """Importing integrations.azure must not pull azure-sdk or msrest."""
-        import integrations.azure  # noqa: F401
+        """Importing integrations.azure must not pull azure-sdk or msrest.
 
-        bad = {
-            m
-            for m in sys.modules
-            if m.split(".")[0] in {"azure", "msrest", "msrestazure"}
-        }
-        assert not bad, (
-            f"Importing integrations.azure leaked cloud SDK modules: {sorted(bad)}"
+        Runs in a fresh subprocess to avoid false-negatives from sibling tests
+        that may have already imported azure-sdk packages into the same process's
+        sys.modules.  The subprocess starts with a clean interpreter, so any
+        cloud SDK present in sys.modules after the import is genuinely caused by
+        the adapter itself.
+        """
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import integrations.azure, sys; "
+                    "leaked = [m for m in sys.modules if m.split('.')[0] in {'azure', 'msrest', 'msrestazure'}]; "
+                    "assert not leaked, f'Importing integrations.azure leaked cloud SDK modules: {sorted(leaked)}'"
+                ),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            f"import-cleanness check failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         )
 
 

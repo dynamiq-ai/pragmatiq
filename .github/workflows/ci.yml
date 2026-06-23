@@ -219,12 +219,11 @@ jobs:
           pip install pip-audit pip-licenses cyclonedx-bom
       - name: Vulnerability scan
         run: |
-          # Audit the resolved third-party deps. We pass a frozen requirements list
-          # (excluding the editable pragmatiq itself, which isn't on PyPI and makes
-          # pip-audit exit non-zero). CVE-2025-3000 is a torch.jit.script memory-corruption
-          # CVE with no upstream fix; pragmatiq never uses torch.jit.script (eager model +
-          # torch.onnx export only), so it is ignored here with this documented reason.
-          pip freeze --exclude-editable > /tmp/pragmatiq-reqs.txt
+          # Audit resolved third-party deps. Strip local version tags (e.g. torch==2.12.1+cpu -> 2.12.1)
+          # so pip-audit's resolver can find them on PyPI; exclude the editable pragmatiq (not on PyPI).
+          # CVE-2025-3000 (torch.jit.script memory corruption) has no upstream fix and pragmatiq never
+          # uses torch.jit.script (eager + torch.onnx only), so it is ignored with this documented reason.
+          pip freeze --exclude-editable | sed -E 's/(==[^+[:space:]]+)\+[A-Za-z0-9._]+/\1/' > /tmp/pragmatiq-reqs.txt
           pip-audit --strict --desc -r /tmp/pragmatiq-reqs.txt --ignore-vuln CVE-2025-3000
       - name: License check
         run: pip-licenses --from=mixed --order=license --format=markdown
