@@ -380,6 +380,7 @@ def _run_leg_with_timeout(
     timeout_sec: float,
     label: str,
     log_dir: Path | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> tuple[int, bool]:
     """Run a leg subprocess with a per-leg timeout.
 
@@ -392,10 +393,20 @@ def _run_leg_with_timeout(
     Uses ``start_new_session=True`` so the child gets its own process group,
     allowing ``os.killpg`` to reap orphaned GPU processes on timeout.
 
+    *extra_env*, when given, is merged into a copy of ``os.environ`` and
+    passed as the subprocess environment.  Use this to inject NCCL tunables
+    (e.g., NCCL_DEBUG, NCCL_P2P_DISABLE) without touching the parent process
+    environment — CPU / dry-run legs pass ``extra_env=None`` and are
+    unaffected.
+
     Returns:
         (returncode, timed_out) — on timeout returncode is -1.
     """
     import tempfile  # noqa: PLC0415 — intentional late import to keep top-level lean
+
+    child_env: dict[str, str] | None = None
+    if extra_env:
+        child_env = {**os.environ, **extra_env}
 
     log_path: Path | None = None
     _tmp_fh = None
@@ -415,6 +426,7 @@ def _run_leg_with_timeout(
                 start_new_session=True,
                 stdout=log_fh,
                 stderr=log_fh,
+                env=child_env,
             )
         finally:
             # The child inherited the fd; we can close our copy now so the
@@ -463,6 +475,7 @@ def _run_pretrain_leg(
     out_dir: Path,
     util_records: list[dict[str, Any]],
     leg_timeout_sec: float,
+    nccl_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run one pretrain leg via subprocess, sample GPU utilisation, parse metrics."""
     print(f"[pretrain] leg devices={devices} run={run_name}", flush=True)
@@ -480,7 +493,8 @@ def _run_pretrain_leg(
     with _monitor_workload(f"pretrain_d{devices}", out_dir, util_records):
         t0 = time.time()
         returncode, timed_out = _run_leg_with_timeout(
-            cmd, leg_timeout_sec, f"pretrain_d{devices}", log_dir=out_dir / "leg_logs"
+            cmd, leg_timeout_sec, f"pretrain_d{devices}",
+            log_dir=out_dir / "leg_logs", extra_env=nccl_env,
         )
         elapsed = time.time() - t0
 
@@ -516,6 +530,7 @@ def _training_sweep(
     leg_timeout_sec: float,
     run_start: float,
     max_runtime_sec: float,
+    nccl_env: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run the training scaling sweep legs and return per-leg results."""
     results: list[dict[str, Any]] = []
@@ -545,6 +560,7 @@ def _training_sweep(
                 out_dir=out_dir,
                 util_records=util_records,
                 leg_timeout_sec=leg_timeout_sec,
+                nccl_env=nccl_env,
             )
             if result.get("status") == "timeout":
                 # Timed-out leg: record it and continue to next d (no retry).
@@ -573,6 +589,7 @@ def _training_sweep(
                     out_dir=out_dir,
                     util_records=util_records,
                     leg_timeout_sec=leg_timeout_sec,
+                    nccl_env=nccl_env,
                 )
                 result["oom_fallback_model_size"] = "medium"
                 break
@@ -628,6 +645,7 @@ def _run_finetune_leg(
     out_dir: Path,
     util_records: list[dict[str, Any]],
     leg_timeout_sec: float,
+    nccl_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run one finetune leg via subprocess; return timing + AUC."""
     result_json = out_dir / f"finetune_d{devices}_result.json"
@@ -644,7 +662,8 @@ def _run_finetune_leg(
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
         t0 = time.time()
         returncode, timed_out = _run_leg_with_timeout(
-            cmd, leg_timeout_sec, f"finetune_d{devices}", log_dir=out_dir / "leg_logs"
+            cmd, leg_timeout_sec, f"finetune_d{devices}",
+            log_dir=out_dir / "leg_logs", extra_env=nccl_env,
         )
         elapsed = time.time() - t0
 
@@ -680,6 +699,7 @@ def _finetune_sweep(
     leg_timeout_sec: float,
     run_start: float,
     max_runtime_sec: float,
+    nccl_env: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Run fine-tuning legs and return per-leg results."""
     results: list[dict[str, Any]] = []
@@ -703,6 +723,7 @@ def _finetune_sweep(
             out_dir=out_dir,
             util_records=util_records,
             leg_timeout_sec=leg_timeout_sec,
+            nccl_env=nccl_env,
         )
         if result.get("status") == "timeout":
             print(f"[finetune] d={d} TIMEOUT", flush=True)
@@ -1436,6 +1457,8 @@ def _write_report(
     triton_skip_reason: str,
     util_records: list[dict[str, Any]],
     flash_check_result: dict[str, Any] | None = None,
+    nccl_safe: str = "on",
+    finetune_timeout_min: int = 20,
 ) -> Path:
     """Write REPORT.md and return its path."""
     report_path = out_dir / "REPORT.md"
@@ -1451,6 +1474,15 @@ def _write_report(
 
     lines: list[str] = []
 
+    nccl_note = (
+        "**NCCL transport:** NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1 "
+        "(--nccl-safe=on; socket transport for RunPod reliability). "
+        "**tok/s and scaling efficiency are a CONSERVATIVE LOWER BOUND** — "
+        "not NVLink-P2P-optimal. Re-run with --nccl-safe=off for full NVLink numbers."
+        if nccl_safe == "on" else
+        "**NCCL transport:** full NVLink/P2P/SHM attempted (--nccl-safe=off)."
+    )
+
     lines += [
         "# pragmatiq GPU Validation Report",
         "",
@@ -1462,6 +1494,8 @@ def _write_report(
         f"**Mode:** {'DRY-RUN (CPU, nano model)' if dry_run else f'GPU pod ({model_size} model)'}  ",
         f"**Users:** {n_users:,}  ",
         f"**Steps:** {steps}  ",
+        f"**Fine-tune timeout:** {finetune_timeout_min} min  ",
+        nccl_note,
         "",
         "## Headline Numbers",
         "",
@@ -1820,6 +1854,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "On expiry the leg's process group is killed, the leg is "
                          "recorded as 'timeout', and the harness continues to the "
                          "next leg.")
+    ap.add_argument("--finetune-timeout-min", type=int, default=None,
+                    help="Per-leg timeout in minutes for finetune legs (default: 2× "
+                         "--leg-timeout-min, which itself defaults to 10, giving 20 min). "
+                         "A separate, larger timeout lets single-GPU fine-tune finish "
+                         "without blowing the pretrain-sweep timeout budget.")
+    ap.add_argument("--nccl-safe", default="on", choices=["on", "off"],
+                    help="'on' (default): set NCCL_P2P_DISABLE=1, NCCL_SHM_DISABLE=1, "
+                         "NCCL_IB_DISABLE=1 for all DDP legs so NCCL initialises reliably "
+                         "on RunPod containers (avoids the CUDA-IPC / tiny-/dev/shm "
+                         "NCCLUtils.hpp error that kills d>=4 immediately). This forces "
+                         "NCCL onto socket transport, which is slower than NVLink P2P; "
+                         "measured tok/s and scaling efficiency are therefore a CONSERVATIVE "
+                         "LOWER BOUND, not NVLink-optimal. "
+                         "'off': attempt full NVLink/P2P/SHM transport — may fail on RunPod.")
     ap.add_argument("--skip-serving", action="store_true",
                     help="Skip the serving measurement")
     ap.add_argument("--skip-finetune", action="store_true",
@@ -1916,8 +1964,52 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
     serving_concurrency = [int(c) for c in args.serving_concurrency.split(",") if c.strip()]
 
     leg_timeout_sec = args.leg_timeout_min * 60
+    # Fine-tune legs get their own, larger timeout (single-GPU fine-tune takes
+    # longer than a fixed-step pretrain leg).  Default: 2× the pretrain timeout.
+    finetune_timeout_min = (
+        args.finetune_timeout_min
+        if args.finetune_timeout_min is not None
+        else args.leg_timeout_min * 2
+    )
+    finetune_timeout_sec = finetune_timeout_min * 60
+
     run_start = time.time()
     max_runtime_sec = args.max_runtime_min * 60  # 0 means unlimited
+
+    # ---- NCCL environment for DDP legs -----------------------------------
+    # Always emit NCCL_DEBUG=WARN so any future NCCL failure prints its reason
+    # rather than a bare "unhandled cuda error".
+    # With --nccl-safe on (default) also disable CUDA-IPC P2P, shared-memory,
+    # and InfiniBand transports so NCCL falls back to socket transport, which
+    # reliably initialises on RunPod containers with small /dev/shm.  This
+    # avoids the NCCLUtils.hpp ncclUnhandledCudaError that kills d>=4 at init.
+    # NOTE: socket transport is slower than NVLink P2P; tok/s and scaling
+    # efficiency measured with --nccl-safe on are a CONSERVATIVE LOWER BOUND.
+    # Use --nccl-safe=off to attempt full NVLink/P2P/SHM (may fail on RunPod).
+    # These are injected only into DDP leg subprocesses via extra_env; the
+    # orchestrator process (CPU/dry-run) is not affected.
+    nccl_env: dict[str, str] | None = {"NCCL_DEBUG": "WARN"}
+    if args.nccl_safe == "on":
+        nccl_env = {
+            "NCCL_DEBUG": "WARN",
+            "NCCL_P2P_DISABLE": "1",
+            "NCCL_SHM_DISABLE": "1",
+            "NCCL_IB_DISABLE": "1",
+        }
+        print(
+            "[nccl] --nccl-safe=on: NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 "
+            "NCCL_IB_DISABLE=1 NCCL_DEBUG=WARN set for all DDP legs; "
+            "measured tok/s is a CONSERVATIVE LOWER BOUND (socket transport, not NVLink P2P)",
+            flush=True,
+        )
+    else:
+        print(
+            "[nccl] --nccl-safe=off: NCCL_DEBUG=WARN only; "
+            "full NVLink/P2P/SHM attempted (may fail on RunPod with small /dev/shm)",
+            flush=True,
+        )
+    # Dry-run / CPU: nccl_env is still built but harmless — the subprocess will
+    # inherit these vars and NCCL won't be initialised (devices=1, no DDP group).
 
     util_records: list[dict[str, Any]] = []
 
@@ -1939,6 +2031,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         leg_timeout_sec=leg_timeout_sec,
         run_start=run_start,
         max_runtime_sec=max_runtime_sec,
+        nccl_env=nccl_env,
     )
 
     # Identify the pretrained run to use for finetune (prefer sweep_d8 or sweep_d1)
@@ -1964,9 +2057,10 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
                 finetune_steps=args.finetune_steps,
                 out_dir=out_dir,
                 util_records=util_records,
-                leg_timeout_sec=leg_timeout_sec,
+                leg_timeout_sec=finetune_timeout_sec,
                 run_start=run_start,
                 max_runtime_sec=max_runtime_sec,
+                nccl_env=nccl_env,
             )
     else:
         print("[main] finetune skipped (--skip-finetune)", flush=True)
@@ -2032,6 +2126,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         triton_skip_reason=triton_skip_reason,
         util_records=util_records,
         flash_check_result=flash_check_result,
+        nccl_safe=args.nccl_safe,
+        finetune_timeout_min=finetune_timeout_min,
     )
 
     print("\n[main] === DONE ===", flush=True)

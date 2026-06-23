@@ -179,6 +179,15 @@ def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
     # Cap at 500 GB to stay within typical RunPod limits.
     container_disk = min(max(80, 30 * gpu_count), 500)
 
+    # NOTE on /dev/shm size: The RunPod REST v1 pod-create body does NOT expose
+    # a shmSize or equivalent field (unlike docker run --shm-size).  The container
+    # gets whatever RunPod provisions by default (typically 64 MB), which is too
+    # small for NCCL shared-memory transport on multi-GPU pods and causes the
+    # NCCLUtils.hpp ncclUnhandledCudaError at d>=4 init.  The harness works around
+    # this by setting NCCL_SHM_DISABLE=1 + NCCL_P2P_DISABLE=1 + NCCL_IB_DISABLE=1
+    # in the DDP leg subprocess env (--nccl-safe=on, default).  If RunPod ever
+    # adds a shmSize knob to their REST API, set it here (e.g., "shmSizeGb": 8)
+    # and remove the NCCL_SHM_DISABLE env var to get NVLink-optimal throughput.
     body = {
         "name": name,
         "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
