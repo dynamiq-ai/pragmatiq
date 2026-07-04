@@ -2,7 +2,7 @@
   "api": [
     {
       "name": "synthesize",
-      "signature": "synthesize(config: 'str | Path | dict[str, Any] | None' = None, out: 'str | Path' = 'data/synth', n_users: 'int | None' = None, seed: 'int | None' = None, n_workers: 'int' = 0, write_report: 'bool' = True, **overrides: 'Any') -> 'dict[str, Any]'",
+      "signature": "synthesize(config: 'str | Path | dict[str, Any] | None' = None, out: 'str | Path' = 'data/synth', n_users: 'int | None' = None, seed: 'int | None' = None, n_workers: 'int' = 0, write_report: 'bool | None' = None, **overrides: 'Any') -> 'dict[str, Any]'",
       "summary": "Generate a synthetic dataset."
     },
     {
