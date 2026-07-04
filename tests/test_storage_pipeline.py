@@ -370,3 +370,44 @@ def test_fresh_remote_pretrain_does_not_pull_existing_run(tmp_path):
     # Clean up memory fs
     mem = fsspec.filesystem("memory")
     mem.store.clear()
+
+
+def test_remote_pretrain_returns_durable_remote_run_dir(tmp_path):
+    """pretrain() with a remote runs_root must return the remote run URL.
+
+    Regression guard for Bugbot finding 3449249150: the returned run_dir used
+    to be the staged local temp path, which staging deletes right after the
+    upload — so the caller received a path that no longer existed.
+    """
+    api.synthesize(SYNTH_CFG, out=tmp_path / "raw", write_report=False)
+    api.tokenize(tmp_path / "raw", tmp_path / "tok")
+
+    remote_runs = "memory:///durable_rundir/runs"
+    result = api.pretrain(tmp_path / "tok", "durable_run", model_size="nano",
+                          config=TRAIN_CFG, runs_root=remote_runs)
+
+    assert result["run_dir"] == remote_runs + "/durable_run", result["run_dir"]
+    # The returned location must actually be usable — embed straight from it.
+    api.embed(tmp_path / "tok", result["run_dir"], out=tmp_path / "emb.parquet")
+    assert (tmp_path / "emb.parquet").exists()
+
+
+def test_remote_tokenizer_dir_is_staged(tmp_path):
+    """tokenize(tokenizer_dir=<remote url>) must materialize the tokenizer.
+
+    Regression guard for Bugbot finding 3449267057: a remote tokenizer_dir was
+    passed straight to ``PragmaTokenizer.load()``, which only reads local paths.
+    """
+    from pragmatiq.storage.cache import put_dir
+
+    api.synthesize(SYNTH_CFG, out=tmp_path / "raw", write_report=False)
+    local_manifest = api.tokenize(tmp_path / "raw", tmp_path / "tok1")
+
+    remote_tok = "memory:///tokdir_test/tokenizer"
+    put_dir(tmp_path / "tok1" / "tokenizer", remote_tok)
+
+    remote_manifest = api.tokenize(tmp_path / "raw", tmp_path / "tok2",
+                                   tokenizer_dir=remote_tok)
+    assert remote_manifest["tokenizer_hash"] == local_manifest["tokenizer_hash"], (
+        "remote tokenizer_dir produced a different tokenizer than the local one it mirrors"
+    )

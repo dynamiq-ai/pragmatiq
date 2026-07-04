@@ -208,13 +208,20 @@ class DatabricksAdapter:
 
         model_class = mlflow_pyfunc_class()
         with mlflow.start_run():
-            mlflow.pyfunc.log_model(
+            info = mlflow.pyfunc.log_model(
                 artifact_path="model",
                 python_model=model_class(),
                 artifacts={"run_dir": str(Path(artifact_path) / "run_dir")},
                 registered_model_name=self._model_uri,
             )
-        return f"models:/{self._model_uri}/1"
+        version = getattr(info, "registered_model_version", None)
+        if version is None:
+            # Older mlflow returns no version on ModelInfo; ask the registry for
+            # the newest version of this model instead of guessing.
+            client = mlflow.MlflowClient()
+            versions = client.search_model_versions(f"name = '{self._model_uri}'")
+            version = max(int(mv.version) for mv in versions)
+        return f"models:/{self._model_uri}/{version}"
 
     # ------------------------------------------------------------------
     # LIVE (lazy SDK): healthcheck()

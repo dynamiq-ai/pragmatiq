@@ -309,3 +309,67 @@ def test_databricks_register_raises_missing_extra_when_mlflow_absent() -> None:
     # mlflow is NOT installed in this env
     with pytest.raises((MissingExtraError, ImportError), match="mlflow"):
         adapter.register(artifact_path="dbfs:/artifacts/pyfunc_artifact")
+
+
+# ---------------------------------------------------------------------------
+# register() version handling (Bugbot PR #10 finding 3460867078)
+# ---------------------------------------------------------------------------
+
+
+def _install_fake_mlflow(monkeypatch, *, info_version, registry_versions=()) -> None:
+    """Install a minimal in-memory mlflow stub sufficient for register()."""
+    import sys
+    import types
+    from contextlib import contextmanager
+
+    fake = types.ModuleType("mlflow")
+    fake.__path__ = []  # mark as a package so `import mlflow.pyfunc` resolves
+
+    class _PythonModel:
+        pass
+
+    class _Info:
+        registered_model_version = info_version
+
+    pyfunc = types.ModuleType("mlflow.pyfunc")
+    pyfunc.PythonModel = _PythonModel
+    pyfunc.log_model = lambda **kwargs: _Info()
+    fake.pyfunc = pyfunc
+
+    @contextmanager
+    def _start_run():
+        yield None
+
+    fake.start_run = _start_run
+
+    class _ModelVersion:
+        def __init__(self, version: str) -> None:
+            self.version = version
+
+    class _Client:
+        def search_model_versions(self, _filter: str):
+            return [_ModelVersion(str(v)) for v in registry_versions]
+
+    fake.MlflowClient = _Client
+    monkeypatch.setitem(sys.modules, "mlflow", fake)
+    monkeypatch.setitem(sys.modules, "mlflow.pyfunc", pyfunc)
+
+
+def test_databricks_register_uses_returned_model_version(monkeypatch) -> None:
+    """register() must report the version the registry assigned, not a hardcoded /1."""
+    from integrations.databricks import DatabricksAdapter
+
+    _install_fake_mlflow(monkeypatch, info_version="7")
+    adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
+    uri = adapter.register(str(_make_fake_run_dir()))
+    assert uri == "models:/main.pragmatiq.embedder/7"
+
+
+def test_databricks_register_falls_back_to_registry_lookup(monkeypatch) -> None:
+    """Older mlflow (no version on ModelInfo) → the newest registry version wins."""
+    from integrations.databricks import DatabricksAdapter
+
+    _install_fake_mlflow(monkeypatch, info_version=None, registry_versions=(1, 3, 2))
+    adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
+    uri = adapter.register(str(_make_fake_run_dir()))
+    assert uri == "models:/main.pragmatiq.embedder/3"

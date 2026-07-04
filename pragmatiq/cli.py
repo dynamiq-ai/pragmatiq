@@ -37,7 +37,9 @@ def synth_generate(
     n_users: int | None = typer.Option(None, help="Override n_users."),
     seed: int | None = typer.Option(None, help="Override seed."),
     n_workers: int = typer.Option(0, help="Parallel workers (<=1 = inline)."),
-    report: bool = typer.Option(True, help="Write realism_report.html."),
+    report: bool | None = typer.Option(None, "--report/--no-report",
+                                       help="Write realism_report.html (default: only when "
+                                            "matplotlib is installed)."),
 ) -> None:
     """Generate a synthetic banking dataset."""
     from pragmatiq import api
