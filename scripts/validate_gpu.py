@@ -293,6 +293,31 @@ _SAMPLE_RECORDS = [
 # ---------------------------------------------------------------------------
 
 
+def _is_rank_zero() -> bool:
+    """True on the coordinating DDP rank (and in any non-distributed run).
+
+    Fabric/torchrun launchers export RANK / LOCAL_RANK into every worker; a
+    plain single-process leg has neither and counts as rank 0.
+    """
+    return int(os.environ.get("RANK", os.environ.get("LOCAL_RANK", "0"))) == 0
+
+
+def _finetune_leg_failed(result: dict[str, Any]) -> bool:
+    """True when a finetune leg did not produce a trustworthy AUC.
+
+    A leg fails on a non-zero exit, a timeout, or a missing/absent AUC — the
+    leg JSON is only written on success, so ``best_val_auc`` degrades to NaN
+    (NaN != NaN) rather than the -1 sentinel alone.
+    """
+    auc = result.get("best_val_auc", float("nan"))
+    return (
+        result.get("returncode", 0) != 0
+        or result.get("status") == "timeout"
+        or auc != auc  # NaN — leg never reported
+        or auc == -1
+    )
+
+
 def _leg_pretrain(args: argparse.Namespace) -> None:
     """Run one pretrain leg and exit.  Invoked via subprocess by the orchestrator."""
     # Delay heavy imports until we are inside the leg (Fabric re-launch path).
@@ -330,8 +355,12 @@ def _leg_finetune(args: argparse.Namespace) -> None:
         config=config,
         device="auto",
     )
-    # Write result JSON so orchestrator can read it back
-    Path(args.result_json).write_text(json.dumps(result))
+    # Write result JSON so the orchestrator can read it back. Only the
+    # coordinating rank writes: under DDP every Fabric rank re-executes this
+    # leg body, and concurrent writes to the same path can interleave. The
+    # validation AUC is gathered across ranks, so rank 0's copy is the result.
+    if _is_rank_zero():
+        Path(args.result_json).write_text(json.dumps(result))
     print(f"[leg-finetune] done: best_val_auc={result.get('best_val_auc')}", flush=True)
 
 
@@ -1735,10 +1764,13 @@ def _write_report(
             "",
         ]
     else:
-        failed_legs = [r for r in training_results if r.get("returncode", 0) != 0]
-        if not failed_legs and not any(
-            r.get("best_val_auc", -1) == -1 for r in finetune_results
-        ):
+        failed_training = [r for r in training_results if r.get("returncode", 0) != 0]
+        failed_finetune = [r for r in finetune_results if _finetune_leg_failed(r)]
+        fc_v = flash_check_result or {}
+        flash_failed = bool(fc_v) and not fc_v.get("skipped") and (
+            bool(fc_v.get("error")) or not fc_v.get("passed", False)
+        )
+        if not failed_training and not failed_finetune and not flash_failed:
             lines += [
                 "**All legs completed successfully.**",
                 "- Training scaling sweep ✓",
@@ -1747,7 +1779,15 @@ def _write_report(
                 "",
             ]
         else:
-            lines += ["**Some legs failed — see notes above.**", ""]
+            lines += ["**Some legs failed — see sections above.**", ""]
+            if failed_training:
+                lines += [f"- training: {len(failed_training)} failed leg(s) "
+                          f"(devices={sorted(r.get('devices', 0) for r in failed_training)})", ""]
+            if failed_finetune:
+                lines += [f"- finetune: {len(failed_finetune)} failed/timed-out leg(s) "
+                          f"(devices={sorted(r.get('devices', 0) for r in failed_finetune)})", ""]
+            if flash_failed:
+                lines += ["- flash-attn ≡ SDPA equivalence check FAILED", ""]
 
     report_path.write_text("\n".join(lines))
     return report_path

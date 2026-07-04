@@ -247,3 +247,18 @@ def test_run_epoch_reshuffles_per_epoch(ft_work: Path) -> None:
         )
     finally:
         ds.close()
+
+
+def test_explicit_cpu_device_never_launches_cuda_ddp(monkeypatch) -> None:
+    """device='cpu' + devices='auto' on a CUDA host must stay single-process CPU.
+
+    Regression guard for Bugbot finding 3460855081: the world size was resolved
+    from bare torch.cuda.is_available(), so an explicit CPU fine-tune on a GPU
+    box launched a CUDA DDP run.
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 4)
+    model = PragmaModel(ModelConfig.preset("nano", 1500))
+    ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4), device="cpu")
+    assert ft.fabric is None, "explicit CPU run must take the single-process path"
+    assert next(ft.model.parameters()).device.type == "cpu"

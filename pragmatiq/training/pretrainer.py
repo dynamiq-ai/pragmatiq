@@ -230,14 +230,18 @@ def resolve_device_count(devices: int | str, use_cuda: bool) -> int:
 
 
 def _make_fabric(devices: int | str = "auto", precision: str | None = None,
-                 deterministic: bool = False, num_nodes: int = 1):
+                 deterministic: bool = False, num_nodes: int = 1,
+                 accelerator: str | None = None):
     try:
         from lightning.fabric import Fabric
     except ImportError as _e:
         from pragmatiq.core.errors import MissingExtraError
         raise MissingExtraError.for_extra("train", "lightning") from _e
 
-    use_cuda = torch.cuda.is_available()
+    # accelerator=None keeps the historical behavior (CUDA whenever visible);
+    # callers that resolved an explicit device pass "cpu"/"cuda" so a CPU run
+    # on a CUDA host builds a CPU (gloo) Fabric instead of grabbing the GPUs.
+    use_cuda = torch.cuda.is_available() if accelerator is None else accelerator == "cuda"
     if precision is None:
         # bf16 backward on CUDA is not bit-exact; a deterministic GPU run trains
         # in fp32 so the gradient is reproducible. CPU is fp32 regardless.

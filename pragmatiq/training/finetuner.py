@@ -94,7 +94,11 @@ class LoRAFineTuner:
         # (world == 1) can stay byte-identical: it never touches Fabric, while
         # world > 1 routes through the DDP path. resolve_device_count is shared
         # with the pretrainer, so "auto"/numeric-string handling matches.
-        world = resolve_device_count(config.devices, torch.cuda.is_available()) * max(1, config.num_nodes)
+        # CUDA is gated on the caller's resolved device, not bare availability:
+        # an explicit device="cpu" on a CUDA host must stay a CPU run (and with
+        # devices="auto", a single process), never a CUDA DDP launch.
+        use_cuda = torch.cuda.is_available() and str(device).startswith("cuda")
+        world = resolve_device_count(config.devices, use_cuda) * max(1, config.num_nodes)
         self._ddp = world > 1
         self.fabric: Any = None
         if not self._ddp:
@@ -110,7 +114,8 @@ class LoRAFineTuner:
         # ---- DDP path (world > 1): mirror the pretrainer ----
         from .pretrainer import _make_fabric, seed_everything
 
-        self.fabric = _make_fabric(config.devices, num_nodes=config.num_nodes)
+        self.fabric = _make_fabric(config.devices, num_nodes=config.num_nodes,
+                                   accelerator="cuda" if use_cuda else "cpu")
         # Per-rank seed offset so LoRA init / any sampling draws an independent
         # stream on each rank (the global seed was already applied by the caller;
         # single-process keeps the base seed via the world==1 branch above).
