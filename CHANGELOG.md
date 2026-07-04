@@ -57,12 +57,30 @@ the checkpoint format.
 - **RELEASING.md** updated with the 1.0 release procedure (uv.lock
   regeneration, SBOM, full validation, tag + build + publish steps).
 
-### No API changes
+### Fixed
+
+- **Slim install can synthesize out of the box** — `api.synthesize` /
+  `pragmatiq synth generate` now default `write_report` to *auto*: the realism
+  report is written when matplotlib (the `[data]` extra) is installed and
+  skipped with a logged warning otherwise. An explicit `write_report=True`
+  still raises `MissingExtraError` when matplotlib is absent.
+- **Remote `runs_root` pretrain returns a durable path** — `api.pretrain`
+  with a remote (e.g. `s3://`) `runs_root` now returns the remote run URL
+  instead of the staged local temp directory that staging deletes on exit.
+- **Remote `tokenizer_dir` is staged** — `api.tokenize(tokenizer_dir="s3://…")`
+  materializes the tokenizer locally before loading instead of failing.
+- **Databricks `register()` reports the real model version** — the returned
+  Unity Catalog URI uses the version the registry assigned (previously
+  hardcoded `/1`).
+
+### One default change (otherwise no API changes)
 
 The Python API (`pragmatiq.api.*`), CLI command names, `from_pretrained` /
 `embed_records`, the serving wire contract, and the checkpoint format are
-unchanged from 0.1.0b4. All existing code and shipped checkpoints continue to
-work without modification.
+unchanged from 0.1.0b4, with one deliberate default change recorded above:
+`synthesize(write_report=…)` defaults to ``None`` (auto) instead of ``True``.
+All existing code and shipped checkpoints continue to work without
+modification.
 
 ## [0.1.0b4] — Hardening and the SageMaker guide
 

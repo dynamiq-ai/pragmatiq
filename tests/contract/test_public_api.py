@@ -147,8 +147,11 @@ GOLDEN_OPTIONAL_PARAMS: dict[str, list[str]] = {
 
 # Pinned default values for optional parameters
 GOLDEN_DEFAULTS: dict[str, dict[str, Any]] = {
+    # write_report default changed True -> None (auto: skip with a warning when
+    # matplotlib is absent) as a deliberate pre-1.0 contract update so a slim
+    # install can synthesize out of the box (Bugbot #10 finding 3449267053).
     "synthesize": {"config": None, "out": "data/synth", "n_users": None, "seed": None,
-                   "n_workers": 0, "write_report": True},
+                   "n_workers": 0, "write_report": None},
     "tokenize": {"config": None, "tokenizer_dir": None, "max_users": None,
                  "rows_per_shard": 4096, "n_workers": 0},
     "pretrain": {"model_size": "small", "config": None, "runs_root": "runs", "resume": None},

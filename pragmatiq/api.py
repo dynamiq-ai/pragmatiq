@@ -81,7 +81,7 @@ def synthesize(
     n_users: int | None = None,
     seed: int | None = None,
     n_workers: int = 0,
-    write_report: bool = True,
+    write_report: bool | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
     """Generate a synthetic dataset.
@@ -93,12 +93,28 @@ def synthesize(
         n_users / seed: convenience overrides of the corresponding config keys.
         n_workers: parallel sim workers (``<=1`` = inline; output is identical
             regardless).
-        write_report: emit ``realism_report.html``.
+        write_report: emit ``realism_report.html``. ``None`` (the default) writes
+            the report when matplotlib is installed and skips it with a logged
+            warning otherwise, so a slim ``pip install pragmatiq`` can synthesize
+            out of the box. ``True`` requires matplotlib (raises
+            :class:`~pragmatiq.core.errors.MissingExtraError` if absent);
+            ``False`` always skips.
         **overrides: any further WorldConfig field overrides.
 
     Returns:
         The generation manifest (also written to ``out/manifest.json``).
     """
+    if write_report is None:
+        from importlib.util import find_spec
+
+        write_report = find_spec("matplotlib") is not None
+        if not write_report:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "skipping realism_report.html: matplotlib is not installed "
+                "(pip install 'pragmatiq[data]' to enable the report)"
+            )
     with _staging() as stage:
         out = stage.output(out, is_dir=True)  # type: ignore[assignment]
         from pragmatiq.data.synthetic import WorldConfig, generate
@@ -149,6 +165,7 @@ def tokenize(
     """
     with _staging() as stage:
         data_dir = stage.input(data_dir)  # type: ignore[assignment]
+        tokenizer_dir = stage.input(tokenizer_dir)  # type: ignore[assignment]
         out = stage.output(out, is_dir=True)  # type: ignore[assignment]
         from pragmatiq.data.sharding import ShardWriter
         from pragmatiq.data.tokenizer import PragmaTokenizer, TokenizerConfig, iter_user_records
@@ -242,7 +259,13 @@ def pretrain(
                     "staging: pre-populating local run dir from %s", _remote_run
                 )
                 _mat_dir(_remote_run, Path(runs_root) / run_name)
-        return _pretrain_inner(shard_dir, run_name, model_size, config, runs_root, resume, **overrides)
+        result = _pretrain_inner(shard_dir, run_name, model_size, config, runs_root, resume,
+                                 **overrides)
+        if _runs_root_staged:
+            # The staged local dir is uploaded then deleted when this context
+            # exits; hand back the durable remote destination instead.
+            result["run_dir"] = _orig_runs_root.rstrip("/") + "/" + run_name
+        return result
 
 
 def _pretrain_inner(

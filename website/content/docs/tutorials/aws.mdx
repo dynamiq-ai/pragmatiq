@@ -73,7 +73,7 @@ All three are bidirectional, pre-norm, GELU, `ffn = 4d` — and the whole batch 
 
 ### The Nemotron variant
 
-By default, high-cardinality text is BPE. The optional **PRAGMA+Nemotron** variant instead emits **one sentinel token** per text field and lets a *frozen* text model embed its raw string; masked text tokens are reconstructed with **MSE** against that vector, so the loss becomes $\mathcal{L} = \text{CE} + \lambda \cdot \text{MSE}$. It's switchable from the data step alone and **off by default** (the BPE path stays byte-identical) — tokenize with `configs/data/tokenizer_nemotron.yaml` and `pip install "pragmatiq[extras]"` for the frozen embedder. See [the variant page](/docs/concepts/nemotron).
+By default, high-cardinality text is BPE. The optional **PRAGMA+Nemotron** variant instead emits **one sentinel token** per text field and lets a *frozen* text model embed its raw string; masked text tokens are reconstructed with **MSE** against that vector, so the loss becomes $\mathcal{L} = \text{CE} + \lambda \cdot \text{MSE}$. It's switchable from the data step alone and **off by default** (the BPE path stays byte-identical) — tokenize with `configs/data/tokenizer_nemotron.yaml` and `pip install "pragmatiq[text]"` for the frozen embedder. See [the variant page](/docs/concepts/nemotron).
 
 ## Set up SageMaker
 
