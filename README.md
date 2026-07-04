@@ -10,7 +10,7 @@
   <a href="https://github.com/dynamiq-ai/pragmatiq/actions/workflows/ci.yml"><img alt="CI: GitHub Actions" src="https://img.shields.io/badge/ci-GitHub%20Actions-2088ff.svg"></a>
   <a href="https://github.com/dynamiq-ai/pragmatiq/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg">
-  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-f59e0b.svg">
+  <img alt="Status: stable" src="https://img.shields.io/badge/status-stable-10b981.svg">
 </p>
 
 **pragmatiq** is a developer-friendly implementation of ideas described in the
@@ -65,8 +65,7 @@ novelty over PRAGMA. The goal is to make the implementation path concrete.
 ## Quickstart
 
 ```bash
-# pragmatiq is in public beta on PyPI (a pre-release, so --pre is required):
-pip install --pre pragmatiq
+pip install pragmatiq
 pragmatiq quickstart
 ```
 
