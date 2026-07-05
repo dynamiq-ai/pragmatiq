@@ -541,7 +541,18 @@ def _run_leg_with_timeout(
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except ProcessLookupError:
                 pass  # already gone
-            proc.wait()
+            # A crashed NCCL/CUDA leg can leave ranks in uninterruptible D-state
+            # (wedged in the driver) that SIGKILL cannot reap — an unbounded
+            # wait() here hung a paid 8xH100 run for 6 hours (2026-07-05). Wait
+            # briefly, then abandon the corpse and let the run finish honestly.
+            try:
+                proc.wait(timeout=60)
+            except subprocess.TimeoutExpired:
+                print(
+                    f"[{label}] process group not reaped 60s after SIGKILL "
+                    "(GPU driver wedge?); abandoning it and continuing",
+                    flush=True,
+                )
             return -1, True
     except Exception as exc:  # noqa: BLE001
         print(f"[{label}] subprocess launch error: {exc}", flush=True)

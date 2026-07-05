@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from pathlib import Path
 
 
 def _run(cmd: list[str], env: dict[str, str]) -> None:
@@ -30,7 +31,27 @@ def _run(cmd: list[str], env: dict[str, str]) -> None:
         sys.exit(rc)
 
 
+def _tee_to_out_dir() -> None:
+    """Duplicate this orchestrator's stdout/stderr into <out>/orchestrator.log.
+
+    The launcher streams our output over SSH, and that stream has been observed
+    to drop mid-run — the pod-side copy is what makes a post-mortem possible
+    when it does. Best-effort: parses --out from the pass-through args.
+    """
+    if "--out" not in sys.argv:
+        return
+    out_dir = Path(sys.argv[sys.argv.index("--out") + 1])
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tee = subprocess.Popen(  # noqa: S603,S607 — tee is the whole point
+        ["tee", "-a", str(out_dir / "orchestrator.log")],
+        stdin=subprocess.PIPE,
+    )
+    os.dup2(tee.stdin.fileno(), sys.stdout.fileno())
+    os.dup2(tee.stdin.fileno(), sys.stderr.fileno())
+
+
 def main() -> None:
+    _tee_to_out_dir()
     env = os.environ.copy()
     for var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS",
                 "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
