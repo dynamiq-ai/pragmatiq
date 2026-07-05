@@ -1,5 +1,8 @@
 # Releasing pragmatiq
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+
 pragmatiq uses a two-branch flow:
 
 - **`develop`** — the integration branch and the default base for pull requests.
@@ -38,8 +41,9 @@ Commit the updated `uv.lock` alongside the version bump.
 bash scripts/supply_chain/gen_sbom.sh
 ```
 
-Commit the updated `sbom/` output. The CI supply-chain job verifies the SBOM on
-every push; a stale SBOM will fail CI.
+Commit the updated `sbom/` output. The CI supply-chain job regenerates an SBOM
+on every push (proving generation works) but does not compare it against the
+committed copy, so this release step is what keeps `sbom/` current.
 
 ### 4. Run the full validation suite
 

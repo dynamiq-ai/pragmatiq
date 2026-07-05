@@ -29,8 +29,8 @@ All adapters speak the same wire format defined in
 - **Container port:** `8000`
 - **Health path:** `/v2/health/ready`
 - **Infer path:** `/v2/models/pragmatiq_embedder/infer`
-- **Wire encoding:** `encode_request(records)` → raw `msgpack` bytes;
-  `decode_request(raw)` → `list[dict]`
+- **Wire encoding:** `encode_request(records)` → UTF-8 JSON bytes
+  (`json.dumps(records).encode("utf-8")`); `decode_request(raw)` → `list[dict]`
 
 The contract is tested in `tests/contract/` and is independent of the cloud
 adapter.  Every adapter's `healthcheck()` builds its request via

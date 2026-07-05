@@ -65,15 +65,19 @@ novelty over PRAGMA. The goal is to make the implementation path concrete.
 ## Quickstart
 
 ```bash
-pip install pragmatiq
+pip install "pragmatiq[train]"
 pragmatiq quickstart
 ```
+
+The `train` extra brings in Lightning, which pretraining (and therefore
+`quickstart`) runs on; a plain `pip install pragmatiq` is the slim inference
+core for embedding with an already-trained run.
 
 Or from a clone of the repo (for development):
 
 ```bash
 git clone https://github.com/dynamiq-ai/pragmatiq.git && cd pragmatiq
-pip install -e ".[dev]"
+pip install -e ".[dev,full]"
 ```
 
 `quickstart` runs a CPU-capable synthetic pipeline end to end:
@@ -90,19 +94,15 @@ For a smaller local smoke test:
 pragmatiq quickstart --n-users 2000 --max-steps 80
 ```
 
-For development from a source checkout:
-
-```bash
-pip install -e ".[dev]"
-```
-
-The full pipeline — including the gradient-boosting probe and the AML transfer-graph
-GraphSAGE ablation — works with the plain install. Optional extras add focused
-tooling: `.[serve]` for slim ONNX/Triton export and serving (no Lightning /
-torch-geometric / transformers), `.[train]` for Lightning distributed pretraining,
-`.[aml]` for the GraphSAGE transfer-graph ablation, `.[text]` for the frozen
-Nemotron text encoder, `.[tracking]` for Weights & Biases and TensorBoard mirrors,
-`.[demo]` for the Streamlit demo, and `.[full]` for all of them.
+The plain `pip install pragmatiq` is the slim inference core: validating,
+tokenizing, embedding with a trained run, the gradient-boosting probe, and LoRA
+fine-tuning all work without any extra. Training needs `.[train]` — pretraining
+runs on Lightning. The other extras add focused tooling: `.[serve]` for slim
+ONNX/Triton export and serving (no Lightning / torch-geometric / transformers),
+`.[aml]` for the GraphSAGE transfer-graph ablation (torch-geometric),
+`.[text]` for the frozen Nemotron text encoder, `.[tracking]` for Weights &
+Biases and TensorBoard mirrors, `.[data]` for the synthetic realism report
+(matplotlib), `.[demo]` for the Streamlit demo, and `.[full]` for all of them.
 
 The same workflow is available from Python:
 
@@ -606,7 +606,8 @@ Money laundering through mule rings is a **relational** problem: a mule is
 defined by who they transact with (fan-in of small credits, layering inside
 the ring, shared cash-out), not only by their own behavior. pragmatiq ships a
 transfer-graph extension that tests exactly how much of that signal a graph
-recovers. The AML GNN path is part of the core install.
+recovers. The AML GNN path needs the `aml` extra
+(`pip install "pragmatiq[aml]"`), which brings in torch-geometric.
 
 ### The pieces
 
@@ -667,7 +668,7 @@ extension that probes that gap, not a "the learned embedding wins" result. See
 ### Running it
 
 ```bash
-pip install -e .
+pip install -e ".[aml]"
 pragmatiq gnn data/tokenized --run runs/demo \
   --transfers data/synth/transfers.parquet \
   --aml-label data/synth/labels/aml.parquet \
@@ -941,10 +942,13 @@ The notebooks are the guided tour; each one runs top to bottom on CPU.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,full]"
 ```
 
-Run the fast local checks before opening a PR:
+CI installs `.[dev,full]`, and the full test suite exercises the optional
+extras (Lightning, torch-geometric, transformers, matplotlib, …) — install the
+same combination for a green local run. Run the fast local checks before
+opening a PR:
 
 ```bash
 ruff check .

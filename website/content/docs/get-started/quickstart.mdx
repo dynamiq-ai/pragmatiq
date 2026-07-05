@@ -25,13 +25,15 @@ commands below use a virtual environment so the install is isolated.
 git clone https://github.com/dynamiq-ai/pragmatiq.git
 cd pragmatiq
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+pip install -e ".[train]"
 ```
 
-The full pipeline (including the AML graph) works with the plain install. Optional
-extras add focused tooling: `.[serve]` for ONNX/Triton export, `.[extras]` for the
-frozen text embedder and experiment tracking, `.[demo]` for the Streamlit app, and
-`.[full]` for all of them.
+The `train` extra brings in Lightning, which the pretraining stage runs on; the plain
+install is the slim inference core (validate, tokenize, embed, probe with a trained
+run). Other extras add focused tooling — `.[serve]` for ONNX/Triton export, `.[aml]`
+for the transfer-graph GNN, `.[text]` for the frozen text embedder, `.[tracking]` for
+experiment tracking, `.[demo]` for the Streamlit app, `.[full]` for all of them — see
+[Install](/docs/get-started/install) for the full table.
 
 </Step>
 

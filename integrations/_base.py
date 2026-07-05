@@ -145,9 +145,11 @@ class CloudAdapter(Protocol):
         """Hit the serving contract at *endpoint* and return ``True`` if healthy.
 
         This is a LIVE operation — it sends an HTTP / SDK request to a deployed
-        endpoint and validates the response shape.  The wire format is built via
-        ``pragmatiq.inference.serve.contract.encode_request`` so every adapter
-        speaks the same format.
+        endpoint and validates the response shape.  Triton-based adapters build
+        the KServe v2 envelope via
+        ``pragmatiq.inference.serve.contract.encode_v2_request`` /
+        ``decode_v2_response``; the Databricks adapter sends the MLflow
+        ``dataframe_records`` form its pyfunc serving accepts.
 
         Args:
             endpoint: The live endpoint URL or ARN to probe.

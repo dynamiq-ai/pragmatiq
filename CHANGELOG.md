@@ -72,6 +72,25 @@ the checkpoint format.
 - **Databricks `register()` reports the real model version** — the returned
   Unity Catalog URI uses the version the registry assigned (previously
   hardcoded `/1`).
+- **Staging preserves computed results when an upload fails** — a remote-output
+  upload error no longer deletes the freshly computed local results; the error
+  names the preserved directory. Remote backends are also validated eagerly, so
+  a missing cloud extra or unknown scheme fails before compute, not after.
+- **`tokenize(tokenizer_dir=...)` produces a self-contained shard dir** — the
+  loaded tokenizer is saved into `out/tokenizer`, so downstream commands accept
+  the output (previously they rejected it with a missing-tokenizer error).
+- **CLI accepts remote URLs** — path-like CLI options no longer mangle
+  `s3://...` to `s3:/...`; `pragmatiq quickstart`, `runs list/compare`, and
+  `export` handle remote roots end to end, and `pretrain` rejects invalid
+  `--resume` values instead of silently starting a fresh run.
+- **SageMaker `package()` builds a bootable Triton bundle** — the model.tar.gz
+  now contains the Triton model repository (config + backend) wired to
+  `PRAGMATIQ_RUN`, and adapter healthchecks speak the KServe v2 envelope
+  (`encode_v2_request`/`decode_v2_response` added to the serving contract).
+- **Databricks pyfunc is loadable outside the repo** — the wrapper moved into
+  the shipped package (`pragmatiq.inference.serve.pyfunc`), `register()` pins
+  `pip_requirements`, and `predict()` accepts the DataFrame input Databricks
+  Model Serving actually delivers.
 
 ### One default change (otherwise no API changes)
 

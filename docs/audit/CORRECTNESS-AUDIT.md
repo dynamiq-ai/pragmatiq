@@ -8,7 +8,8 @@ multi-GPU work, to confirm nothing subtle broke — masking, embeddings, MLM, Lo
 the gradient-boosting probe, the optimizer, or the GPU/CPU/multi-GPU paths.
 
 **Method:** independent adversarial re-verification — for each claim, ≥2 separate agents each prompted to
-*refute* it (3 dedicated tracers on the highest-risk item), corroborated against `docs/SPEC.md` and the paper,
+*refute* it (3 dedicated tracers on the highest-risk item), corroborated against the PRAGMA paper
+(arXiv 2604.08649) and the in-repo contracts (`docs/STABILITY.md`, `tests/contract/`),
 followed by a full re-run of the test suite.
 
 ## Bottom line

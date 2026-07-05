@@ -216,6 +216,88 @@ def test_pyfunc_wrapper_class_importable_without_mlflow() -> None:
     assert PragmaPyfuncWrapper is not None
 
 
+def test_pyfunc_wrapper_lives_in_shipped_package() -> None:
+    """The wrapper class must resolve from the pragmatiq wheel, not the repo tree.
+
+    MLflow pickles the class by reference (module + qualname); a class under
+    the repo-only 'integrations' package would be unpicklable on any serving
+    cluster, where only the pragmatiq wheel is installed.
+    """
+    from integrations.databricks._pyfunc import PragmaPyfuncWrapper
+
+    assert PragmaPyfuncWrapper.__module__ == "pragmatiq.inference.serve.pyfunc"
+
+
+# ---------------------------------------------------------------------------
+# PyfuncWrapper.predict — Databricks Model Serving DataFrame inputs ([F15])
+# ---------------------------------------------------------------------------
+
+
+def test_pyfunc_wrapper_predict_from_dataframe_records_json_column(
+    nano_runtime, sample_records
+) -> None:
+    """A DataFrame with a records_json column (the signature's input name) decodes.
+
+    Databricks Model Serving converts the 'dataframe_records' JSON form into a
+    pandas DataFrame before calling predict — list(DataFrame) would yield
+    column names, never records.
+    """
+    import pandas as pd
+
+    from integrations.databricks._pyfunc import PragmaPyfuncWrapper
+    from pragmatiq.inference.serve.contract import encode_request
+
+    wrapper = PragmaPyfuncWrapper(runtime=nano_runtime)
+    df = pd.DataFrame({"records_json": [encode_request(sample_records).decode("utf-8")]})
+    result = wrapper.predict(context=None, model_input=df)
+
+    assert result.ndim == 2
+    assert result.shape[0] == len(sample_records)
+    assert result.dtype == np.float32
+
+
+def test_pyfunc_wrapper_predict_from_dataframe_of_record_fields(
+    nano_runtime, sample_records
+) -> None:
+    """A DataFrame with one column per record field converts back to records."""
+    import pandas as pd
+
+    from integrations.databricks._pyfunc import PragmaPyfuncWrapper
+
+    wrapper = PragmaPyfuncWrapper(runtime=nano_runtime)
+    df = pd.DataFrame(sample_records)
+    result = wrapper.predict(context=None, model_input=df)
+
+    assert result.ndim == 2
+    assert result.shape[0] == len(sample_records)
+    assert result.dtype == np.float32
+
+
+def test_pyfunc_wrapper_predict_from_numpy_json_array(nano_runtime, sample_records) -> None:
+    """MLflow's tensor-input path ({"inputs": ...}) delivers an ndarray of JSON strings."""
+    import json
+
+    from integrations.databricks._pyfunc import PragmaPyfuncWrapper
+
+    wrapper = PragmaPyfuncWrapper(runtime=nano_runtime)
+    arr = np.array([json.dumps(sample_records)], dtype=object)
+    result = wrapper.predict(context=None, model_input=arr)
+
+    assert result.ndim == 2
+    assert result.shape[0] == len(sample_records)
+
+
+def test_pyfunc_wrapper_predict_list_of_dicts_unchanged(nano_runtime, sample_records) -> None:
+    """The plain list[dict] path must keep working alongside the DataFrame path."""
+    from integrations.databricks._pyfunc import PragmaPyfuncWrapper
+    from pragmatiq.inference.serve.contract import encode_request
+
+    wrapper = PragmaPyfuncWrapper(runtime=nano_runtime)
+    from_list = wrapper.predict(context=None, model_input=sample_records)
+    from_bytes = wrapper.predict(context=None, model_input=encode_request(sample_records))
+    np.testing.assert_array_equal(from_list, from_bytes)
+
+
 # ---------------------------------------------------------------------------
 # package() — assembles local artifact directory
 # ---------------------------------------------------------------------------
@@ -316,8 +398,12 @@ def test_databricks_register_raises_missing_extra_when_mlflow_absent() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _install_fake_mlflow(monkeypatch, *, info_version, registry_versions=()) -> None:
-    """Install a minimal in-memory mlflow stub sufficient for register()."""
+def _install_fake_mlflow(monkeypatch, *, info_version, registry_versions=()) -> dict:
+    """Install a minimal in-memory mlflow stub sufficient for register().
+
+    Returns the dict that captures the kwargs passed to ``pyfunc.log_model``
+    so tests can assert on pip_requirements etc.
+    """
     import sys
     import types
     from contextlib import contextmanager
@@ -331,9 +417,15 @@ def _install_fake_mlflow(monkeypatch, *, info_version, registry_versions=()) -> 
     class _Info:
         registered_model_version = info_version
 
+    captured: dict = {}
+
+    def _log_model(**kwargs):
+        captured.update(kwargs)
+        return _Info()
+
     pyfunc = types.ModuleType("mlflow.pyfunc")
     pyfunc.PythonModel = _PythonModel
-    pyfunc.log_model = lambda **kwargs: _Info()
+    pyfunc.log_model = _log_model
     fake.pyfunc = pyfunc
 
     @contextmanager
@@ -353,6 +445,7 @@ def _install_fake_mlflow(monkeypatch, *, info_version, registry_versions=()) -> 
     fake.MlflowClient = _Client
     monkeypatch.setitem(sys.modules, "mlflow", fake)
     monkeypatch.setitem(sys.modules, "mlflow.pyfunc", pyfunc)
+    return captured
 
 
 def test_databricks_register_uses_returned_model_version(monkeypatch) -> None:
@@ -373,3 +466,47 @@ def test_databricks_register_falls_back_to_registry_lookup(monkeypatch) -> None:
     adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
     uri = adapter.register(str(_make_fake_run_dir()))
     assert uri == "models:/main.pragmatiq.embedder/3"
+
+
+def test_databricks_register_empty_registry_falls_back_to_version_1(monkeypatch) -> None:
+    """No ModelInfo version + empty registry search must yield /1, not ValueError.
+
+    A just-registered model has at least one version, so an empty
+    search_model_versions() result is registry eventual-consistency — the
+    initial version is 1.
+    """
+    from integrations.databricks import DatabricksAdapter
+
+    _install_fake_mlflow(monkeypatch, info_version=None, registry_versions=())
+    adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
+    uri = adapter.register(str(_make_fake_run_dir()))
+    assert uri == "models:/main.pragmatiq.embedder/1"
+
+
+def test_databricks_register_pins_pragmatiq_version(monkeypatch) -> None:
+    """register() must pass pip_requirements pinning the installed pragmatiq version.
+
+    The pickled wrapper class resolves from the pragmatiq wheel
+    (pragmatiq.inference.serve.pyfunc); without the pin, the serving cluster
+    has no dependency telling it to install the library at all.
+    """
+    import pragmatiq
+    from integrations.databricks import DatabricksAdapter
+
+    captured = _install_fake_mlflow(monkeypatch, info_version="1")
+    adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
+    adapter.register(str(_make_fake_run_dir()))
+    assert captured["pip_requirements"] == [f"pragmatiq=={pragmatiq.__version__}"]
+
+
+def test_databricks_register_logs_shipped_wrapper_class(monkeypatch) -> None:
+    """The python_model logged by register() must come from the shipped package."""
+    from integrations.databricks import DatabricksAdapter
+
+    captured = _install_fake_mlflow(monkeypatch, info_version="1")
+    adapter = DatabricksAdapter(catalog="main", schema="pragmatiq", model_name="embedder")
+    adapter.register(str(_make_fake_run_dir()))
+    logged = captured["python_model"]
+    # The dynamic subclass is defined in (and its wrapper resolves from) the
+    # shipped module, not the repo-only integrations tree.
+    assert type(logged).__module__ == "pragmatiq.inference.serve.pyfunc"
