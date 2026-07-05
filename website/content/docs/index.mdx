@@ -31,8 +31,8 @@ is silent.
 ## A 30-second tour
 
 ```bash
-pip install -e ".[dev]"     # CPU-capable; Python 3.11+
-pragmatiq quickstart        # synth -> tokenize -> pretrain -> embed -> probe
+pip install "pragmatiq[train]"   # CPU-capable; Python 3.11+; train = Lightning for pretraining
+pragmatiq quickstart             # synth -> tokenize -> pretrain -> embed -> probe
 ```
 
 `quickstart` runs the full pipeline on synthetic users and prints a credit-risk probe

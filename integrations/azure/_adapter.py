@@ -404,18 +404,21 @@ class AzureAdapter:
     # ------------------------------------------------------------------
 
     def healthcheck(self, endpoint: str) -> bool:
-        """Hit the AKS endpoint with a contract-compliant payload.
+        """Hit the AKS endpoint with a KServe v2 inference envelope.
 
-        The request payload is built offline via
-        ``pragmatiq.inference.serve.contract.encode_request`` so every adapter
-        speaks the same wire format.  The live HTTP call requires ``requests``.
+        Triton's HTTP ``/infer`` endpoint accepts the v2 JSON envelope, not the
+        raw records payload, so the request is built offline via
+        ``pragmatiq.inference.serve.contract.encode_v2_request`` — the same
+        form every Triton-based adapter uses.  The live HTTP call requires
+        ``requests``.
 
         Args:
             endpoint: The full HTTPS URL of the AKS endpoint
                       (e.g. ``"http://<aks-lb-ip>:8000"``).
 
         Returns:
-            ``True`` if the endpoint returned a valid response.
+            ``True`` if the endpoint returned a 2-D embedding matrix with one
+            row per healthcheck record.
 
         Raises:
             MissingExtraError: If the ``requests`` package is not installed.
@@ -425,17 +428,18 @@ class AzureAdapter:
         _require("requests", "requests")
         import requests  # noqa: PLC0415 — intentionally lazy
 
-        from pragmatiq.inference.serve.contract import encode_request
+        from pragmatiq.inference.serve.contract import decode_v2_response, encode_v2_request
 
         records = [{"user_id": "healthcheck", "events": [], "attributes": {}, "lifelong": []}]
-        payload = encode_request(records)
+        payload = encode_v2_request(records)
 
         infer_url = endpoint.rstrip("/") + _CONTRACT_INFER_PATH
         response = requests.post(
             infer_url,
             data=payload,
-            headers={"Content-Type": "application/octet-stream"},
+            headers={"Content-Type": "application/json"},
             timeout=30,
         )
         response.raise_for_status()
-        return True
+        emb = decode_v2_response(response.content)
+        return emb.ndim == 2 and emb.shape[0] == len(records)

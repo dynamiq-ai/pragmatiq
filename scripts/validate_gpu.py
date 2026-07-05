@@ -55,11 +55,15 @@ class _NvidiaSampler:
     Writes one CSV row per second.  No-ops when nvidia-smi is absent.
     """
 
-    def __init__(self, csv_path: Path) -> None:
+    #: Consecutive sampling failures before a single warning is printed.
+    _FAIL_LOG_AFTER = 3
+
+    def __init__(self, csv_path: Path, interval_s: float = 1.0) -> None:
         self._csv = csv_path
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._cmd = shutil.which("nvidia-smi")
+        self._interval_s = interval_s
 
     def start(self) -> None:
         if self._cmd is None:
@@ -74,10 +78,27 @@ class _NvidiaSampler:
             self._thread.join(timeout=5)
         return self._summarize()
 
+    def _sample_cmd(self) -> list[str]:
+        """nvidia-smi invocation for a single snapshot.
+
+        Deliberately no ``-l``/``--loop`` flag: loop mode never exits, so under
+        ``subprocess.run(..., timeout=5)`` every sample would raise
+        TimeoutExpired and nothing would ever be recorded.  The sampler thread
+        itself provides the cadence via ``interval_s``.
+        """
+        assert self._cmd is not None
+        return [
+            self._cmd,
+            "--query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw",
+            "--format=csv,noheader,nounits",
+        ]
+
     def _loop(self) -> None:
         fields = ["index", "utilization.gpu [%]", "memory.used [MiB]",
                   "memory.total [MiB]", "power.draw [W]"]
         wrote_header = not self._csv.exists()
+        failures = 0
+        warned = False
         with self._csv.open("a", newline="") as fh:
             writer = csv.writer(fh)
             if wrote_header:
@@ -85,10 +106,7 @@ class _NvidiaSampler:
             while not self._stop.is_set():
                 try:
                     result = subprocess.run(
-                        [self._cmd,
-                         "--query-gpu=index,utilization.gpu,memory.used,memory.total,power.draw",
-                         "--format=csv,noheader,nounits",
-                         "-l", "1"],
+                        self._sample_cmd(),
                         capture_output=True, text=True, timeout=5,
                     )
                     ts = datetime.utcnow().isoformat()
@@ -97,9 +115,18 @@ class _NvidiaSampler:
                         if len(parts) == len(fields):
                             writer.writerow([ts] + parts)
                     fh.flush()
-                except Exception:  # noqa: BLE001
-                    pass
-                self._stop.wait(1.0)
+                    failures = 0
+                except Exception as exc:  # noqa: BLE001 — sampling must never kill the run
+                    failures += 1
+                    if failures >= self._FAIL_LOG_AFTER and not warned:
+                        warned = True
+                        print(
+                            f"[nvidia-smi] {failures} consecutive sampling failures "
+                            f"(last: {exc!r}); GPU utilisation will be missing "
+                            "from the report",
+                            flush=True,
+                        )
+                self._stop.wait(self._interval_s)
 
     def _summarize(self) -> dict[str, Any]:
         if not self._csv.exists():
@@ -318,6 +345,35 @@ def _finetune_leg_failed(result: dict[str, Any]) -> bool:
     )
 
 
+def _count_failed_legs(
+    training_results: list[dict[str, Any]],
+    finetune_results: list[dict[str, Any]],
+    flash_check_result: dict[str, Any] | None,
+) -> int:
+    """Number of failed legs, for exit-code accounting.
+
+    Finetune legs go through ``_finetune_leg_failed`` — the same predicate the
+    REPORT.md verdict uses — so a leg that exits 0 without producing a
+    trustworthy AUC (NaN / -1 sentinel) still fails the run, and the exit code
+    can never disagree with the report.  A skipped flash check is not a
+    failure; only an attempted check that did not pass is.
+    """
+    failed = 0
+    for r in training_results:
+        if r.get("status") == "timeout" or r.get("returncode", 0) != 0:
+            failed += 1
+    for r in finetune_results:
+        if _finetune_leg_failed(r):
+            failed += 1
+    if (
+        flash_check_result is not None
+        and not flash_check_result.get("skipped", False)
+        and not flash_check_result.get("passed", True)
+    ):
+        failed += 1
+    return failed
+
+
 def _leg_pretrain(args: argparse.Namespace) -> None:
     """Run one pretrain leg and exit.  Invoked via subprocess by the orchestrator."""
     # Delay heavy imports until we are inside the leg (Fabric re-launch path).
@@ -509,7 +565,7 @@ def _run_pretrain_leg(
     """Run one pretrain leg via subprocess, sample GPU utilisation, parse metrics."""
     print(f"[pretrain] leg devices={devices} run={run_name}", flush=True)
     cmd = [
-        sys.executable, __file__,
+        sys.executable, "-u", __file__,
         "--_leg-pretrain",
         "--devices", str(devices),
         "--run-name", run_name,
@@ -540,10 +596,39 @@ def _run_pretrain_leg(
         "elapsed_s": round(elapsed, 1),
         "tokens_per_sec": ss["tokens_per_sec"],
         "gpu_mem_gb": ss["gpu_mem_gb"],
+        # Record the config this leg ACTUALLY ran with — OOM fallbacks change
+        # model_size/token_budget mid-sweep, and scaling efficiency is only
+        # meaningful between legs with an identical (model_size, token_budget).
+        "model_size": model_size,
+        "token_budget": token_budget,
     }
     if timed_out:
         result["status"] = "timeout"
     return result
+
+
+def _leg_efficiency(result: dict[str, Any], baseline: dict[str, Any] | None) -> float:
+    """Scaling efficiency of one sweep leg against the d=1 baseline leg.
+
+    tokens/sec ratios are only meaningful when both legs ran the identical
+    (model_size, token_budget): an OOM fallback halves the per-batch work or
+    shrinks the model, so an efficiency computed against that baseline would
+    be silently wrong.  Incomparable legs are marked ``baseline_incomparable``
+    (surfaced in REPORT.md) and get ``NaN``.
+    """
+    if baseline is None:
+        return float("nan")
+    if (result.get("model_size"), result.get("token_budget")) != (
+        baseline.get("model_size"), baseline.get("token_budget")
+    ):
+        result["baseline_incomparable"] = True
+        return float("nan")
+    d = result.get("devices", 0)
+    tps = result.get("tokens_per_sec", float("nan"))
+    tps_1 = baseline.get("tokens_per_sec", float("nan"))
+    if tps == tps and tps_1 == tps_1 and tps_1 > 0 and d > 0:
+        return tps / (d * tps_1)
+    return float("nan")
 
 
 def _training_sweep(
@@ -563,7 +648,7 @@ def _training_sweep(
 ) -> list[dict[str, Any]]:
     """Run the training scaling sweep legs and return per-leg results."""
     results: list[dict[str, Any]] = []
-    tps_1: float = float("nan")
+    baseline: dict[str, Any] | None = None  # the d=1 leg (efficiency reference)
 
     for d in devices_sweep:
         # Overall harness wall-clock cap: skip remaining legs if exceeded.
@@ -624,15 +709,19 @@ def _training_sweep(
                 break
 
         if d == 1:
-            tps_1 = result.get("tokens_per_sec", float("nan"))
+            baseline = result
 
-        # Compute scaling efficiency
+        # Scaling efficiency vs the d=1 baseline; NaN + 'baseline_incomparable'
+        # when an OOM fallback made the leg configs differ.
         tps = result.get("tokens_per_sec", float("nan"))
-        if tps == tps and tps_1 == tps_1 and tps_1 > 0 and d > 0:
-            eff = tps / (d * tps_1)
-        else:
-            eff = float("nan")
+        eff = _leg_efficiency(result, baseline)
         result["efficiency"] = eff
+        if result.get("baseline_incomparable"):
+            print(
+                f"[pretrain] d={d} efficiency=N/A — baseline incomparable "
+                "(OOM fallback changed model_size/token_budget)",
+                flush=True,
+            )
         results.append(result)
         rc = result.get("returncode", 0)
         status = result.get("status", "")
@@ -650,8 +739,9 @@ def _training_sweep(
     with csv_path.open("w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=["devices", "run_name", "tokens_per_sec",
                                             "gpu_mem_gb", "efficiency", "elapsed_s",
+                                            "model_size", "token_budget",
                                             "oom_fallback", "oom_fallback_model_size",
-                                            "token_budget_used"])
+                                            "token_budget_used", "baseline_incomparable"])
         w.writeheader()
         for r in results:
             w.writerow({k: r.get(k, "") for k in w.fieldnames})  # type: ignore[arg-type]
@@ -679,7 +769,7 @@ def _run_finetune_leg(
     """Run one finetune leg via subprocess; return timing + AUC."""
     result_json = out_dir / f"finetune_d{devices}_result.json"
     cmd = [
-        sys.executable, __file__,
+        sys.executable, "-u", __file__,
         "--_leg-finetune",
         "--devices", str(devices),
         "--shard-dir", str(shard_dir),
@@ -1495,7 +1585,13 @@ def _write_report(
     # Headline numbers
     tps_8 = next((r["tokens_per_sec"] for r in training_results if r["devices"] == 8), float("nan"))
     tps_1 = next((r["tokens_per_sec"] for r in training_results if r["devices"] == 1), float("nan"))
-    eff_8 = next((r["efficiency"] for r in training_results if r["devices"] == 8), float("nan"))
+    r8 = next((r for r in training_results if r.get("devices") == 8), None)
+    eff_8 = r8.get("efficiency", float("nan")) if r8 is not None else float("nan")
+    eff_8_note = (
+        " — baseline incomparable (OOM fallback)"
+        if r8 is not None and r8.get("baseline_incomparable")
+        else ""
+    )
 
     gpu_reqs = next((r["req_s"] for r in serving_results if r["device"] == "cuda"), float("nan"))
     cpu_reqs = next((r["req_s"] for r in serving_results if r["device"] == "cpu" and r["concurrency"] == 1), float("nan"))
@@ -1535,7 +1631,7 @@ def _write_report(
 
     if not dry_run:
         lines += [
-            f"- **8-GPU scaling efficiency:** {_fmt(eff_8, '.1%')}",
+            f"- **8-GPU scaling efficiency:** {_fmt(eff_8, '.1%')}{eff_8_note}",
             f"- **8-GPU tokens/sec:** {_fmt(tps_8, ',.0f')}",
             f"- **Serving GPU/CPU req/s speedup:** {_fmt(speedup, '.1f')}×",
             "",
@@ -1561,20 +1657,32 @@ def _write_report(
             mem = r.get("gpu_mem_gb", float("nan"))
             eff = r.get("efficiency", float("nan"))
             elapsed = r.get("elapsed_s", float("nan"))
-            notes = ""
+            note_parts: list[str] = []
             if r.get("status") == "timeout":
-                notes = "TIMEOUT (leg killed; harness continued)"
-            elif r.get("oom_fallback"):
-                notes = f"OOM fallback token_budget={r.get('token_budget_used')}"
-            elif r.get("oom_fallback_model_size"):
-                notes = "OOM fallback to model_size=medium"
+                note_parts.append("TIMEOUT (leg killed; harness continued)")
             elif r.get("returncode", 0) != 0:
-                notes = f"FAILED (rc={r.get('returncode')})"
+                note_parts.append(f"FAILED (rc={r.get('returncode')})")
+            if r.get("oom_fallback"):
+                note_parts.append(f"OOM fallback token_budget={r.get('token_budget_used')}")
+            if r.get("oom_fallback_model_size"):
+                note_parts.append("OOM fallback to model_size=medium")
+            if r.get("baseline_incomparable"):
+                note_parts.append("baseline incomparable (OOM fallback)")
+            notes = "; ".join(note_parts)
             lines.append(
                 f"| {r['devices']} | {_fmt(tps, ',.0f')} | {_fmt(mem)} | "
                 f"{_fmt(eff, '.1%')} | {_fmt(elapsed, '.0f')} | {notes} |"
             )
         lines.append("")
+
+        if any(r.get("baseline_incomparable") for r in training_results):
+            lines += [
+                "**Note:** legs marked 'baseline incomparable (OOM fallback)' ran a "
+                "different (model_size, token_budget) than the d=1 baseline leg; "
+                "their scaling efficiency is N/A rather than computed against an "
+                "incomparable baseline.",
+                "",
+            ]
 
         # Scaling shape note
         succs = [r for r in training_results if r.get("returncode", 0) == 0]
@@ -2182,23 +2290,9 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         print("[main] exit=0 (dry-run)", flush=True)
         return
 
-    failed_legs = 0
-    for r in training_results:
-        if r.get("status") == "timeout" or r.get("returncode", 0) != 0:
-            failed_legs += 1
-    for r in finetune_results:
-        if r.get("status") == "timeout" or r.get("returncode", 0) != 0:
-            failed_legs += 1
     # flash_check_result is None when skipped at the top level (dry-run / no CUDA
-    # without the explicit skip flag) and a dict otherwise.  A skipped check is
-    # not a failure; only an attempted check that returned passed=False is.
-    flash_failed = (
-        flash_check_result is not None
-        and not flash_check_result.get("skipped", False)
-        and not flash_check_result.get("passed", True)
-    )
-    if flash_failed:
-        failed_legs += 1
+    # without the explicit skip flag) and a dict otherwise.
+    failed_legs = _count_failed_legs(training_results, finetune_results, flash_check_result)
 
     if failed_legs:
         print(f"[main] exit=1 ({failed_legs} leg(s) failed)", flush=True)

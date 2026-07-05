@@ -176,7 +176,6 @@ def tokenize(
 
         if tokenizer_dir is not None:
             tok = PragmaTokenizer.load(tokenizer_dir)
-            tok_src = Path(tokenizer_dir)
         else:
             cfg_dict: dict[str, Any] = {}
             if isinstance(config, (str, Path)):
@@ -184,8 +183,11 @@ def tokenize(
             elif isinstance(config, dict):
                 cfg_dict = dict(config)
             tok = PragmaTokenizer(TokenizerConfig.from_dict(cfg_dict)).fit(data_dir, n_workers=n_workers)
-            tok.save(out / "tokenizer")
-            tok_src = out / "tokenizer"
+        # The tokenizer is persisted into the shard dir in BOTH branches: every
+        # downstream command reads out/tokenizer for the hash check, so a shard
+        # dir produced from a pre-existing tokenizer_dir must carry its own copy.
+        tok.save(out / "tokenizer")
+        tok_src = out / "tokenizer"
 
         writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard)
         # Progress total is best-effort: manifest.json may be absent or foreign
@@ -235,8 +237,17 @@ def pretrain(
 ) -> dict[str, Any]:
     """Pretrain a pragmatiq model on tokenized shards.
 
+    ``resume`` must be ``None`` (fresh run) or ``"auto"`` (resume
+    ``runs/{name}/checkpoints/last.pt``); any other value raises rather than
+    silently starting a fresh run over the existing run directory.
+
     Returns a summary dict (run name, final step, last metrics).
     """
+    if resume is not None and resume != "auto":
+        raise ValueError(
+            f"resume must be None or 'auto', got {resume!r}; a fresh run over an "
+            "existing run dir would overwrite it"
+        )
     with _staging() as stage:
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
         _orig_runs_root = str(runs_root)
@@ -608,7 +619,9 @@ def export(
     with _staging() as stage:
         run = stage.input(run)  # type: ignore[assignment]
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
+        _orig_out = str(out)
         out = stage.output(out, is_dir=False)  # type: ignore[assignment]
+        _out_staged = str(out) != _orig_out
         from pragmatiq.data.collate import VarlenCollator
         from pragmatiq.data.dataset import ShardDataset
         from pragmatiq.inference.export import export_onnx
@@ -621,7 +634,12 @@ def export(
         ds = ShardDataset(shard_dir)
         example = VarlenCollator()([ds.get(ds.user_ids[0])])
         ds.close()
-        return export_onnx(model, example, out)
+        result = export_onnx(model, example, out)
+        if _out_staged:
+            # The staged local file is uploaded then deleted when this context
+            # exits; hand back the durable remote destination instead.
+            result["out"] = _orig_out
+        return result
 
 
 def benchmark(
@@ -716,22 +734,60 @@ def quickstart(
         probe result dict (``probe_auc``/``baseline_auc``/...), and a one-line
         human summary of the credit probe AUC vs the raw-count baseline.
     """
-    out = Path(out)
-    raw, tok = out / "raw", out / "tok"
+    # Fail fast on a slim install: the pretrain stage needs the [train] extra,
+    # and discovering that only after synth + tokenize wastes the whole run.
+    from importlib.util import find_spec as _find_spec
+
+    if _find_spec("lightning") is None:
+        from pragmatiq.core.errors import MissingExtraError
+
+        raise MissingExtraError.for_extra("train", "lightning")
+    from pragmatiq.storage.fs import is_local as _is_local
+
+    raw: str | Path
+    tok: str | Path
+    runs_root: str | Path
+    label: str | Path
+    if _is_local(out):
+        out = Path(out)
+        raw, tok = out / "raw", out / "tok"
+        runs_root = out / "runs"
+        label = raw / "labels" / "default_12m.parquet"
+    else:
+        # Path() would collapse "s3://bucket" to "s3:/bucket" (a local path),
+        # so remote roots are joined as plain strings.
+        base = str(out).rstrip("/")
+        raw, tok = base + "/raw", base + "/tok"
+        runs_root = base + "/runs"
+        label = base + "/raw/labels/default_12m.parquet"
     synthesize({"n_users": n_users, "seed": seed}, out=raw, n_workers=n_workers, write_report=False)
     tokenize(raw, tok, config={"target_vocab": 28000, "n_buckets": 64})
     summary = pretrain(tok, "quickstart", model_size=model_size,
                        config={"max_steps": max_steps, "token_budget": 8192,
                                "warmup_steps": max(10, max_steps // 10)},
-                       runs_root=out / "runs")
-    res = probe(tok, summary["run_dir"], raw / "labels" / "default_12m.parquet")
+                       runs_root=runs_root)
+    res = probe(tok, summary["run_dir"], label)
     return {"run_dir": summary["run_dir"], "probe": res,
             "message": f"credit probe AUC {res['probe_auc']:.3f} vs raw-count baseline "
                        f"{res['baseline_auc']:.3f}"}
 
 
+def _remote_runs_root_missing(runs_root: str | Path) -> bool:
+    """True when ``runs_root`` is a remote URL that does not exist.
+
+    A missing LOCAL root is already handled by ``list_runs`` (returns ``[]``);
+    a missing remote root would otherwise fail inside staging with a raw
+    FileNotFoundError, so it is treated the same way as a missing local one.
+    """
+    from pragmatiq.storage.fs import exists, is_local
+
+    return not is_local(runs_root) and not exists(runs_root)
+
+
 def runs_list(runs_root: str | Path = "runs") -> list[dict[str, Any]]:
     """List runs under ``runs_root`` with their last logged step/loss/metrics."""
+    if _remote_runs_root_missing(runs_root):
+        return []
     with _staging() as stage:
         runs_root = stage.input(runs_root)  # type: ignore[assignment]
         from pragmatiq.experiments.run import list_runs
@@ -741,6 +797,8 @@ def runs_list(runs_root: str | Path = "runs") -> list[dict[str, Any]]:
 
 def runs_compare(names: list[str], runs_root: str | Path = "runs") -> list[dict[str, Any]]:
     """Compare several runs' last metrics side by side (missing runs flagged)."""
+    if _remote_runs_root_missing(runs_root):
+        return [{"name": n, "missing": True} for n in names]
     with _staging() as stage:
         runs_root = stage.input(runs_root)  # type: ignore[assignment]
         from pragmatiq.experiments.compare import compare_runs

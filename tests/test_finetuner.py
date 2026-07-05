@@ -249,6 +249,35 @@ def test_run_epoch_reshuffles_per_epoch(ft_work: Path) -> None:
         ds.close()
 
 
+def test_ddp_finetune_requires_mark_forward_method(monkeypatch) -> None:
+    """A Fabric wrapper without mark_forward_method (lightning<2.3) must fail loud.
+
+    Pre-fix the guard silently skipped when the method was missing, so a DDP
+    fine-tune on lightning 2.2.x crashed on the first batch inside Fabric (the
+    unmarked `embed_users` call) instead of failing at construction with an
+    actionable upgrade message.
+    """
+
+    class _Wrapper:
+        # Deliberately NO mark_forward_method: emulates lightning 2.2.x Fabric.
+        def __init__(self, module) -> None:  # noqa: ANN001
+            self._module = module
+
+    class _FakeFabric:
+        global_rank = 0
+        world_size = 2
+        device = torch.device("cpu")
+
+        def setup(self, module):  # noqa: ANN001
+            return _Wrapper(module)
+
+    import pragmatiq.training.pretrainer as P
+    monkeypatch.setattr(P, "_make_fabric", lambda *a, **k: _FakeFabric())
+    model = PragmaModel(ModelConfig.preset("nano", 1500))
+    with pytest.raises(RuntimeError, match="lightning>=2.3"):
+        LoRAFineTuner(model, FineTuneConfig(lora_rank=4, devices=2), device="cpu")
+
+
 def test_explicit_cpu_device_never_launches_cuda_ddp(monkeypatch) -> None:
     """device='cpu' + devices='auto' on a CUDA host must stay single-process CPU.
 

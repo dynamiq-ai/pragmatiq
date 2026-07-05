@@ -178,3 +178,41 @@ def test_ddp_nan_on_one_rank_skips_collectively_without_deadlock(
         f"consecutive-skip counter diverged across ranks: {consec} "
         "(both ranks must book the skip the same way or the run aborts inconsistently)"
     )
+
+    # (d) Only the rank whose OWN check fired (rank 1, the NaN rank) dumped, under a
+    # rank-suffixed filename. Pre-fix, EVERY rank wrote the same run/debug/nan_step0.pt
+    # concurrently — a shared-path race that could corrupt the dump.
+    debug_sets = [set(r["debug_files"]) for r in nan_results]
+    assert all(s == {"nan_step0_rank1.pt"} for s in debug_sets), (
+        f"expected exactly rank 1's rank-suffixed NaN dump in the shared debug dir, "
+        f"got {debug_sets}"
+    )
+
+
+def test_ddp_checkpoint_cadence_decision_is_collective(
+    gradaccum_fixture: dict[str, Path], tmp_path: Path,
+) -> None:
+    """Rank-skewed wall clocks must not split the periodic-checkpoint branch.
+
+    Pre-fix, each rank compared its OWN clock against ``checkpoint_every_min``; clock
+    skew let one rank enter save_checkpoint's barrier while the other issued the next
+    window's gradient all-reduce — mismatched collectives, a hang. The fix broadcasts
+    rank-0's decision, so with the clocks skewed either way both ranks must report the
+    SAME decision, and it must be rank-0's:
+
+      - rank 0 overdue, rank 1 fresh  -> every rank checkpoints (True, True);
+      - rank 0 fresh,   rank 1 overdue -> no rank checkpoints  (False, False).
+    """
+    results = _run(gradaccum_fixture, tmp_path, mode="ckpt_cadence", devices=2)
+    assert len(results) == 2
+    by_rank = sorted(results, key=lambda r: r["rank"])
+    rank0_due = [r["decision_rank0_due"] for r in by_rank]
+    rank1_due = [r["decision_rank1_due"] for r in by_rank]
+    assert rank0_due == [True, True], (
+        f"rank 0 overdue must make EVERY rank checkpoint, got {rank0_due} "
+        "(a divergent decision desyncs the ranks into mismatched collectives)"
+    )
+    assert rank1_due == [False, False], (
+        f"only rank 1 overdue: rank-0's clock is authoritative so NO rank checkpoints, "
+        f"got {rank1_due}"
+    )

@@ -61,10 +61,14 @@ def synthesize(
     n_users: int | None = None,
     seed: int | None = None,
     n_workers: int = 0,
-    write_report: bool = True,
+    write_report: bool | None = None,
     **overrides: Any,
 ) -> dict[str, Any]:
 ```
+
+`write_report=None` (the default) is auto: the realism report is written when
+`matplotlib` (the `data` extra) is importable and skipped with a logged warning
+otherwise; `True` forces it, `False` skips it.
 
 #### `tokenize`
 

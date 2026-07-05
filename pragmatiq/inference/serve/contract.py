@@ -115,6 +115,75 @@ def encode_response(emb: np.ndarray) -> np.ndarray:
     return out
 
 
+# ---------------------------------------------------------------------------
+# KServe v2 HTTP envelope helpers (additive; used by cloud-adapter healthchecks)
+# ---------------------------------------------------------------------------
+
+
+def encode_v2_request(records: list[dict]) -> bytes:
+    """Build the KServe v2 HTTP inference envelope carrying *records*.
+
+    Triton's HTTP endpoint (``POST /v2/models/<name>/infer``) — and SageMaker's
+    Triton hosting on ``/invocations`` — do not accept the raw JSON payload from
+    :func:`encode_request`; they require the v2 envelope with the payload as a
+    single BYTES element.  Send the returned body with
+    ``Content-Type: application/json``.
+
+    Args:
+        records: List of plain user-record dicts (one per user to embed).
+
+    Returns:
+        UTF-8-encoded JSON bytes of the v2 envelope::
+
+            {"inputs": [{"name": "records_json", "datatype": "BYTES",
+                         "shape": [1], "data": ["<records JSON>"]}]}
+    """
+    envelope = {
+        "inputs": [
+            {
+                "name": INPUT_NAME,
+                "datatype": INPUT_DTYPE,
+                "shape": [1],
+                "data": [json.dumps(records)],
+            }
+        ]
+    }
+    return json.dumps(envelope).encode("utf-8")
+
+
+def decode_v2_response(body: bytes | str) -> np.ndarray:
+    """Extract the embedding matrix from a KServe v2 HTTP inference response.
+
+    Args:
+        body: The raw HTTP response body (JSON bytes or str) containing an
+              ``outputs`` list, as returned by Triton's ``/infer`` endpoint.
+
+    Returns:
+        ``numpy.ndarray`` of dtype float32, reshaped to the response's declared
+        shape (``[n_users, dim]`` under this contract).
+
+    Raises:
+        ValueError: If the body is not a v2 envelope or lacks the
+                    ``embeddings`` output with ``shape``/``data``.
+    """
+    text = body.decode("utf-8") if isinstance(body, (bytes, bytearray)) else body
+    payload = json.loads(text)
+    outputs = payload.get("outputs") if isinstance(payload, dict) else None
+    if not isinstance(outputs, list) or not outputs:
+        raise ValueError("decode_v2_response: response has no 'outputs' list")
+    out = next((o for o in outputs if o.get("name") == OUTPUT_NAME), None)
+    if out is None:
+        names = [o.get("name") for o in outputs]
+        raise ValueError(
+            f"decode_v2_response: no {OUTPUT_NAME!r} output in response (outputs named {names})"
+        )
+    if "shape" not in out or "data" not in out:
+        raise ValueError(
+            f"decode_v2_response: {OUTPUT_NAME!r} output is missing 'shape' or 'data'"
+        )
+    return np.asarray(out["data"], dtype=np.float32).reshape(out["shape"])
+
+
 __all__ = [
     "INPUT_NAME",
     "OUTPUT_NAME",
@@ -124,4 +193,6 @@ __all__ = [
     "encode_request",
     "decode_request",
     "encode_response",
+    "encode_v2_request",
+    "decode_v2_response",
 ]

@@ -18,7 +18,13 @@ float list under a stable key order) so the test can compare:
   finite — the rank-divergent NaN-skip case. Tests that the collective skip
   decision keeps every rank from deadlocking on the per-window all-reduce, skips
   the step on BOTH ranks together (replicas identical), and books the consecutive
-  skip consistently across ranks.
+  skip consistently across ranks. The payload also lists the shared debug dir so
+  the test can assert only the flagged rank dumped, under a rank-suffixed name.
+- ``mode=ckpt_cadence`` (run with ``devices=2``): skews the per-rank ``last_ckpt``
+  clocks both ways and records each rank's ``_should_checkpoint`` decision. The
+  decision must be identical on every rank (rank-0's clock is authoritative) —
+  a per-rank wall-clock comparison would send one rank into save_checkpoint's
+  barrier while the other issues the next gradient all-reduce, hanging the job.
 
 With the deterministic content-keyed masker below, both paths mask each global
 micro-batch identically and the DDP run's all-reduced + globally-rescaled step must
@@ -38,6 +44,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 
 import torch
 
@@ -137,6 +144,24 @@ def main() -> int:
     world = int(getattr(trainer.fabric, "world_size", 1))
     rank = int(getattr(trainer.fabric, "global_rank", 0))
 
+    if mode == "ckpt_cadence":
+        # Skew the per-rank clocks BOTH ways: whichever way rank 0's local clock
+        # decides, every rank must land on rank-0's (broadcast) decision. Each call
+        # is a collective, so both ranks make them in the same order.
+        overdue = time.time() - cfg.checkpoint_every_min * 60.0 * 2.0
+        fresh = time.time()
+        decision_rank0_due = trainer._should_checkpoint(overdue if rank == 0 else fresh)
+        decision_rank1_due = trainer._should_checkpoint(fresh if rank == 0 else overdue)
+        payload = {"rank": rank, "world": world,
+                   "decision_rank0_due": decision_rank0_due,
+                   "decision_rank1_due": decision_rank1_due}
+        ds.close()
+        out_path = f"{out_dir}/result_{mode}_rank{rank}.json"
+        with open(out_path, "w") as f:
+            json.dump(payload, f)
+        print(f"RESULT rank{rank} -> {out_path}", flush=True)
+        return 0
+
     if mode == "ref":
         window = all_batches
         global_order = list(range(N_MICRO))  # global indices, in feed order
@@ -179,9 +204,18 @@ def main() -> int:
     else:
         trainer._consec_skips = 0
 
+    # The run dir is shared across ranks; a barrier makes every rank's NaN debug
+    # dump visible before listing, so the test can assert exactly which rank(s)
+    # dumped and that the filenames are rank-suffixed (no shared-path race).
+    barrier = getattr(trainer.fabric, "barrier", None)
+    if callable(barrier):
+        barrier()
+    dbg = run.dir / "debug"
+    debug_files = sorted(p.name for p in dbg.glob("*.pt")) if dbg.exists() else []
+
     payload = {"rank": rank, "world": world, "n_empty": n_empty, "n_micro": len(window),
                "skipped": skipped, "consec_skips": trainer._consec_skips,
-               "params": _flat_params(trainer)}
+               "debug_files": debug_files, "params": _flat_params(trainer)}
     ds.close()
     out_path = f"{out_dir}/result_{mode}_rank{rank}.json"
     with open(out_path, "w") as f:
