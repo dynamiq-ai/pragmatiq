@@ -247,7 +247,7 @@ class NebiusAdapter:
                     "python", "-m", "pragmatiq.cli", "embed",
                     "/opt/pragmatiq/shard_dir",
                     "--run", "/opt/pragmatiq/run_dir",
-                    "--out", "s3://pragmatiq-runs/embeddings/",
+                    "--out", f"s3://{self._s3_bucket}/embeddings/",
                 ],
                 "resources": {
                     "gpu_type": self._gpu_type,
