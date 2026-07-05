@@ -632,6 +632,14 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
             raise RuntimeError(
                 f"pod {pod_id} did not expose SSH in time; check the RunPod console"
             )
+        # The cap can fire while we were still polling for SSH (no subprocess
+        # existed for the watchdog to kill) — starting the paid remote command
+        # after the deadline would run it for the whole grace window for nothing.
+        if _watchdog_fired.is_set():
+            raise RuntimeError(
+                f"runtime cap expired while waiting for pod {pod_id} SSH; "
+                "not starting the remote command"
+            )
         ip, port = ssh
         print(f"pod ready at {ip}:{port}")
 
