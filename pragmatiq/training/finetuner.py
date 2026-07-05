@@ -10,6 +10,7 @@ A/B and the head are updated, so a downstream task is cheap to fit and ship
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -133,12 +134,19 @@ class LoRAFineTuner:
         self.head = self.fabric.setup(head)
         # The fine-tuner drives the backbone via `embed_users`, not `forward`.
         # DDP only synchronizes gradients through the registered forward path, so
-        # mark `embed_users` (on the Fabric wrapper) as a forward method —
-        # otherwise Fabric raises and the backbone's LoRA grads would not
-        # all-reduce. (No-op-safe if the wrapper lacks the method on old Fabric.)
+        # `embed_users` must be marked as a forward method on the Fabric wrapper —
+        # without it the first batch raises inside Fabric and the backbone's LoRA
+        # grads would never all-reduce. `mark_forward_method` exists from
+        # lightning 2.3.0 (the [train] extra pins >=2.3); its absence means a
+        # stale environment, so fail loud rather than skip and crash mid-epoch.
         mark = getattr(self.model, "mark_forward_method", None)
-        if callable(mark):
-            mark("embed_users")
+        if not callable(mark):
+            raise RuntimeError(
+                "multi-device LoRA fine-tuning requires lightning>=2.3 "
+                "(Fabric.mark_forward_method). Upgrade with "
+                "`pip install -U 'lightning>=2.3'` or run single-process (devices=1)."
+            )
+        mark("embed_users")
 
     def _trainable(self):
         yield from (p for p in self.model.parameters() if p.requires_grad)
@@ -232,10 +240,21 @@ class LoRAFineTuner:
         collator = TruncatingCollator(cutoffs) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
         probs, ys = [], []
+        # An epoch iterates every batch in the shard set (filtering to `users`),
+        # which can run for a long time at scale — heartbeat so operators and the
+        # GPU-validation harness can distinguish slow from stuck.
+        _hb_batches = _hb_users = 0
+        _hb_t0 = time.time()
         for batch in loader:
+            _hb_batches += 1
+            if _hb_batches % 200 == 0:
+                log.info("finetune %s epoch %d: %d batches, %d labeled users, %.0fs",
+                         "train" if train else "val", epoch + 1, _hb_batches,
+                         _hb_users, time.time() - _hb_t0)
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 continue
+            _hb_users += len(idx)
             batch = batch.to(self.device)
             with torch.set_grad_enabled(train):
                 z = self.model.embed_users(batch)
@@ -293,7 +312,16 @@ class LoRAFineTuner:
         local_probs: list[float] = []
         local_ys: list[int] = []
         local_uids: list[str] = []
+        # Heartbeat (rank 0 only): DDP epochs batch over the labeled subset, but
+        # large label tables still run for minutes with no output otherwise.
+        _hb_batches = 0
+        _hb_t0 = time.time()
         for batch in loader:
+            _hb_batches += 1
+            if _hb_batches % 200 == 0 and int(self.fabric.global_rank) == 0:
+                log.info("finetune %s epoch %d (ddp): %d batches/rank, %.0fs",
+                         "train" if train else "val", epoch + 1, _hb_batches,
+                         time.time() - _hb_t0)
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 # With a subset over `users`, batches always carry a selected user;

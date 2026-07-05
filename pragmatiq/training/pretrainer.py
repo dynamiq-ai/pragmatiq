@@ -9,7 +9,14 @@
   optimizers, scheduler, sampler position, RNG states (torch/numpy/cuda + the
   masking generator), tokenizer hash and resolved config (global rule 3);
 - ``resume="auto"`` picks up ``checkpoints/last.pt`` and reproduces the exact
-  batch + masking stream;
+  batch + masking stream. That bit-exact RNG guarantee is single-process only:
+  ``fabric.save`` persists rank-0's RNG states, so a multi-GPU resume restores
+  them on rank 0 and deterministically RE-DERIVES ranks > 0's streams from
+  ``seed + rank + step`` (with a logged warning) — the per-rank streams stay
+  independent but are not the ones an uninterrupted run would have drawn. A
+  resume must also use the same resolved world size as the checkpointing run
+  (enforced; ``devices="auto"`` on a different host count would otherwise
+  silently corrupt the sampler position);
 - NaN/inf loss → dump the batch to ``debug/`` and skip the step;
 - per-step logging of total loss, per-masking-type loss, MLM accuracy, grad
   norm, LR, tokens/sec, and GPU memory.
@@ -492,13 +499,11 @@ class PreTrainer:
         # loss makes all ranks skip the step (dump + zero grads + consistent skip return),
         # so replicas stay in sync and no rank steps while another skipped.
         if global_skip:
-            # Dump the offending micro-batch if THIS rank saw the non-finite loss; a rank
-            # that only skips because a PEER flagged it dumps its current last batch (best
-            # effort — its own data was finite).
-            self._dump_debug(
-                agg.get("_skip_batch", agg["_last_batch"]),
-                agg.get("_skip_masked", agg["_last_masked"]),
-            )
+            # Dump only on the rank(s) whose OWN micro-batch went non-finite; a rank that
+            # skips because a PEER flagged has finite data — a dump of it would be noise
+            # (and every rank writing at once raced on the shared debug dir pre-fix).
+            if local_skip:
+                self._dump_debug(agg["_skip_batch"], agg["_skip_masked"])
             for opt in self.optimizers:
                 opt.zero_grad(set_to_none=True)
             return {"loss": float("nan"), "skipped": 1.0}
@@ -523,8 +528,11 @@ class PreTrainer:
         else:
             avg_loss = agg["loss_sum"] / local_contributing
         # Non-finite grad skip (decided collectively above): all ranks branch together.
+        # Only ranks whose local grad check fired dump (post-all-reduce a non-finite
+        # grad usually poisons every rank, but each writes its own rank-suffixed file).
         if global_grads_nonfinite:
-            self._dump_debug(agg["_last_batch"], agg["_last_masked"])
+            if local_grads_nonfinite:
+                self._dump_debug(agg["_last_batch"], agg["_last_masked"])
             for opt in self.optimizers:
                 opt.zero_grad(set_to_none=True)
             return {"loss": avg_loss, "skipped": 1.0}
@@ -582,9 +590,15 @@ class PreTrainer:
     def _dump_debug(self, batch: PackedBatch, masked: Any) -> None:
         dbg = self.run.dir / "debug"
         dbg.mkdir(exist_ok=True)
+        # Under DDP the run dir is shared, so concurrent flagged ranks must not
+        # race on a single path — the filename carries the rank. world==1 keeps
+        # the historical un-suffixed name.
+        world = int(getattr(self.fabric, "world_size", 1))
+        rank = int(getattr(self.fabric, "global_rank", 0))
+        name = f"nan_step{self.step}.pt" if world <= 1 else f"nan_step{self.step}_rank{rank}.pt"
         torch.save({"user_ids": batch.user_ids, "key_ids": batch.key_ids.cpu(),
                     "value_ids": batch.value_ids.cpu(), "step": self.step},
-                   dbg / f"nan_step{self.step}.pt")
+                   dbg / name)
 
     # ------------------------------------------------------------------ fit
     def fit(self, loader: ShardDataLoader, resume: str | None = None,
@@ -707,11 +721,28 @@ class PreTrainer:
                         f"{metrics['tokens_per_sec']:,.0f} tok/s  eta {eta_min:.1f}m",
                         file=sys.stderr, flush=True,
                     )
-            if (time.time() - last_ckpt) / 60.0 >= self.config.checkpoint_every_min:
+            if self._should_checkpoint(last_ckpt):
                 self.save_checkpoint(loader, "last.pt")
                 last_ckpt = time.time()
         self.save_checkpoint(loader, "last.pt")
         return self.run
+
+    def _should_checkpoint(self, last_ckpt: float) -> bool:
+        """Collective periodic-checkpoint decision; rank-0's clock is authoritative.
+
+        Wall clocks skew across ranks, so a per-rank ``time.time()`` comparison can
+        send one rank into ``save_checkpoint``'s barrier while a peer issues the next
+        window's gradient all-reduce — mismatched NCCL/gloo collectives, which hang.
+        Rank 0 evaluates the cadence from its own clock and broadcasts the boolean
+        (as a device tensor; ``fabric.broadcast`` handles gloo and nccl) so every
+        rank takes the same branch at the same step. Single-process runs return the
+        local decision with no broadcast — that path is unchanged.
+        """
+        due = (time.time() - last_ckpt) / 60.0 >= self.config.checkpoint_every_min
+        if int(getattr(self.fabric, "world_size", 1)) <= 1:
+            return due
+        flag = torch.tensor([1.0 if due else 0.0], device=self.fabric.device)
+        return bool(float(self.fabric.broadcast(flag, src=0)[0]) > 0.0)
 
     # ------------------------------------------------------------------ checkpoint
     def state_dict(self, loader: ShardDataLoader) -> dict[str, Any]:
@@ -720,6 +751,10 @@ class PreTrainer:
             "format": CKPT_FORMAT,
             "step": self.step,
             "epoch": self.epoch,
+            # Resolved data-parallel world size. TrainConfig.devices="auto" passes the
+            # config equality check even when it resolves differently per host, so the
+            # sampler-position/effective-batch guard needs the RESOLVED value.
+            "world_size": int(getattr(self.fabric, "world_size", 1)),
             "tokens_seen": self._tokens_seen,
             "model": self.model.state_dict(),
             "head": self.head.state_dict(),
@@ -773,6 +808,23 @@ class PreTrainer:
             dataclasses.asdict(self.config),
             ignored=_CHECKPOINT_OPERATIONAL_KEYS,
         )
+        # The train_config check above compares devices as WRITTEN ("auto" == "auto"),
+        # so it cannot catch a resume on a different device count. The sampler position
+        # and the effective batch are sharded by the resolved world size — silently
+        # resuming across a different one corrupts both, so refuse loudly.
+        saved_world = ckpt.get("world_size")
+        current_world = int(getattr(self.fabric, "world_size", 1))
+        if saved_world is None:
+            # Additive key: checkpoints written before it existed skip the check.
+            log.debug("checkpoint predates the world_size field; skipping the resume world-size check")
+        elif int(saved_world) != current_world:
+            raise ValueError(
+                f"checkpoint was written by a world_size={int(saved_world)} run but this "
+                f"run resolved world_size={current_world} (devices='auto' resolves per "
+                "host); resuming across a different device count corrupts the sampler "
+                "position and changes the effective batch. Relaunch with the original "
+                "device count, or start a new run."
+            )
         self.model.load_state_dict(ckpt["model"])
         self.head.load_state_dict(ckpt["head"])
         for opt, st in zip(self.optimizers, ckpt["optimizers"]):
@@ -797,6 +849,28 @@ class PreTrainer:
         if self.logger is not None and getattr(self.fabric, "is_global_zero", True):
             self.logger.truncate_after(self.step)
         rng = ckpt["rng"]
+        global_rank = int(getattr(self.fabric, "global_rank", 0))
+        if current_world > 1 and global_rank > 0:
+            # fabric.save persists only global-rank-0's RNG states, so restoring them
+            # here would collapse every rank onto rank-0's streams: the per-rank
+            # masking generator (deliberately seeded seed + global_rank) and this
+            # rank's dropout stream would replay rank 0's draws. Re-derive this
+            # rank's streams deterministically instead — folding in the restored
+            # step so resumes from different checkpoints draw different
+            # continuations. These are NOT the streams an uninterrupted run would
+            # have produced (that state was never saved); world_size == 1 keeps the
+            # bit-exact restore below (the single-process resume contract).
+            reseed = self.config.seed + global_rank + self.step
+            torch.manual_seed(reseed)  # torch CPU stream + all CUDA devices (dropout)
+            np.random.seed(reseed % (2**32))
+            self.gen.manual_seed(reseed)
+            log.warning(
+                "multi-GPU resume: the checkpoint carries only rank-0's RNG states; "
+                "rank %d re-derives its masking/dropout streams from seed %d "
+                "(config.seed + rank + step) instead of restoring rank-0's.",
+                global_rank, reseed,
+            )
+            return
         torch.set_rng_state(rng["torch"])
         np.random.set_state(_unpack_numpy_state(rng["numpy"]))
         # The masking generator is device-typed; its raw state is not portable
@@ -806,7 +880,7 @@ class PreTrainer:
         if saved_dev is None or saved_dev == self.gen.device.type:
             self.gen.set_state(rng["masking_gen"])
         else:
-            reseed = self.config.seed + int(getattr(self.fabric, "global_rank", 0)) + self.step
+            reseed = self.config.seed + global_rank + self.step
             self.gen.manual_seed(reseed)
             log.warning(
                 "masking RNG was saved on %s but resuming on %s; PRNG state is not "

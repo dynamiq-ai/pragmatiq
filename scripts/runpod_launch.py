@@ -28,8 +28,10 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 REST = "https://rest.runpod.io/v1"
@@ -127,7 +129,19 @@ def _api_key() -> str:
     return key
 
 
+class RunPodAPIError(RuntimeError):
+    """A RunPod REST call failed (HTTP error or unreachable host).
+
+    Raised instead of ``sys.exit`` so that cleanup code — the watchdog thread
+    and ``_terminate_pod`` in particular — can catch it as a plain Exception.
+    ``SystemExit`` does NOT inherit from Exception, so an exiting ``_req``
+    would silently kill the watchdog daemon thread mid-cleanup and leak a
+    paid pod. Top-level CLI call sites convert this to ``sys.exit``.
+    """
+
+
 def _req(method: str, path: str, key: str, body: dict | None = None) -> dict:
+    import urllib.error
     import urllib.request
 
     req = urllib.request.Request(
@@ -140,9 +154,44 @@ def _req(method: str, path: str, key: str, body: dict | None = None) -> dict:
             raw = resp.read().decode().strip()
             return json.loads(raw) if raw else {}  # DELETE returns an empty body
     except urllib.error.HTTPError as e:  # surface the deny reason clearly
-        sys.exit(f"RunPod API {e.code}: {e.read().decode()[:300]}")
+        raise RunPodAPIError(f"RunPod API {e.code}: {e.read().decode()[:300]}") from e
     except urllib.error.URLError as e:
-        sys.exit(f"cannot reach {REST} ({e.reason}). Egress to rest.runpod.io may be blocked.")
+        raise RunPodAPIError(
+            f"cannot reach {REST} ({e.reason}). Egress to rest.runpod.io may be blocked."
+        ) from e
+
+
+def _wait_for_ssh(
+    pod_id: str,
+    key: str,
+    *,
+    attempts: int = 60,
+    interval: float = 10.0,
+    req: Callable[..., dict] = _req,
+    sleep: Callable[[float], None] = time.sleep,
+) -> tuple[str, int] | None:
+    """Poll the pod until it exposes SSH; return ``(ip, port)`` or None on timeout.
+
+    Transient API failures (rate limits, blips) consume an attempt with a
+    backed-off sleep instead of aborting: aborting here used to leak the pod
+    because termination cleanup was only armed after this loop succeeded.
+    """
+    consecutive_failures = 0
+    for _ in range(attempts):
+        try:
+            info = req("GET", f"/pods/{pod_id}", key)
+        except RunPodAPIError as exc:
+            consecutive_failures += 1
+            print(f"[poll] transient API failure ({exc}); retrying ...", file=sys.stderr)
+            sleep(min(interval * (2 ** min(consecutive_failures, 4)), 120.0))
+            continue
+        consecutive_failures = 0
+        ports = info.get("portMappings") or {}
+        ip = info.get("publicIp")
+        if ip and "22" in {str(k) for k in ports}:
+            return ip, int(ports["22"])
+        sleep(interval)
+    return None
 
 
 def _public_key_file(path: str | None) -> str | None:
@@ -230,27 +279,45 @@ def _start_pod_watchdog(
     deadline: float,
     ssh_proc_ref: list[subprocess.Popen | None],
     done_event: threading.Event,
+    fired_event: threading.Event,
+    cleanup_event: threading.Event,
+    grace_sec: float = 600.0,
+    terminate_fn: Callable[[str, str], None] | None = None,
 ) -> threading.Thread:
-    """Start a daemon watchdog thread that hard-terminates the pod at *deadline*.
+    """Start a daemon watchdog thread that enforces the runtime cap at *deadline*.
 
     The watchdog is independent of the SSH command subprocess: even if the SSH
-    connection is wedged (e.g., the remote harness is deadlocked), the pod is
-    deleted at ``deadline`` (= ``create_ts + max_runtime_min * 60``).
+    connection is wedged (e.g., the remote harness is deadlocked), the cap
+    fires at ``deadline`` (= ``create_ts + max_runtime_min * 60``).
+
+    On deadline the watchdog kills the SSH subprocess FIRST (in its own try,
+    so a later API failure can never leave the launcher blocked on SSH) and
+    sets ``fired_event``; it does NOT delete the pod yet — the main thread's
+    finally block pulls artifacts from the still-alive pod and then terminates
+    it, so a paid run's outputs survive the cap. Only if the main thread has
+    not signalled ``cleanup_event`` within ``grace_sec`` (pull hung, launcher
+    wedged) does the watchdog hard-DELETE the pod itself.
 
     Args:
-        pod_id:        RunPod pod ID to DELETE.
+        pod_id:        RunPod pod ID to DELETE at the grace deadline.
         key:           RunPod API key.
-        deadline:      ``time.time()`` timestamp at which the pod must die.
+        deadline:      ``time.time()`` timestamp at which the cap fires.
         ssh_proc_ref:  Single-element list; element 0 is the SSH subprocess (or
-                       None before it starts).  The watchdog kills it after
-                       deleting the pod so ``subprocess.run`` unblocks promptly.
+                       None before it starts).
         done_event:    Set by the caller when the run finishes normally; causes
                        the watchdog to exit without firing.
+        fired_event:   Set by the watchdog when the cap fires; the main thread
+                       uses it to force termination in its finally block.
+        cleanup_event: Set by the main thread once its finally block has
+                       terminated the pod; disarms the grace hard-DELETE.
+        grace_sec:     Seconds after firing before the hard-DELETE fallback.
+        terminate_fn:  Injectable for tests; defaults to ``_terminate_pod``.
 
     Returns:
-        The started daemon thread (already running; join it after the run to
-        ensure clean teardown).
+        The started daemon thread (already running; join it after cleanup).
     """
+    terminate = terminate_fn if terminate_fn is not None else _terminate_pod
+
     def _watch() -> None:
         remaining = deadline - time.time()
         if remaining > 0:
@@ -262,75 +329,117 @@ def _start_pod_watchdog(
             return
 
         # ---- WATCHDOG FIRES ----
-        print(
-            f"\n[WATCHDOG] deadline reached; hard-terminating pod {pod_id} "
-            "regardless of SSH command state ...",
-            file=sys.stderr,
-            flush=True,
-        )
-        _terminate_pod(pod_id, key)
-
-        # Kill the SSH subprocess so subprocess.run() unblocks in the main thread.
+        fired_event.set()
+        # Kill SSH first, in its own try: unblocking the main thread must not
+        # depend on any API call succeeding.
         proc = ssh_proc_ref[0]
         if proc is not None:
             try:
                 proc.kill()
-                print("[WATCHDOG] SSH subprocess killed.", file=sys.stderr, flush=True)
-            except Exception as exc:  # noqa: BLE001
-                print(f"[WATCHDOG] could not kill SSH subprocess: {exc}",
+                print("\n[WATCHDOG] deadline reached; SSH subprocess killed — "
+                      "main thread will pull artifacts, then terminate the pod.",
                       file=sys.stderr, flush=True)
+            except Exception as exc:  # noqa: BLE001
+                print(f"\n[WATCHDOG] could not kill SSH subprocess: {exc}",
+                      file=sys.stderr, flush=True)
+        else:
+            print("\n[WATCHDOG] deadline reached before the SSH command started.",
+                  file=sys.stderr, flush=True)
+
+        # Grace period: give the main thread time to pull artifacts and
+        # terminate the pod itself; hard-DELETE only if it never does.
+        if cleanup_event.wait(timeout=grace_sec):
+            return
+        print(f"[WATCHDOG] cleanup did not finish within {grace_sec:.0f}s grace; "
+              f"hard-terminating pod {pod_id} ...", file=sys.stderr, flush=True)
+        terminate(pod_id, key)
 
     t = threading.Thread(target=_watch, name="pod-watchdog", daemon=True)
     t.start()
     return t
 
 
+# Bulk paths excluded from the artifact pull by default: checkpoints and
+# datasets run to tens of GB on real GPU runs and blow past any sane timeout,
+# leaving a truncated (corrupt) archive. The reports, metrics CSVs, and logs
+# are what the operator actually needs after the pod dies.
+_DEFAULT_PULL_EXCLUDES: tuple[str, ...] = (
+    "*/checkpoints",
+    "checkpoints",
+    "*/data",
+    "data",
+    "*.ckpt",
+    "*.pt",
+    "*.safetensors",
+)
+
+
+def _build_pull_cmd(
+    pull_glob: str, excludes: Sequence[str] = _DEFAULT_PULL_EXCLUDES
+) -> str:
+    """Build the remote tar-over-ssh command that streams matching artifacts.
+
+    The remote shell expands ``pull_glob``; ``--exclude`` patterns must precede
+    the file operands for GNU tar to apply them during archive creation.
+    ``2>/dev/null`` suppresses "no match" noise from the remote shell.
+    """
+    exclude_opts = " ".join(f"--exclude='{p}'" for p in excludes)
+    tar_cmd = f"tar czf - {exclude_opts} {pull_glob}".replace("  ", " ")
+    return f"cd /workspace/pragmatiq && {tar_cmd} 2>/dev/null"
+
+
 def _pull_artifacts(
     ssh_base: list[str],
-    scp_base: list[str],  # kept for signature compatibility; not used (tar-over-ssh)
-    ip: str,
-    port: int,
     pull_glob: str,
     pull_dest: str,
-) -> None:
+    *,
+    timeout_sec: float = 1800.0,
+    excludes: Sequence[str] = _DEFAULT_PULL_EXCLUDES,
+) -> bool:
     """Best-effort: pull remote artifacts back to the local machine via tar-over-ssh.
 
     ``scp -r`` does NOT expand a remote glob when the path contains shell
     metacharacters — the literal string is passed to the server and silently
     pulls nothing.  Instead we stream a tar archive over SSH so the remote shell
-    expands the glob, then extract it locally.  The resulting archive is written
-    to ``<pull_dest>/pulled.tar.gz``.
+    expands the glob, then extract it locally.  The archive is streamed to
+    ``pulled.tar.gz.part`` and renamed to ``<pull_dest>/pulled.tar.gz`` only on
+    success, so a timeout or dropped connection can never leave a truncated
+    archive masquerading as a complete one; the partial file is removed.
 
-    Failures are logged as warnings and do not raise, so partial results survive
-    even when the pod terminates early.
+    Failures are logged as warnings and do not raise, so cleanup in the caller's
+    finally block always proceeds. Returns True iff the pull succeeded.
     """
     local_dest = Path(pull_dest)
     local_dest.mkdir(parents=True, exist_ok=True)
     archive = local_dest / "pulled.tar.gz"
-    # The remote shell expands the glob; 2>/dev/null suppresses "no match" noise.
-    remote_cmd = f"cd /workspace/pragmatiq && tar czf - {pull_glob} 2>/dev/null"
+    partial = archive.with_name(archive.name + ".part")
+    remote_cmd = _build_pull_cmd(pull_glob, excludes)
     try:
-        with archive.open("wb") as fh:
+        with partial.open("wb") as fh:
             subprocess.run(
                 ssh_base + [remote_cmd],
                 stdout=fh,
                 check=True,
-                timeout=300,
+                timeout=timeout_sec,
             )
         # Zero-byte archive means the glob matched nothing — treat as warning.
-        if archive.stat().st_size == 0:
-            archive.unlink(missing_ok=True)
+        if partial.stat().st_size == 0:
+            partial.unlink(missing_ok=True)
             print(f"[pull] WARNING: no files matched glob '{pull_glob}' on the pod",
                   file=sys.stderr)
-            return
+            return False
+        partial.replace(archive)
         # Extract in place so individual files are available alongside the archive.
         subprocess.run(
             ["tar", "xzf", str(archive), "-C", str(local_dest)],
-            check=True, timeout=120,
+            check=True, timeout=timeout_sec,
         )
         print(f"[pull] artifacts pulled (glob '{pull_glob}') -> {local_dest}")
+        return True
     except Exception as exc:  # noqa: BLE001
+        partial.unlink(missing_ok=True)
         print(f"[pull] WARNING: could not pull glob '{pull_glob}': {exc}", file=sys.stderr)
+        return False
 
 
 def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
@@ -363,6 +472,13 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
                          "after the run (default: outputs/gpu-validation-*).")
     ap.add_argument("--pull-dest", default=".", metavar="DIR",
                     help="Local directory to write pulled artifacts (default: current dir).")
+    ap.add_argument("--pull-timeout-sec", type=float, default=1800.0, metavar="SEC",
+                    help="Timeout for the artifact pull-back stream (default 1800). "
+                         "Raise it when pulling large artifacts over slow links.")
+    ap.add_argument("--pull-exclude", action="append", default=None, metavar="PATTERN",
+                    help="tar --exclude pattern applied to the artifact pull; repeatable. "
+                         f"Default: {' '.join(_DEFAULT_PULL_EXCLUDES)} (checkpoints and "
+                         "datasets are tens of GB and would truncate the pull).")
     # Auto-terminate / safety
     ap.add_argument("--terminate-on-done", action="store_true",
                     help="DELETE the pod on every exit path: success, exception, timeout, "
@@ -384,7 +500,10 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     # ------------------------------------------------------------------
     if args.terminate:
         key = _api_key()
-        _req("DELETE", f"/pods/{args.terminate}", key)
+        try:
+            _req("DELETE", f"/pods/{args.terminate}", key)
+        except RunPodAPIError as exc:
+            sys.exit(str(exc))
         print(f"terminated pod {args.terminate}")
         return
 
@@ -435,91 +554,117 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     if pubkey is None:
         print("warning: no SSH public key found; relying on keys registered in the RunPod account")
 
-    print(f"creating pod ({args.gpu} ×{gpu_count}, {args.cloud_type}) ...")
-    pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
-                     min_vcpu=args.min_vcpu, gpu_count=gpu_count)
-    pod_id = pod.get("id")
-    # Fix B: record creation timestamp so that sync+install time counts against
-    # the wall-clock budget, not just command execution time.
-    create_ts = time.time()
-    print(f"pod {pod_id} created; polling for SSH ...")
-
-    ssh = None
-    for _ in range(60):
-        info = _req("GET", f"/pods/{pod_id}", key)
-        ports = info.get("portMappings") or {}
-        ip = info.get("publicIp")
-        if ip and "22" in {str(k) for k in ports}:
-            ssh = (ip, int(ports["22"]))
-            break
-        time.sleep(10)
-    if ssh is None:
-        if args.terminate_on_done:
-            _terminate_pod(pod_id, key)
-        sys.exit(f"pod {pod_id} did not expose SSH in time; check the RunPod console")
-    ip, port = ssh
-    print(f"pod ready at {ip}:{port}")
-
-    # Fix D: write a gitignored sidecar so external monitoring can find the pod
-    # even when this launcher's stdout is buffered.  Best-effort: never fatal.
-    _sidecar = REPO_ROOT / ".runpod_last.json"
-    try:
-        _sidecar_data = {
-            "pod_id": pod_id,
-            "ip": ip,
-            "ssh_port": port,
-            "created": create_ts,
-        }
-        _sidecar.write_text(json.dumps(_sidecar_data, indent=2))
-        print(f"[pod-info] sidecar written: {_sidecar}")
-        print(f"[pod-info] {json.dumps(_sidecar_data)}")
-    except Exception as _sidecar_exc:  # noqa: BLE001
-        print(f"[pod-info] WARNING: could not write sidecar: {_sidecar_exc}", file=sys.stderr)
-
-    id_opt = ["-i", identity] if identity else []
-    if args.no_run:
-        print(f"skip run; SSH: ssh {' '.join(id_opt)} root@{ip} -p {port}".replace("  ", " "))
-        # CRITICAL: terminate before returning so --no-run --terminate-on-done
-        # does not leak a paid pod.  The try/finally below is never entered on
-        # this path, so termination must happen here explicitly.
-        if args.terminate_on_done:
-            _terminate_pod(pod_id, key)
-        else:
-            print(f"[info] pod still running; terminate with: "
-                  f"python scripts/runpod_launch.py --terminate {pod_id}")
-        return
-
-    ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", *id_opt, "-p", str(port), f"root@{ip}"]
-    scp_base = ["scp", "-o", "StrictHostKeyChecking=no", *id_opt, "-P", str(port)]
-
     # ------------------------------------------------------------------
-    # Install SIGINT/SIGTERM handlers so Ctrl-C / kill → finally block
-    # runs (and terminates the pod when --terminate-on-done).
+    # Install SIGINT/SIGTERM handlers BEFORE creating the pod: a Ctrl-C /
+    # kill that lands between pod creation and the try/finally below must
+    # still reach the cleanup path, or --terminate-on-done leaks a paid pod.
     # ------------------------------------------------------------------
-    _interrupted = False
-
     def _handle_signal(signum: int, _frame: object) -> None:
-        nonlocal _interrupted
         print(f"\n[signal] received signal {signum}; cleaning up ...", file=sys.stderr)
-        _interrupted = True
         # Raise KeyboardInterrupt so the try/finally fires.
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    start_time = time.monotonic()
+    print(f"creating pod ({args.gpu} ×{gpu_count}, {args.cloud_type}) ...")
+    try:
+        pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
+                         min_vcpu=args.min_vcpu, gpu_count=gpu_count)
+    except RunPodAPIError as exc:
+        sys.exit(str(exc))
+    pod_id = pod.get("id")
+    if not pod_id:
+        sys.exit(f"pod create returned no id: {json.dumps(pod)[:300]}")
+    # Record the creation timestamp: billing starts here, so both the runtime
+    # cap and the cost printout are measured from it (not from SSH-ready).
+    create_ts = time.time()
+    print(f"pod {pod_id} created; polling for SSH ...")
 
     # Exit-code tracking: stays 0 for a clean run; set to 1 on SSH non-zero,
     # watchdog kill, or any unhandled exception.  Pod termination in the
     # finally block is UNCONDITIONAL — the exit code is propagated only AFTER
     # cleanup so a failed pod run doesn't leak a paid instance.
     _exit_code = 0
+    run_started = False
+    ssh_base: list[str] | None = None
+    _watchdog_thread: threading.Thread | None = None
+    _ssh_proc_ref: list[subprocess.Popen | None] = [None]
+    _run_done = threading.Event()
+    _watchdog_fired = threading.Event()
+    _cleanup_done = threading.Event()
+    pull_excludes: tuple[str, ...] = (
+        tuple(args.pull_exclude) if args.pull_exclude else _DEFAULT_PULL_EXCLUDES
+    )
 
-    import tempfile
-
+    # The pod exists and is billing from this point: EVERY path below —
+    # SSH-poll failure, sync failure, Ctrl-C, watchdog deadline — must flow
+    # through the finally block so --terminate-on-done can clean up.
     try:
+        # ---- watchdog: armed from creation, covers polling + sync too ----
+        # The watchdog fires at create_ts + max_runtime_min*60 independently
+        # of the SSH subprocess. On firing it kills SSH and sets
+        # _watchdog_fired; the finally block pulls artifacts from the
+        # still-alive pod and then terminates it. Only if this cleanup stalls
+        # past the grace window does the watchdog hard-DELETE the pod itself.
+        if args.max_runtime_min > 0:
+            watchdog_deadline = create_ts + args.max_runtime_min * 60
+            print(
+                f"[watchdog] armed — runtime cap in ~{args.max_runtime_min:.1f} min "
+                "(measured from pod creation); artifacts are pulled before termination",
+                flush=True,
+            )
+            _watchdog_thread = _start_pod_watchdog(
+                pod_id=pod_id,
+                key=key,
+                deadline=watchdog_deadline,
+                ssh_proc_ref=_ssh_proc_ref,
+                done_event=_run_done,
+                fired_event=_watchdog_fired,
+                cleanup_event=_cleanup_done,
+                # The grace window must outlast the artifact pull, or the
+                # hard-DELETE would kill the pod mid-pull.
+                grace_sec=args.pull_timeout_sec + 120.0,
+            )
+
+        ssh = _wait_for_ssh(pod_id, key)
+        if ssh is None:
+            raise RuntimeError(
+                f"pod {pod_id} did not expose SSH in time; check the RunPod console"
+            )
+        ip, port = ssh
+        print(f"pod ready at {ip}:{port}")
+
+        # Write a gitignored sidecar so external monitoring can find the pod
+        # even when this launcher's stdout is buffered.  Best-effort: never fatal.
+        _sidecar = REPO_ROOT / ".runpod_last.json"
+        try:
+            _sidecar_data = {
+                "pod_id": pod_id,
+                "ip": ip,
+                "ssh_port": port,
+                "created": create_ts,
+            }
+            _sidecar.write_text(json.dumps(_sidecar_data, indent=2))
+            print(f"[pod-info] sidecar written: {_sidecar}")
+            print(f"[pod-info] {json.dumps(_sidecar_data)}")
+        except Exception as _sidecar_exc:  # noqa: BLE001
+            print(f"[pod-info] WARNING: could not write sidecar: {_sidecar_exc}",
+                  file=sys.stderr)
+
+        id_opt = ["-i", identity] if identity else []
+        if args.no_run:
+            print(f"skip run; SSH: ssh {' '.join(id_opt)} root@{ip} -p {port}"
+                  .replace("  ", " "))
+            # The finally block handles --terminate-on-done; nothing to pull.
+            return
+
+        ssh_base = ["ssh", "-o", "StrictHostKeyChecking=no", *id_opt,
+                    "-p", str(port), f"root@{ip}"]
+        scp_base = ["scp", "-o", "StrictHostKeyChecking=no", *id_opt, "-P", str(port)]
+
         # ---- sync repo ------------------------------------------------
+        run_started = True
         with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
             subprocess.run(["git", "archive", "--format=tar", "-o", tf.name, "HEAD"],
                            cwd=REPO_ROOT, check=True)
@@ -549,38 +694,13 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
 
         on_pod = f"set -euo pipefail\n{INSTALL}\n{run_cmd}"
 
-        # ---- run on pod with independent watchdog -----------------------
-        # Bug 2 fix: the watchdog is a daemon thread that fires at
-        # create_ts + max_runtime_min*60 and DELETEs the pod + kills the SSH
-        # subprocess — independently of subprocess.run's own timeout.  This
-        # ensures the pod is destroyed at the deadline even when the SSH
-        # command is wedged (e.g., the remote harness is deadlocked).
-        _watchdog_thread: threading.Thread | None = None
-        _ssh_proc_ref: list[subprocess.Popen | None] = [None]
-        _run_done = threading.Event()
-
-        if args.max_runtime_min > 0:
-            watchdog_deadline = create_ts + args.max_runtime_min * 60
-            remaining_for_log = watchdog_deadline - time.time()
-            print(
-                f"[watchdog] armed — pod will be HARD-terminated at deadline "
-                f"(~{remaining_for_log / 60:.1f} min from now, measured from pod creation)",
-                flush=True,
-            )
-            _watchdog_thread = _start_pod_watchdog(
-                pod_id=pod_id,
-                key=key,
-                deadline=watchdog_deadline,
-                ssh_proc_ref=_ssh_proc_ref,
-                done_event=_run_done,
-            )
-
+        # ---- run on pod (hard deadline enforced by the watchdog) -------
         try:
             ssh_cmd = ssh_base + [on_pod]
             ssh_proc = subprocess.Popen(ssh_cmd)  # noqa: S603
             _ssh_proc_ref[0] = ssh_proc
             # Wait without a Python-level timeout; the watchdog provides the
-            # hard deadline via pod-delete + proc.kill().
+            # hard deadline via proc.kill().
             ssh_proc.wait()
             if ssh_proc.returncode != 0:
                 # rc=-9 indicates a watchdog kill; any non-zero rc is a failure.
@@ -591,11 +711,15 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
                 )
         finally:
             # Signal the watchdog that the run is done so it doesn't fire.
+            # (If it already fired it is waiting on _cleanup_done instead,
+            # which the outer finally sets after terminating the pod.)
             _run_done.set()
-            if _watchdog_thread is not None:
-                _watchdog_thread.join(timeout=5)
 
-        if _exit_code == 0:
+        if _watchdog_fired.is_set():
+            _exit_code = 1
+            print("[run] runtime cap hit; pulling artifacts before termination ...",
+                  file=sys.stderr)
+        elif _exit_code == 0:
             print(f"run complete (pod {pod_id})")
 
     except KeyboardInterrupt:
@@ -605,22 +729,34 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         print(f"[error] {exc}", file=sys.stderr)
         _exit_code = 1
     finally:
-        # ---- pull artifacts (best-effort, always) --------------------
-        _pull_artifacts(ssh_base, scp_base, ip, port, args.pull, args.pull_dest)
+        # ---- pull artifacts BEFORE terminating (best-effort) ---------
+        # Ordering is deliberate: on a watchdog deadline the pod is still
+        # alive here, so the paid run's artifacts survive the cap.
+        if run_started and ssh_base is not None:
+            _pull_artifacts(ssh_base, args.pull, args.pull_dest,
+                            timeout_sec=args.pull_timeout_sec, excludes=pull_excludes)
 
-        # ---- cost estimate ------------------------------------------
-        elapsed = time.monotonic() - start_time
+        # ---- cost estimate (billing starts at pod creation) ----------
+        elapsed = time.time() - create_ts
         hours = elapsed / 3600
         cost = hours * args.usd_per_hour
-        print(f"[cost] elapsed {elapsed / 60:.1f} min; "
+        print(f"[cost] pod lifetime {elapsed / 60:.1f} min since creation; "
               f"estimated cost ~${cost:.2f} at ${args.usd_per_hour:.0f}/hr")
 
         # ---- auto-terminate (safety-critical) -----------------------
-        if args.terminate_on_done:
+        # A fired watchdog forces termination even without --terminate-on-done:
+        # --max-runtime-min promises the pod dies at the cap.
+        if args.terminate_on_done or _watchdog_fired.is_set():
             _terminate_pod(pod_id, key)
         else:
             print(f"[info] pod still running; terminate with: "
                   f"python scripts/runpod_launch.py --terminate {pod_id}")
+
+        # Disarm the watchdog's grace-period hard-DELETE and reap the thread.
+        _run_done.set()
+        _cleanup_done.set()
+        if _watchdog_thread is not None:
+            _watchdog_thread.join(timeout=5)
 
     # Propagate the remote result to the caller AFTER cleanup is done.
     if _exit_code:
