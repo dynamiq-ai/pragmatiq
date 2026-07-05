@@ -223,6 +223,104 @@ def test_sagemaker_package_artifact_details() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Triton model repository inside the tarball ([F12])
+# ---------------------------------------------------------------------------
+
+
+def _package_and_list(dest_dir: Path) -> tuple[str, list[str]]:
+    """Package a fake run and return (dest, member names) of the tarball."""
+    from integrations.sagemaker import SageMakerAdapter
+
+    run_dir = _make_fake_run_dir()
+    dest = str(dest_dir / "model.tar.gz")
+    adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
+    adapter.package(run_dir, dest=dest, image="example.amazonaws.com/img:tag")
+    with tarfile.open(dest, "r:gz") as tf:
+        names = tf.getnames()
+    return dest, names
+
+
+def test_sagemaker_package_tarball_contains_triton_model() -> None:
+    """The archive must ship the Triton model dir (config.pbtxt + 1/model.py).
+
+    Without it, SAGEMAKER_TRITON_DEFAULT_MODEL_NAME names a model that exists
+    nowhere in the repository and the endpoint can never load.
+    """
+    dest_dir = Path(tempfile.mkdtemp(prefix="pragmatiq-sm-triton-"))
+    _, names = _package_and_list(dest_dir)
+
+    assert "pragmatiq_embedder/config.pbtxt" in names, (
+        f"Archive is missing the Triton model config. Members: {names}"
+    )
+    assert "pragmatiq_embedder/1/model.py" in names, (
+        f"Archive is missing the Triton python-backend model. Members: {names}"
+    )
+
+
+def test_sagemaker_manifest_default_model_name_exists_in_tarball() -> None:
+    """SAGEMAKER_TRITON_DEFAULT_MODEL_NAME must name a model dir shipped in the tar."""
+    from integrations.sagemaker import SageMakerAdapter
+
+    dest_dir = Path(tempfile.mkdtemp(prefix="pragmatiq-sm-triton2-"))
+    _, names = _package_and_list(dest_dir)
+
+    adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
+    default_name = adapter.manifest()["model"]["env"]["SAGEMAKER_TRITON_DEFAULT_MODEL_NAME"]
+    top_level = {n.split("/")[0] for n in names}
+    assert default_name in top_level, (
+        f"Default model {default_name!r} not among tarball roots {sorted(top_level)}"
+    )
+
+
+def test_sagemaker_package_config_pbtxt_points_at_mounted_run_dir() -> None:
+    """The staged config.pbtxt run_dir parameter must match manifest() PRAGMATIQ_RUN.
+
+    The repo config ships with the docker-compose mount path (/models/run);
+    model.py prefers the config parameter over the env var, so an unrewritten
+    parameter would silently override PRAGMATIQ_RUN inside the endpoint.
+    """
+    from integrations.sagemaker import SageMakerAdapter
+
+    dest_dir = Path(tempfile.mkdtemp(prefix="pragmatiq-sm-triton3-"))
+    dest, _ = _package_and_list(dest_dir)
+
+    with tarfile.open(dest, "r:gz") as tf:
+        member = tf.extractfile("pragmatiq_embedder/config.pbtxt")
+        assert member is not None
+        config_text = member.read().decode("utf-8")
+
+    adapter = SageMakerAdapter(image="example.amazonaws.com/img:tag")
+    pragmatiq_run = adapter.manifest()["model"]["env"]["PRAGMATIQ_RUN"]
+    assert pragmatiq_run in config_text, (
+        f"config.pbtxt does not point run_dir at {pragmatiq_run!r}:\n{config_text}"
+    )
+    assert "/models/run" not in config_text, (
+        "config.pbtxt still contains the docker-compose run path /models/run, "
+        "which would override PRAGMATIQ_RUN inside the SageMaker container"
+    )
+
+
+def test_sagemaker_package_triton_model_sourced_from_repo() -> None:
+    """The staged model.py must be byte-identical to deploy/triton's copy.
+
+    The repo files are the single source of truth; package() must not ship a
+    diverged duplicate.
+    """
+    dest_dir = Path(tempfile.mkdtemp(prefix="pragmatiq-sm-triton4-"))
+    dest, _ = _package_and_list(dest_dir)
+
+    repo_model_py = (
+        Path(__file__).resolve().parents[1]
+        / "deploy" / "triton" / "model_repository" / "pragmatiq_embedder" / "1" / "model.py"
+    )
+    with tarfile.open(dest, "r:gz") as tf:
+        member = tf.extractfile("pragmatiq_embedder/1/model.py")
+        assert member is not None
+        staged = member.read()
+    assert staged == repo_model_py.read_bytes()
+
+
+# ---------------------------------------------------------------------------
 # Contract request-building — offline, no boto3
 # ---------------------------------------------------------------------------
 

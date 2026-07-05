@@ -119,6 +119,71 @@ class TestStagingRemoteInput:
             assert Path(local).read_bytes() == b"\xde\xad\xbe\xef"
 
 
+class TestStagingEagerValidation:
+    """Unknown schemes / missing backends fail at input()/output() time,
+    before the api function spends any compute."""
+
+    def test_output_unknown_scheme_fails_eagerly(self):
+        from pragmatiq.storage.staging import staging
+
+        with pytest.raises((ValueError, ImportError)):
+            with staging() as stage:
+                stage.output("bogus-scheme://bucket/out", is_dir=True)
+                raise AssertionError("output() accepted an unknown scheme")
+
+    def test_input_unknown_scheme_fails_eagerly(self):
+        from pragmatiq.storage.staging import staging
+
+        with pytest.raises((ValueError, ImportError)):
+            with staging() as stage:
+                stage.input("bogus-scheme://bucket/in")
+                raise AssertionError("input() accepted an unknown scheme")
+
+
+class TestStagingUploadFailure:
+    """An upload failure must PRESERVE the computed results, not rmtree them."""
+
+    def test_upload_failure_preserves_work_root(self, monkeypatch):
+        import importlib
+        import re
+        import shutil
+        from pathlib import Path
+
+        # `pragmatiq.storage` re-exports the staging() function under the same
+        # name as the submodule, so resolve the module object explicitly.
+        staging_mod = importlib.import_module("pragmatiq.storage.staging")
+
+        def _boom(local, remote):
+            raise OSError("simulated upload outage")
+
+        monkeypatch.setattr(staging_mod, "put_dir", _boom)
+        with pytest.raises(RuntimeError, match="preserved locally") as excinfo:
+            with staging_mod.staging() as stage:
+                local_out = Path(stage.output("memory:///preserve/dir", is_dir=True))
+                (local_out / "result.txt").write_text("expensive")
+
+        m = re.search(r"preserved locally at (\S+)", str(excinfo.value))
+        assert m, f"error does not name the preserved path: {excinfo.value}"
+        work_root = Path(m.group(1))
+        try:
+            preserved = list(work_root.rglob("result.txt"))
+            assert preserved and preserved[0].read_text() == "expensive"
+        finally:
+            shutil.rmtree(work_root, ignore_errors=True)
+
+    def test_body_exception_still_cleans_up_work_root(self):
+        from pathlib import Path
+
+        from pragmatiq.storage.staging import staging
+
+        local_out = None
+        with pytest.raises(RuntimeError, match="intentional"):
+            with staging() as stage:
+                local_out = Path(stage.output("memory:///cleanup/dir", is_dir=True))
+                raise RuntimeError("intentional")
+        assert local_out is not None and not local_out.exists()
+
+
 class TestStagingRemoteOutput:
     """Remote outputs are uploaded on clean exit; NOT on exception."""
 
@@ -411,3 +476,66 @@ def test_remote_tokenizer_dir_is_staged(tmp_path):
     assert remote_manifest["tokenizer_hash"] == local_manifest["tokenizer_hash"], (
         "remote tokenizer_dir produced a different tokenizer than the local one it mirrors"
     )
+    # The produced shard dir must be self-contained: downstream commands read
+    # out/tokenizer for the hash check, so tokenize(tokenizer_dir=...) has to
+    # persist the loaded tokenizer into the output dir too.
+    assert (tmp_path / "tok2" / "tokenizer" / "tokenizer.json").exists(), (
+        "tokenize(tokenizer_dir=...) did not persist the tokenizer into out/tokenizer"
+    )
+    assert api._read_shard_tokenizer_hash(tmp_path / "tok2") == local_manifest["tokenizer_hash"]
+
+
+def test_export_with_remote_out_returns_remote_url(tmp_path, monkeypatch):
+    """export() with a remote out must return the remote URL, not the deleted temp path.
+
+    export_onnx itself is stubbed (the ONNX toolchain is orthogonal to staging);
+    the stub writes bytes to the staged path so the upload leg is exercised.
+    """
+    from pathlib import Path
+
+    import pragmatiq.inference.export as export_mod
+
+    api.synthesize(SYNTH_CFG, out=tmp_path / "raw", write_report=False)
+    api.tokenize(tmp_path / "raw", tmp_path / "tok")
+    trained = api.pretrain(tmp_path / "tok", "export_run", model_size="nano",
+                           config=TRAIN_CFG, runs_root=tmp_path / "runs")
+
+    def _fake_export_onnx(model, example_batch, out_path, opset=18):
+        Path(out_path).write_bytes(b"onnx-bytes")
+        return {"out": str(out_path), "opset": opset, "max_abs_diff": 0.0}
+
+    monkeypatch.setattr(export_mod, "export_onnx", _fake_export_onnx)
+    remote_out = "memory:///export_test/model.onnx"
+    result = api.export(trained["run_dir"], tmp_path / "tok", out=remote_out)
+    assert result["out"] == remote_out, result["out"]
+    assert storage.read_bytes(remote_out) == b"onnx-bytes"
+
+
+def test_runs_list_missing_remote_root_returns_empty():
+    """runs_list on a nonexistent REMOTE root matches the local behaviour ([])."""
+    assert api.runs_list("memory:///no/such/runs_root") == []
+
+
+def test_runs_compare_missing_remote_root_flags_all_missing():
+    """runs_compare on a nonexistent REMOTE root flags every run as missing."""
+    res = api.runs_compare(["a", "b"], "memory:///no/such/runs_root")
+    assert res == [{"name": "a", "missing": True}, {"name": "b", "missing": True}]
+
+
+def test_quickstart_remote_out_lands_in_remote_store():
+    """quickstart(out=<remote url>) must place every stage in the remote store.
+
+    Regression guard for Bugbot finding 3523826773: child paths were built with
+    Path(out) / "raw", which collapses s3://bucket to s3:/bucket — a local path.
+    """
+    # n_users must give the credit-default probe a few positives in both split
+    # halves (default_12m prevalence is a few percent), while staying small
+    # enough for a CI-scale run.
+    res = api.quickstart(out="memory:///qs_remote", n_users=250, seed=0,
+                         model_size="nano", max_steps=2)
+    assert res["run_dir"] == "memory:///qs_remote/runs/quickstart", res["run_dir"]
+    assert storage.exists("memory:///qs_remote/raw/manifest.json")
+    assert storage.exists("memory:///qs_remote/raw/labels/default_12m.parquet")
+    assert storage.exists("memory:///qs_remote/tok/tokenizer/tokenizer.json")
+    assert storage.exists("memory:///qs_remote/runs/quickstart/meta.json")
+    assert "probe_auc" in res["probe"]

@@ -7,42 +7,35 @@ when loading from ``model_data`` (an S3 URI pointing to a ``model.tar.gz``).
 
 model.tar.gz layout (SageMaker Triton contract)
 -----------------------------------------------
-SageMaker's Triton hosting expects the following structure inside the archive
-(reference: AWS Triton on SageMaker documentation):
+SageMaker extracts ``model.tar.gz`` at ``/opt/ml/model``, and the Triton
+container treats that directory as its model repository — each top-level
+directory named like ``<model>/<version>/`` is a loadable model
+(``SAGEMAKER_TRITON_DEFAULT_MODEL_NAME`` selects which one to serve).  The
+archive therefore ships BOTH the Triton python-backend model and the run
+artifacts:
 
-    model.tar.gz
-    └── model_repository/
-        └── pragmatiq_embedder/
-            ├── config.pbtxt           (optional — Triton model config)
-            ├── checkpoints/
-            │   └── last.pt
-            └── tokenizer/
-                └── ...
-
-The ``pragmatiq_embedder`` name matches the model name used in
-``deploy/triton/Dockerfile`` and ``deploy/triton/model_repository/``.
-
-For a BYOC (Bring Your Own Container) Triton hosting pattern we place the run
-artifacts under a sub-directory that the Triton ``PRAGMATIQ_RUN`` env var
-points to, allowing the Triton model.py to call ``runtime.load(PRAGMATIQ_RUN)``
-exactly as it does in Docker.  This is the simpler and more maintainable
-approach: it decouples the packaging layout from the Triton config.pbtxt path.
-
-Final layout chosen (BYOC pattern):
-
-    model.tar.gz
+    model.tar.gz                    (extracted at /opt/ml/model)
+    ├── pragmatiq_embedder/         (Triton model — sourced from
+    │   ├── config.pbtxt             deploy/triton/model_repository/,
+    │   └── 1/                       the single source of truth)
+    │       └── model.py
     └── run_dir/
         ├── checkpoints/
         │   └── last.pt
         └── tokenizer/
             └── ...
 
-``PRAGMATIQ_RUN`` in the container environment is set to ``/opt/ml/model/run_dir``
-(SageMaker mounts the extracted tar.gz at ``/opt/ml/model``).
+The run artifacts stay OUTSIDE the model directory so the layout is
+decoupled from Triton versioning rules; ``model.py`` locates them through the
+``run_dir`` parameter in ``config.pbtxt``, which ``package()`` rewrites from
+the repo default (``/models/run``, the docker-compose mount) to
+``/opt/ml/model/run_dir``.  ``manifest()`` sets ``PRAGMATIQ_RUN`` to the same
+path — model.py prefers the config parameter, and both must agree.
 """
 
 from __future__ import annotations
 
+import re
 import shutil
 import tarfile
 import tempfile
@@ -59,6 +52,60 @@ _SM_MODEL_DIR = "/opt/ml/model"
 
 # Sub-directory name inside the tar.gz that holds the run artifacts.
 _RUN_SUBDIR = "run_dir"
+
+# Triton model name — must match the directory shipped in the tarball and the
+# SAGEMAKER_TRITON_DEFAULT_MODEL_NAME env var in manifest().
+_TRITON_MODEL_NAME = "pragmatiq_embedder"
+
+
+def _repo_triton_model_dir() -> Path:
+    """Locate ``deploy/triton/model_repository/pragmatiq_embedder`` in the repo.
+
+    The integrations package is repo-only, so the Triton model sources
+    (``config.pbtxt`` + ``1/model.py``) are resolved relative to this file
+    instead of being duplicated here — ``deploy/triton`` stays the single
+    source of truth.
+
+    Returns:
+        Path to the Triton model directory.
+
+    Raises:
+        FileNotFoundError: If the repo checkout does not contain the Triton
+                           model sources (e.g. running from an installed copy).
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    model_dir = repo_root / "deploy" / "triton" / "model_repository" / _TRITON_MODEL_NAME
+    if not (model_dir / "config.pbtxt").is_file() or not (model_dir / "1" / "model.py").is_file():
+        raise FileNotFoundError(
+            f"Triton model sources not found at {model_dir} "
+            "(expected config.pbtxt and 1/model.py). SageMakerAdapter.package() "
+            "requires a full pragmatiq repo checkout."
+        )
+    return model_dir
+
+
+def _rewrite_run_dir_param(config_text: str, run_dir_path: str) -> str:
+    """Point the config.pbtxt ``run_dir`` parameter at *run_dir_path*.
+
+    The repo config ships with the docker-compose mount path (``/models/run``).
+    Inside a SageMaker endpoint the archive lands at ``/opt/ml/model``, and
+    model.py prefers the config parameter over the ``PRAGMATIQ_RUN`` env var —
+    so an unrewritten parameter would silently override the manifest's env.
+    A config with no ``run_dir`` parameter is returned unchanged (the env var
+    then wins, which is equally correct).
+
+    Args:
+        config_text: The config.pbtxt content.
+        run_dir_path: Absolute container path of the staged run artifacts.
+
+    Returns:
+        The config text with the ``run_dir`` string_value replaced.
+    """
+    return re.sub(
+        r'(key:\s*"run_dir"\s*value:\s*\{\s*string_value:\s*")[^"]*(")',
+        lambda m: m.group(1) + run_dir_path + m.group(2),
+        config_text,
+    )
 
 
 class SageMakerAdapter:
@@ -120,12 +167,13 @@ class SageMakerAdapter:
                 # S3 URI placeholder — filled in after push()
                 "model_data_url": "<S3_URI>/model.tar.gz",
                 "env": {
-                    # The Triton model.py reads PRAGMATIQ_RUN at init time.
+                    # Same path the rewritten config.pbtxt run_dir parameter
+                    # points at — package() keeps the two in lock-step.
                     "PRAGMATIQ_RUN": f"{_SM_MODEL_DIR}/{_RUN_SUBDIR}",
                     # Set to '1' to enable GPU inference (CUDA must be available).
                     "PRAGMATIQ_SERVE_GPU": "1",
-                    # Triton-specific: enforce single-model mode for simplicity.
-                    "SAGEMAKER_TRITON_DEFAULT_MODEL_NAME": "pragmatiq_embedder",
+                    # Names the Triton model directory shipped in model.tar.gz.
+                    "SAGEMAKER_TRITON_DEFAULT_MODEL_NAME": _TRITON_MODEL_NAME,
                 },
             },
             "endpoint_config": {
@@ -157,9 +205,12 @@ class SageMakerAdapter:
     ) -> Artifact:
         """Build the SageMaker ``model.tar.gz`` locally and return an Artifact.
 
-        Stages the run directory into ``run_dir/`` inside the archive so that
-        when SageMaker extracts to ``/opt/ml/model``, the PRAGMATIQ_RUN env var
-        (set to ``/opt/ml/model/run_dir``) points to the correct location.
+        Stages the full Triton layout (see module docstring): the
+        ``pragmatiq_embedder/`` model directory (config.pbtxt + 1/model.py,
+        copied from ``deploy/triton/model_repository/``) plus the run
+        artifacts under ``run_dir/``.  The staged config.pbtxt's ``run_dir``
+        parameter is rewritten to ``/opt/ml/model/run_dir`` so it matches the
+        ``PRAGMATIQ_RUN`` env var from :meth:`manifest`.
 
         This method is fully offline — it uses stdlib ``tarfile`` + ``shutil``
         and does NOT upload to S3.  Call ``push()`` to upload after packaging.
@@ -174,19 +225,37 @@ class SageMakerAdapter:
         Returns:
             An :class:`~integrations._base.Artifact` with
             ``kind="sagemaker-model-tar"`` and ``path_or_uri=dest``.
+
+        Raises:
+            FileNotFoundError: If the repo's Triton model sources are missing.
         """
         run_dir = Path(run_dir)
         dest_path = Path(dest)
         dest_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Stage run_dir into a temp directory as run_dir/<contents>
-        with tempfile.TemporaryDirectory(prefix="pragmatiq-sm-stage-") as staging:
-            stage = Path(staging) / _RUN_SUBDIR
-            shutil.copytree(run_dir, stage)
+        inner_run_path = f"{_SM_MODEL_DIR}/{_RUN_SUBDIR}"
 
-            # Build the tar.gz from the staging root
+        with tempfile.TemporaryDirectory(prefix="pragmatiq-sm-stage-") as staging:
+            staging_root = Path(staging)
+
+            # 1. Run artifacts → run_dir/<contents>
+            shutil.copytree(run_dir, staging_root / _RUN_SUBDIR)
+
+            # 2. Triton model dir from the repo → pragmatiq_embedder/
+            triton_stage = staging_root / _TRITON_MODEL_NAME
+            shutil.copytree(_repo_triton_model_dir(), triton_stage)
+            config_path = triton_stage / "config.pbtxt"
+            config_path.write_text(
+                _rewrite_run_dir_param(
+                    config_path.read_text(encoding="utf-8"), inner_run_path
+                ),
+                encoding="utf-8",
+            )
+
+            # 3. Build the tar.gz from the staging root
             with tarfile.open(dest_path, "w:gz") as tf:
-                tf.add(stage, arcname=_RUN_SUBDIR)
+                tf.add(triton_stage, arcname=_TRITON_MODEL_NAME)
+                tf.add(staging_root / _RUN_SUBDIR, arcname=_RUN_SUBDIR)
 
         return Artifact(
             kind="sagemaker-model-tar",
@@ -195,7 +264,8 @@ class SageMakerAdapter:
                 "run_dir": str(run_dir),
                 "image": image,
                 "instance_type": self._instance_type,
-                "inner_path": f"{_SM_MODEL_DIR}/{_RUN_SUBDIR}",
+                "inner_path": inner_run_path,
+                "triton_model_name": _TRITON_MODEL_NAME,
             },
         )
 
@@ -251,43 +321,41 @@ class SageMakerAdapter:
     # ------------------------------------------------------------------
 
     def healthcheck(self, endpoint: str) -> bool:
-        """Hit the SageMaker endpoint with a contract-compliant payload.
+        """Hit the SageMaker endpoint with a KServe v2 inference envelope.
 
         LIVE operation — requires ``boto3``.  Raises :class:`MissingExtraError`
-        if boto3 is not installed.  The request payload is built offline via the
-        serving contract so every adapter speaks the same wire format.
+        if boto3 is not installed.  SageMaker's Triton hosting forwards
+        ``/invocations`` to the default model's v2 ``/infer`` endpoint, so the
+        payload is the v2 JSON envelope built offline via the serving contract
+        (``encode_v2_request``) — the same form every Triton-based adapter uses.
 
         Args:
             endpoint: SageMaker endpoint name (not ARN).
 
         Returns:
-            ``True`` if the endpoint returned a 2-D float32 response.
+            ``True`` if the endpoint returned a 2-D embedding matrix with one
+            row per healthcheck record.
 
         Raises:
             MissingExtraError: If boto3 is not installed.
         """
         _require("boto3", "boto3")
         import boto3  # noqa: PLC0415 — intentionally lazy
-        import numpy as np
 
         from pragmatiq.inference.serve.contract import (
-            encode_request,
+            decode_v2_response,
+            encode_v2_request,
         )
 
         client = boto3.client("sagemaker-runtime")
         records = [{"user_id": "healthcheck", "events": [], "attributes": {}, "lifelong": []}]
-        payload = encode_request(records)
+        payload = encode_v2_request(records)
 
         response = client.invoke_endpoint(
             EndpointName=endpoint,
-            ContentType="application/octet-stream",
-            Accept="application/octet-stream",
+            ContentType="application/json",
+            Accept="application/json",
             Body=payload,
         )
-        body = response["Body"].read()
-        # BYOC assumption: SageMaker-Triton wire format returns a raw float32
-        # buffer (no envelope); this is a LIVE-path assumption and is not
-        # unit-tested.  If the serving contract changes to add an envelope,
-        # update this to use contract.decode_response() instead.
-        arr = np.frombuffer(body, dtype=np.float32)
-        return arr.ndim >= 1 and arr.size > 0
+        emb = decode_v2_response(response["Body"].read())
+        return emb.ndim == 2 and emb.shape[0] == len(records)

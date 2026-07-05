@@ -192,10 +192,10 @@ api.pretrain("/tmp/tok", "run", model_size="small",
              config={"max_steps": 4000, "token_budget": 16384}, runs_root=out)
 ```
 
-`src/requirements.txt` — SageMaker installs this into the training container before your script runs. **This is the `pip install`** that pulls pragmatiq from PyPI into the managed job:
+`src/requirements.txt` — SageMaker installs this into the training container before your script runs. **This is the `pip install`** that pulls pragmatiq from PyPI into the managed job (the `train` extra brings in Lightning, which pretraining runs on):
 
 ```text
-pragmatiq[serve]
+pragmatiq[train]
 ```
 
 </Step>

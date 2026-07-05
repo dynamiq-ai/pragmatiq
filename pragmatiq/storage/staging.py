@@ -81,6 +81,9 @@ class Stage:
         if url is None or is_local(url):
             return url
         remote = str(url)
+        # Resolve the backend NOW so an unknown scheme or a missing cloud extra
+        # fails before the api function spends compute, not after (in _upload_all).
+        get_fs(remote)
         slot = self._next_slot()
         if is_dir:
             slot.mkdir(parents=True, exist_ok=True)
@@ -105,8 +108,11 @@ class Stage:
 def staging() -> Iterator[Stage]:
     """Context manager that provides a :class:`Stage` for one api call.
 
-    On normal exit, uploads all registered remote outputs.
-    On exception, skips uploads and cleans up the temp directory.
+    On normal exit, uploads all registered remote outputs and removes the temp
+    directory. If the body raises, uploads are skipped and the temp directory
+    is cleaned up. If the body succeeds but an UPLOAD fails, the temp directory
+    is PRESERVED — the just-computed results are the expensive part — and the
+    raised error names the local path holding them.
 
     Yields:
         A :class:`Stage` instance for staging inputs and outputs.
@@ -115,9 +121,18 @@ def staging() -> Iterator[Stage]:
     stage = Stage(work_root)
     try:
         yield stage
-        stage._upload_all()
-    finally:
+    except BaseException:
         shutil.rmtree(work_root, ignore_errors=True)
+        raise
+    try:
+        stage._upload_all()
+    except BaseException as exc:
+        raise RuntimeError(
+            f"staging upload failed after the computation succeeded; the computed "
+            f"results are preserved locally at {work_root} — copy them out or fix "
+            f"the destination and re-upload. Cause: {exc}"
+        ) from exc
+    shutil.rmtree(work_root, ignore_errors=True)
 
 
 __all__: list[str] = ["staging", "Stage"]

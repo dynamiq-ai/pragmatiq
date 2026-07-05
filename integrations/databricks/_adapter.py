@@ -88,7 +88,9 @@ class DatabricksAdapter:
         """
         return {
             "model_uri": self._model_uri,
-            "pyfunc_entry": "integrations.databricks._pyfunc:PragmaPyfuncWrapper",
+            # The wrapper lives in the SHIPPED package so serving clusters
+            # (which install only the pragmatiq wheel) can unpickle it.
+            "pyfunc_entry": "pragmatiq.inference.serve.pyfunc:PragmaPyfuncWrapper",
             "signature": {
                 "inputs": (
                     '[{"name": "records_json", "type": "binary"}]'
@@ -150,7 +152,7 @@ class DatabricksAdapter:
             "flavors:\n"
             "  python_function:\n"
             "    loader_module: mlflow.pyfunc\n"
-            "    python_model: integrations.databricks._pyfunc\n"
+            "    python_model: pragmatiq.inference.serve.pyfunc\n"
             "    artifacts:\n"
             "      run_dir: run_dir\n"
             f"model_uuid: pragmatiq-{self._catalog}-{self._schema}-{self._model_name}\n"
@@ -158,8 +160,11 @@ class DatabricksAdapter:
         )
         (dest_path / "MLmodel").write_text(mlmodel_content, encoding="utf-8")
 
-        # 3. Write a minimal requirements.txt
-        requirements = "pragmatiq\n"
+        # 3. Write a minimal requirements.txt — pinned so the serving cluster
+        # resolves the same wheel version the artifact was packaged from.
+        import pragmatiq
+
+        requirements = f"pragmatiq=={pragmatiq.__version__}\n"
         (dest_path / "requirements.txt").write_text(requirements, encoding="utf-8")
 
         return Artifact(
@@ -204,7 +209,8 @@ class DatabricksAdapter:
         _require("mlflow", "mlflow[databricks]")
         import mlflow  # noqa: PLC0415 — intentionally lazy
 
-        from integrations.databricks._pyfunc import mlflow_pyfunc_class
+        import pragmatiq
+        from pragmatiq.inference.serve.pyfunc import mlflow_pyfunc_class
 
         model_class = mlflow_pyfunc_class()
         with mlflow.start_run():
@@ -213,6 +219,10 @@ class DatabricksAdapter:
                 python_model=model_class(),
                 artifacts={"run_dir": str(Path(artifact_path) / "run_dir")},
                 registered_model_name=self._model_uri,
+                # The pickled wrapper class resolves from the pragmatiq wheel
+                # (pragmatiq.inference.serve.pyfunc), so the serving cluster
+                # must install the exact same version we logged with.
+                pip_requirements=[f"pragmatiq=={pragmatiq.__version__}"],
             )
         version = getattr(info, "registered_model_version", None)
         if version is None:
@@ -220,7 +230,13 @@ class DatabricksAdapter:
             # the newest version of this model instead of guessing.
             client = mlflow.MlflowClient()
             versions = client.search_model_versions(f"name = '{self._model_uri}'")
-            version = max(int(mv.version) for mv in versions)
+            if versions:
+                version = max(int(mv.version) for mv in versions)
+            else:
+                # A just-registered model has at least one version, so an empty
+                # result is registry eventual-consistency — the initial version
+                # is 1.
+                version = 1
         return f"models:/{self._model_uri}/{version}"
 
     # ------------------------------------------------------------------
@@ -228,18 +244,20 @@ class DatabricksAdapter:
     # ------------------------------------------------------------------
 
     def healthcheck(self, endpoint: str) -> bool:
-        """Hit a Databricks Model Serving endpoint with a contract payload.
+        """Hit a Databricks Model Serving endpoint with a pyfunc-shaped payload.
 
-        LIVE operation — requires ``requests``.  The request payload is built
-        offline via ``pragmatiq.inference.serve.contract.encode_request`` so
-        every adapter speaks the same wire format.
+        LIVE operation — requires ``requests``.  Databricks Model Serving
+        wraps pyfunc inputs in a pandas DataFrame, so the healthcheck sends
+        the ``dataframe_records`` JSON form with a single ``records_json``
+        column — exactly the DataFrame layout
+        :class:`pragmatiq.inference.serve.pyfunc.PragmaPyfuncWrapper` decodes.
 
         Args:
             endpoint: The full HTTPS URL of the Databricks serving endpoint,
                       e.g. ``"https://<workspace>.azuredatabricks.net/serving-endpoints/<name>/invocations"``.
 
         Returns:
-            ``True`` if the endpoint returned a valid response.
+            ``True`` if the endpoint returned one prediction row per record.
 
         Raises:
             MissingExtraError: If the ``requests`` package is not installed.
@@ -247,16 +265,16 @@ class DatabricksAdapter:
         _require("requests", "requests")
         import requests  # noqa: PLC0415 — intentionally lazy
 
-        from pragmatiq.inference.serve.contract import encode_request
+        from pragmatiq.inference.serve.contract import INPUT_NAME, encode_request
 
         records = [{"user_id": "healthcheck", "events": [], "attributes": {}, "lifelong": []}]
-        payload = encode_request(records)
+        body = {
+            "dataframe_records": [
+                {INPUT_NAME: encode_request(records).decode("utf-8")}
+            ]
+        }
 
-        response = requests.post(
-            endpoint,
-            data=payload,
-            headers={"Content-Type": "application/octet-stream"},
-            timeout=30,
-        )
+        response = requests.post(endpoint, json=body, timeout=30)
         response.raise_for_status()
-        return True
+        predictions = response.json().get("predictions")
+        return isinstance(predictions, list) and len(predictions) == len(records)

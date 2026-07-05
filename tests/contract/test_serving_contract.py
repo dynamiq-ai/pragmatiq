@@ -248,6 +248,94 @@ def test_encode_response_rejects_1d() -> None:
 
 
 # ---------------------------------------------------------------------------
+# KServe v2 HTTP envelope helpers (used by the cloud-adapter healthchecks)
+# ---------------------------------------------------------------------------
+
+
+def test_encode_v2_request_envelope_shape(nano_model_and_records) -> None:
+    """encode_v2_request wraps records in the KServe v2 'inputs' envelope."""
+    import json
+
+    from pragmatiq.inference.serve.contract import (
+        INPUT_DTYPE,
+        INPUT_NAME,
+        decode_request,
+        encode_v2_request,
+    )
+
+    _, records = nano_model_and_records
+    envelope = json.loads(encode_v2_request(records))
+    (inp,) = envelope["inputs"]
+    assert inp["name"] == INPUT_NAME
+    assert inp["datatype"] == INPUT_DTYPE
+    assert inp["shape"] == [1]
+    # The BYTES element carries the same JSON payload the model-side decode expects.
+    assert decode_request(inp["data"][0]) == records
+
+
+def test_decode_v2_response_roundtrip() -> None:
+    """decode_v2_response recovers the [n_users, dim] float32 matrix."""
+    import json
+
+    from pragmatiq.inference.serve.contract import OUTPUT_NAME, decode_v2_response
+
+    emb = np.arange(8, dtype=np.float32).reshape(2, 4)
+    body = json.dumps(
+        {
+            "outputs": [
+                {
+                    "name": OUTPUT_NAME,
+                    "datatype": "FP32",
+                    "shape": [2, 4],
+                    "data": emb.ravel().tolist(),
+                }
+            ]
+        }
+    ).encode("utf-8")
+
+    out = decode_v2_response(body)
+    assert out.dtype == np.float32
+    assert out.shape == (2, 4)
+    np.testing.assert_array_equal(out, emb)
+
+
+def test_decode_v2_response_accepts_str_body() -> None:
+    """decode_v2_response also accepts an already-decoded str body."""
+    import json
+
+    from pragmatiq.inference.serve.contract import OUTPUT_NAME, decode_v2_response
+
+    body = json.dumps(
+        {"outputs": [{"name": OUTPUT_NAME, "shape": [1, 2], "data": [0.5, 1.5]}]}
+    )
+    out = decode_v2_response(body)
+    assert out.shape == (1, 2)
+
+
+def test_decode_v2_response_rejects_missing_outputs() -> None:
+    """decode_v2_response raises ValueError when the body has no 'outputs' list."""
+    import json
+
+    from pragmatiq.inference.serve.contract import decode_v2_response
+
+    with pytest.raises(ValueError, match="outputs"):
+        decode_v2_response(json.dumps({"error": "model not found"}).encode())
+
+
+def test_decode_v2_response_rejects_wrong_output_name() -> None:
+    """decode_v2_response raises ValueError when the 'embeddings' output is absent."""
+    import json
+
+    from pragmatiq.inference.serve.contract import decode_v2_response
+
+    body = json.dumps(
+        {"outputs": [{"name": "something_else", "shape": [1, 2], "data": [0.0, 1.0]}]}
+    ).encode()
+    with pytest.raises(ValueError, match="embeddings"):
+        decode_v2_response(body)
+
+
+# ---------------------------------------------------------------------------
 # Runtime.embed — end-to-end contract
 # ---------------------------------------------------------------------------
 
