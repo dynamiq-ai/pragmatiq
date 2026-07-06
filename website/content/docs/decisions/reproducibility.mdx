@@ -44,6 +44,7 @@ component's property — they are the executable, reproducible definition of "wo
 
 ## Environment
 
-pragmatiq requires **Python 3.11+**. Use a virtual environment (`pip install -e ".[dev]"`),
-and run the dev commands (`pytest`, `ruff`, `mypy`) from it. The CI runs the same tools, so a
-green local run matches CI.
+pragmatiq requires **Python 3.11+**. Use a virtual environment (`pip install -e ".[dev,full]"` —
+the combination CI installs, since the full suite exercises the optional extras), and run the
+dev commands (`pytest`, `ruff`, `mypy`) from it. The CI runs the same tools, so a green local
+run matches CI.

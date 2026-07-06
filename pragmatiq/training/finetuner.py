@@ -9,7 +9,9 @@ A/B and the head are updated, so a downstream task is cheap to fit and ship
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +25,7 @@ from ..models.heads import ClassificationHead  # noqa: F401  (registers @registe
 from ..models.lora import inject_lora, mark_only_lora_trainable
 from ..models.pragmatiq import PragmaModel
 from ..registry import get_head
+from .pretrainer import resolve_device_count
 from .probe import _load_label_table, cutoffs_from_labels
 
 log = logging.getLogger(__name__)
@@ -72,6 +75,15 @@ class FineTuneConfig:
     # Task head, resolved from the registry by name (rule 8) so configs can
     # swap in a custom @register_head without forking the fine-tuner.
     head: str = "classification"
+    # Multi-device / multi-node DDP (Fabric), mirroring TrainConfig. devices: a
+    # per-node device count or "auto" (all visible GPUs, else a single CPU
+    # process); num_nodes: hosts in the job. When the resolved world size is 1
+    # the fine-tuner takes the single-process path UNCHANGED (no Fabric); when it
+    # is > 1 each rank trains a disjoint, equal-length slice and the validation
+    # AUC is gathered across ranks so the early-stop decision is identical
+    # everywhere (otherwise the ranks diverge and DDP hangs).
+    devices: int | str = "auto"
+    num_nodes: int = 1
 
 
 class LoRAFineTuner:
@@ -80,17 +92,85 @@ class LoRAFineTuner:
     def __init__(self, model: PragmaModel, config: FineTuneConfig, device: str = "cpu") -> None:
         self.config = config
         self.device = device
-        self.model = model.to(device)
-        for p in self.model.parameters():
+        # Resolve the data-parallel world size early so the single-process path
+        # (world == 1) can stay byte-identical: it never touches Fabric, while
+        # world > 1 routes through the DDP path. resolve_device_count is shared
+        # with the pretrainer, so "auto"/numeric-string handling matches.
+        # CUDA is gated on the caller's resolved device, not bare availability:
+        # an explicit device="cpu" on a CUDA host must stay a CPU run (and with
+        # devices="auto", a single process), never a CUDA DDP launch.
+        use_cuda = torch.cuda.is_available() and str(device).startswith("cuda")
+        world = resolve_device_count(config.devices, use_cuda) * max(1, config.num_nodes)
+        self._ddp = world > 1
+        self.fabric: Any = None
+        if not self._ddp:
+            # ---- single-process path: UNCHANGED (no Fabric) ----
+            self.model = model.to(device)
+            for p in self.model.parameters():
+                p.requires_grad_(False)
+            self.n_adapted = inject_lora(self.model, rank=config.lora_rank, alpha=config.lora_alpha)
+            mark_only_lora_trainable(self.model)
+            head_cls = get_head(config.head)
+            self.head = head_cls(model.config.dim, n_classes=config.n_classes).to(device)
+            return
+        # ---- DDP path (world > 1): mirror the pretrainer ----
+        from .pretrainer import _make_fabric, seed_everything
+
+        self.fabric = _make_fabric(config.devices, num_nodes=config.num_nodes,
+                                   accelerator="cuda" if use_cuda else "cpu")
+        # Per-rank seed offset so LoRA init / any sampling draws an independent
+        # stream on each rank (the global seed was already applied by the caller;
+        # single-process keeps the base seed via the world==1 branch above).
+        seed_everything(config.seed + int(self.fabric.global_rank))
+        model = model.to(self.fabric.device)
+        for p in model.parameters():
             p.requires_grad_(False)
-        self.n_adapted = inject_lora(self.model, rank=config.lora_rank, alpha=config.lora_alpha)
-        mark_only_lora_trainable(self.model)
+        self.n_adapted = inject_lora(model, rank=config.lora_rank, alpha=config.lora_alpha)
+        mark_only_lora_trainable(model)
         head_cls = get_head(config.head)
-        self.head = head_cls(model.config.dim, n_classes=config.n_classes).to(device)
+        head = head_cls(model.config.dim, n_classes=config.n_classes)
+        # Fabric wraps the modules for DDP; the unwrapped modules are still
+        # reachable via `.module` for best-state save/restore (see fit()).
+        self.model = self.fabric.setup(model)
+        self.head = self.fabric.setup(head)
+        # The fine-tuner drives the backbone via `embed_users`, not `forward`.
+        # DDP only synchronizes gradients through the registered forward path, so
+        # `embed_users` must be marked as a forward method on the Fabric wrapper —
+        # without it the first batch raises inside Fabric and the backbone's LoRA
+        # grads would never all-reduce. `mark_forward_method` exists from
+        # lightning 2.3.0 (the [train] extra pins >=2.3); its absence means a
+        # stale environment, so fail loud rather than skip and crash mid-epoch.
+        mark = getattr(self.model, "mark_forward_method", None)
+        if not callable(mark):
+            raise RuntimeError(
+                "multi-device LoRA fine-tuning requires lightning>=2.3 "
+                "(Fabric.mark_forward_method). Upgrade with "
+                "`pip install -U 'lightning>=2.3'` or run single-process (devices=1)."
+            )
+        mark("embed_users")
 
     def _trainable(self):
         yield from (p for p in self.model.parameters() if p.requires_grad)
         yield from self.head.parameters()
+
+    @staticmethod
+    def _unwrap(module: Any) -> Any:
+        """Return the underlying ``nn.Module`` behind a Fabric/DDP wrapper.
+
+        Fabric's ``setup`` returns a ``_FabricModule`` (which itself wraps a DDP
+        ``DistributedDataParallel``); their ``state_dict()`` keys carry wrapper
+        prefixes. Best-state save/restore must use the plain module so the saved
+        keys match the single-process layout (``module.module`` peels both the
+        ``_FabricModule`` and the DDP wrapper). In the single-process path the
+        attribute is absent, so the module is returned unchanged.
+        """
+        # `_FabricModule.module` -> DDP wrapper; DDP `.module` -> the real model.
+        for _ in range(2):
+            inner = getattr(module, "module", None)
+            if inner is None:
+                break
+            module = inner
+        return module
 
     def fit(self, dataset: ShardDataset, label_path: str | Path) -> dict[str, Any]:
         """Train on a label table; returns best val metrics and the fitted modules.
@@ -109,18 +189,30 @@ class LoRAFineTuner:
 
         opt = torch.optim.AdamW(self._trainable(), lr=self.config.lr,
                                 weight_decay=self.config.weight_decay)
+        if self._ddp:
+            opt = self.fabric.setup_optimizers(opt)
+        # Best-state is saved/restored on the UNWRAPPED modules so the keys match
+        # the single-process layout (and are identical on every rank: the LoRA/head
+        # weights are DDP-synchronized and the AUC driving the decision is global).
+        model_mod, head_mod = self._unwrap(self.model), self._unwrap(self.head)
         best_auc, best_state, bad = -1.0, None, 0
         history = []
+        run_epoch = self._run_epoch_ddp if self._ddp else self._run_epoch
         for _epoch in range(self.config.max_epochs):
-            self._run_epoch(dataset, train_users, label_of, opt, train=True)
-            val_auc = self._run_epoch(dataset, val_users, label_of, opt, train=False)
+            run_epoch(dataset, train_users, label_of, opt, train=True, epoch=_epoch)
+            val_auc = run_epoch(dataset, val_users, label_of, opt, train=False, epoch=_epoch)
             history.append(val_auc)
             log.info("finetune epoch %d/%d  val_auc %.4f  best %.4f",
                      _epoch + 1, self.config.max_epochs, val_auc, max(best_auc, val_auc))
+            # val_auc is identical on every rank (the single-process path computes
+            # it locally; the DDP path gathers val logits+labels across ranks before
+            # scoring), so the early-stop decision below fires in lockstep — no rank
+            # can break while another keeps iterating, which would deadlock the next
+            # epoch's all-reduce.
             if val_auc > best_auc + 1e-4:
                 best_auc, bad = val_auc, 0
-                best_state = {"head": {k: v.detach().clone() for k, v in self.head.state_dict().items()},
-                              "lora": {k: v.detach().clone() for k, v in self.model.state_dict().items()
+                best_state = {"head": {k: v.detach().clone() for k, v in head_mod.state_dict().items()},
+                              "lora": {k: v.detach().clone() for k, v in model_mod.state_dict().items()
                                        if "lora" in k}}
             else:
                 bad += 1
@@ -131,42 +223,174 @@ class LoRAFineTuner:
             # adapters, so the model a caller serves (or ``merge_lora``s) matches
             # the reported ``best_val_auc``. The saved LoRA tensors are a partial
             # state dict over the adapter keys only, hence strict=False.
-            self.head.load_state_dict(best_state["head"])
-            self.model.load_state_dict(best_state["lora"], strict=False)
+            head_mod.load_state_dict(best_state["head"])
+            model_mod.load_state_dict(best_state["lora"], strict=False)
         return {"best_val_auc": best_auc, "epochs_run": len(history), "n_adapted": self.n_adapted,
                 "val_auc_history": history}
 
     def _run_epoch(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
-                   opt: torch.optim.Optimizer, train: bool) -> float:
+                   opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
         from sklearn.metrics import roc_auc_score
 
         self.model.train(train)
         self.head.train(train)
+        # Batch only this split's users (mirrors the DDP path's subset sampler).
+        # Iterating the full shard set and discarding unlabeled users made an
+        # epoch cost O(dataset) instead of O(labels) — a 3-epoch fine-tune of a
+        # 100k-user shard set would have run ~21 hours on an A100 (measured
+        # 2026-07-06) even though only a fraction of users carried labels.
+        pos_of = {u: i for i, u in enumerate(dataset.index.order)}
+        subset = sorted(pos_of[u] for u in users if u in pos_of)
         sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
-                                      shuffle=train, seed=self.config.seed)
-        sampler.set_epoch(0)
+                                      shuffle=train, seed=self.config.seed, subset=subset)
+        sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
         probs, ys = [], []
+        # Long epochs still need a liveness signal at scale — heartbeat so
+        # operators and the GPU-validation harness can tell slow from stuck.
+        _hb_batches = _hb_users = 0
+        _hb_t0 = time.time()
         for batch in loader:
+            _hb_batches += 1
+            if _hb_batches % 200 == 0:
+                log.info("finetune %s epoch %d: %d batches, %d labeled users, %.0fs",
+                         "train" if train else "val", epoch + 1, _hb_batches,
+                         _hb_users, time.time() - _hb_t0)
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 continue
+            _hb_users += len(idx)
             batch = batch.to(self.device)
+            # On CUDA, run the forward under bf16 autocast — this is what routes
+            # attention through the flash varlen kernel (which requires bf16/fp16)
+            # with O(L) memory. The fp32 path falls back to SDPA's O(L^2) score
+            # matrix, and with the backbone's activations retained for the LoRA
+            # backward a single long-history user OOMs an 80 GB card on the
+            # 'large' preset (observed 2026-07-06). The DDP path already trains
+            # bf16-mixed via Fabric; this aligns the single-process path. CPU
+            # stays fp32 (nullcontext), preserving the byte-identical contract.
+            autocast = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                        if str(self.device).startswith("cuda")
+                        else contextlib.nullcontext())
             with torch.set_grad_enabled(train):
-                z = self.model.embed_users(batch)
-                logits = self.head(z)
-                sel = torch.tensor(idx, device=self.device)
-                y = torch.tensor([label_of[batch.user_ids[i]] for i in idx], device=self.device)
-                loss = torch.nn.functional.cross_entropy(logits[sel], y)
+                with autocast:
+                    z = self.model.embed_users(batch)
+                    logits = self.head(z)
+                    sel = torch.tensor(idx, device=self.device)
+                    y = torch.tensor([label_of[batch.user_ids[i]] for i in idx],
+                                     device=self.device)
+                    loss = torch.nn.functional.cross_entropy(logits[sel], y)
                 if train:
+                    # backward runs outside autocast (torch re-autocasts saved
+                    # ops itself); bf16 needs no GradScaler, grads are fp32.
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
                     opt.step()
-                probs.extend(torch.softmax(logits[sel], -1)[:, 1].detach().cpu().tolist())
+                probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
                 ys.extend(y.cpu().tolist())
         if not train and len(set(ys)) > 1:
+            return float(roc_auc_score(ys, probs))
+        return float("nan")
+
+    def _run_epoch_ddp(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
+                       opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
+        """DDP epoch: each rank trains a disjoint, equal-length slice and the
+        validation AUC is computed over the FULL val set gathered across ranks.
+
+        Mirrors the pretrainer's data-parallel loop (``set_replica_info`` +
+        ``fabric.backward``). Two correctness points keep DDP from hanging:
+
+        * The sampler is restricted to ``users`` via ``subset`` (so every yielded
+          batch has ≥1 selected user) and padded to a multiple of the world size,
+          so every rank runs the SAME number of ``fabric.backward`` calls — an
+          unequal count would deadlock the gradient all-reduce.
+        * The validation AUC is computed from logits+labels gathered across ALL
+          ranks, so ``val_auc`` (and thus the early-stop decision) is identical on
+          every rank. Gathering uneven-length per-rank results uses
+          ``all_gather_object`` (no padding needed); duplicates introduced by the
+          sampler's replica padding are removed by de-duplicating on ``user_id``,
+          so the gathered val AUC matches the single-process AUC over the same set.
+        """
+        import torch.distributed as dist
+        from sklearn.metrics import roc_auc_score
+
+        self.model.train(train)
+        self.head.train(train)
+        # Restrict batching to this split's users (by index position) so no batch
+        # is empty after filtering — the per-batch backward count is then governed
+        # solely by the sampler's replica padding (equal across ranks).
+        pos_of = {u: i for i, u in enumerate(dataset.index.order)}
+        subset = sorted(pos_of[u] for u in users if u in pos_of)
+        sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
+                                      shuffle=train, seed=self.config.seed, subset=subset)
+        sampler.set_replica_info(int(self.fabric.world_size), int(self.fabric.global_rank))
+        sampler.set_epoch(epoch)
+        cutoffs = getattr(self, "_cutoffs", None)
+        collator = TruncatingCollator(cutoffs) if cutoffs else None
+        loader = ShardDataLoader(dataset, sampler, collator=collator)
+        local_probs: list[float] = []
+        local_ys: list[int] = []
+        local_uids: list[str] = []
+        # Heartbeat (rank 0 only): DDP epochs batch over the labeled subset, but
+        # large label tables still run for minutes with no output otherwise.
+        _hb_batches = 0
+        _hb_t0 = time.time()
+        for batch in loader:
+            _hb_batches += 1
+            if _hb_batches % 200 == 0 and int(self.fabric.global_rank) == 0:
+                log.info("finetune %s epoch %d (ddp): %d batches/rank, %.0fs",
+                         "train" if train else "val", epoch + 1, _hb_batches,
+                         time.time() - _hb_t0)
+            idx = [i for i, u in enumerate(batch.user_ids) if u in users]
+            if not idx:
+                # With a subset over `users`, batches always carry a selected user;
+                # this guard is defensive only and never skips under DDP (skipping
+                # would desynchronize the per-rank backward count and deadlock).
+                raise RuntimeError("DDP fine-tune: empty batch on a rank would desync gradient all-reduce; the subset sampler should prevent this")
+            batch = batch.to(self.fabric.device)
+            with torch.set_grad_enabled(train):
+                z = self.model.embed_users(batch)
+                logits = self.head(z)
+                sel = torch.tensor(idx, device=self.fabric.device)
+                y = torch.tensor([label_of[batch.user_ids[i]] for i in idx], device=self.fabric.device)
+                loss = torch.nn.functional.cross_entropy(logits[sel], y)
+                if train:
+                    opt.zero_grad(set_to_none=True)
+                    self.fabric.backward(loss)
+                    torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
+                    opt.step()
+                # Float cast before softmax mirrors the single-process path:
+                # Fabric's bf16-mixed logits would otherwise yield lower-precision
+                # validation probabilities, letting the gathered AUC (and the
+                # early-stop decision it drives) differ from a 1-GPU run.
+                local_probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
+                local_ys.extend(y.cpu().tolist())
+                local_uids.extend(batch.user_ids[i] for i in idx)
+        if train:
+            return float("nan")
+        # Gather every rank's (user_id, prob, label) so all ranks score ONE global
+        # AUC -> identical early-stop decision everywhere. all_gather_object handles
+        # the uneven per-rank lengths without manual padding.
+        world = int(self.fabric.world_size)
+        bucket: list[Any] = [None] * world
+        dist.all_gather_object(bucket, list(zip(local_uids, local_probs, local_ys)))
+        # De-duplicate on user_id: the sampler's replica padding can repeat a few
+        # batches, so a user may appear on >1 rank.  Average the duplicate probs
+        # (rather than keeping the first-seen entry) so the result is deterministic
+        # regardless of bucket / shard iteration order.
+        prob_acc: dict[str, list[float]] = {}
+        label_map: dict[str, int] = {}
+        for shard in bucket:
+            for uid, prob, label in shard:  # type: ignore[union-attr]
+                prob_acc.setdefault(uid, []).append(prob)
+                label_map[uid] = label
+        if not prob_acc:
+            return float("nan")
+        probs = [sum(vs) / len(vs) for vs in prob_acc.values()]
+        ys = [label_map[uid] for uid in prob_acc]
+        if len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))
         return float("nan")

@@ -2,6 +2,10 @@
 
 No logic lives here (global rule 1). Command results print to stdout;
 progress and log output go to stderr.
+
+Path-like parameters are typed ``str``, not :class:`~pathlib.Path`: any of
+them may be a remote URL (``s3://…``), and ``Path("s3://b/k")`` collapses the
+double slash to ``s3:/b/k`` — a local path. The api layer accepts both.
 """
 
 from __future__ import annotations
@@ -9,7 +13,6 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from pathlib import Path
 
 import typer
 
@@ -32,12 +35,14 @@ def _setup(
 
 @synth_app.command("generate")
 def synth_generate(
-    out: Path = typer.Option(Path("data/synth"), help="Output directory."),
-    config: Path | None = typer.Option(None, help="WorldConfig YAML (configs/data/synthetic.yaml)."),
+    out: str = typer.Option("data/synth", help="Output directory."),
+    config: str | None = typer.Option(None, help="WorldConfig YAML (configs/data/synthetic.yaml)."),
     n_users: int | None = typer.Option(None, help="Override n_users."),
     seed: int | None = typer.Option(None, help="Override seed."),
     n_workers: int = typer.Option(0, help="Parallel workers (<=1 = inline)."),
-    report: bool = typer.Option(True, help="Write realism_report.html."),
+    report: bool | None = typer.Option(None, "--report/--no-report",
+                                       help="Write realism_report.html (default: only when "
+                                            "matplotlib is installed)."),
 ) -> None:
     """Generate a synthetic banking dataset."""
     from pragmatiq import api
@@ -49,10 +54,10 @@ def synth_generate(
 
 @app.command("tokenize")
 def tokenize_cmd(
-    data_dir: Path = typer.Argument(..., help="Generated dataset directory."),
-    out: Path = typer.Option(Path("data/tokenized"), help="Output (shards + tokenizer + index)."),
-    config: Path | None = typer.Option(None, help="Tokenizer YAML (configs/data/tokenizer.yaml)."),
-    tokenizer_dir: Path | None = typer.Option(None, help="Reuse an existing tokenizer dir."),
+    data_dir: str = typer.Argument(..., help="Generated dataset directory."),
+    out: str = typer.Option("data/tokenized", help="Output (shards + tokenizer + index)."),
+    config: str | None = typer.Option(None, help="Tokenizer YAML (configs/data/tokenizer.yaml)."),
+    tokenizer_dir: str | None = typer.Option(None, help="Reuse an existing tokenizer dir."),
     max_users: int | None = typer.Option(None, help="Cap users (debug)."),
     n_workers: int = typer.Option(0, help="Parallel encode workers (<=1 = inline)."),
 ) -> None:
@@ -68,14 +73,14 @@ def tokenize_cmd(
 @app.command("pretrain")
 def pretrain_cmd(
     ctx: typer.Context,
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     run_name: str = typer.Option(..., "--name", help="Run name (runs/{name})."),
     model_size: str = typer.Option("small", help="small | medium | large."),
-    config: Path | None = typer.Option(None, help="Pretrain YAML (configs/pretrain.yaml)."),
-    runs_root: Path = typer.Option(Path("runs"), help="Runs root directory."),
+    config: str | None = typer.Option(None, help="Pretrain YAML (configs/pretrain.yaml)."),
+    runs_root: str = typer.Option("runs", help="Runs root directory."),
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
     wandb: bool = typer.Option(False, "--wandb",
-                               help="Mirror metrics to Weights & Biases (needs the [extras] extra)."),
+                               help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."),
 ) -> None:
     """Pretrain a pragmatiq model (MLM) on tokenized shards."""
     from pragmatiq import api
@@ -94,9 +99,9 @@ def pretrain_cmd(
 
 @app.command("probe")
 def probe_cmd(
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    label: Path = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    label: str = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
     probe_model: str = typer.Option("gbdt", help="Probe head: gbdt | logistic | lightgbm."),
     seed: int = typer.Option(0, help="Probe random seed (for reproducible AUCs)."),
@@ -110,9 +115,9 @@ def probe_cmd(
 
 @app.command("uplift")
 def uplift_cmd(
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    label: Path = typer.Option(..., help="comm_uplift label parquet (labels/comm_uplift.parquet)."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    label: str = typer.Option(..., help="comm_uplift label parquet (labels/comm_uplift.parquet)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
     learner: str = typer.Option("t", help="uplift meta-learner: t (two-model) | s (single-model)."),
 ) -> None:
@@ -124,10 +129,10 @@ def uplift_cmd(
 
 @app.command("finetune")
 def finetune_cmd(
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    label: Path = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
-    config: Path | None = typer.Option(None, help="Finetune YAML (configs/finetune/*.yaml)."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    label: str = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
+    config: str | None = typer.Option(None, help="Finetune YAML (configs/finetune/*.yaml)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
     """LoRA fine-tune a trained model's adapters + head on a label table."""
@@ -138,9 +143,9 @@ def finetune_cmd(
 
 @app.command("embed")
 def embed_cmd(
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    out: Path = typer.Option(Path("embeddings.parquet"), help="Output parquet."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    out: str = typer.Option("embeddings.parquet", help="Output parquet."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
     """Embed all users to a parquet of user_id + embedding."""
@@ -151,7 +156,7 @@ def embed_cmd(
 
 @app.command("quickstart")
 def quickstart_cmd(
-    out: Path = typer.Option(Path("runs/quickstart"), help="Output directory."),
+    out: str = typer.Option("runs/quickstart", help="Output directory."),
     n_users: int = typer.Option(50000, help="Synthetic users."),
     model_size: str = typer.Option("nano", help="Model size for the smoke run."),
     max_steps: int = typer.Option(400, help="Pretrain steps."),
@@ -168,7 +173,7 @@ def quickstart_cmd(
 
 @app.command("validate")
 def validate_cmd(
-    data_dir: Path = typer.Argument(..., help="Raw dataset directory."),
+    data_dir: str = typer.Argument(..., help="Raw dataset directory."),
 ) -> None:
     """Validate a raw dataset against the data contract."""
     from pragmatiq import api
@@ -180,9 +185,9 @@ def validate_cmd(
 
 @app.command("export")
 def export_cmd(
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory (for an example user)."),
-    out: Path = typer.Option(Path("pragmatiq_embedder.onnx"), help="Output ONNX path."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory (for an example user)."),
+    out: str = typer.Option("pragmatiq_embedder.onnx", help="Output ONNX path."),
 ) -> None:
     """Export the padded-embedder ONNX variant (varlen caveat documented)."""
     from pragmatiq import api
@@ -192,10 +197,10 @@ def export_cmd(
 
 @app.command("benchmark")
 def benchmark_cmd(
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
-    out: Path = typer.Option(Path("deploy/benchmarks/RESULTS.md"), help="Results markdown."),
+    out: str = typer.Option("deploy/benchmarks/RESULTS.md", help="Results markdown."),
 ) -> None:
     """Benchmark batch-embedding throughput; writes RESULTS.md."""
     from pragmatiq import api
@@ -205,10 +210,10 @@ def benchmark_cmd(
 
 @app.command("gnn")
 def gnn_cmd(
-    shard_dir: Path = typer.Argument(..., help="Tokenized shard directory."),
-    run: Path = typer.Option(..., help="Run directory of a trained model."),
-    transfers: Path = typer.Option(..., help="transfers.parquet."),
-    aml_label: Path = typer.Option(..., help="labels/aml.parquet."),
+    shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
+    run: str = typer.Option(..., help="Run directory of a trained model."),
+    transfers: str = typer.Option(..., help="transfers.parquet."),
+    aml_label: str = typer.Option(..., help="labels/aml.parquet."),
     seeds: str = typer.Option("0,1,2", help="Comma-separated seeds."),
     epochs: int = typer.Option(150, help="GraphSAGE epochs."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
@@ -226,7 +231,7 @@ app.add_typer(runs_app, name="runs")
 
 
 @runs_app.command("list")
-def runs_list(runs_root: Path = typer.Option(Path("runs"), help="Runs root.")) -> None:
+def runs_list(runs_root: str = typer.Option("runs", help="Runs root.")) -> None:
     """List runs with their last logged step/loss."""
     from pragmatiq import api
 
@@ -236,7 +241,7 @@ def runs_list(runs_root: Path = typer.Option(Path("runs"), help="Runs root.")) -
 @runs_app.command("compare")
 def runs_compare(
     names: list[str] = typer.Argument(..., help="Run names to compare."),
-    runs_root: Path = typer.Option(Path("runs"), help="Runs root."),
+    runs_root: str = typer.Option("runs", help="Runs root."),
 ) -> None:
     """Compare the last metrics of several runs side by side."""
     from pragmatiq import api
@@ -246,9 +251,9 @@ def runs_compare(
 
 @synth_app.command("calibrate")
 def synth_calibrate(
-    stats: Path = typer.Option(..., help="aggregates.yaml with bank-shareable statistics."),
-    config: Path | None = typer.Option(None, help="Base WorldConfig YAML to start from."),
-    out: Path | None = typer.Option(None, help="Where to write the calibrated config YAML."),
+    stats: str = typer.Option(..., help="aggregates.yaml with bank-shareable statistics."),
+    config: str | None = typer.Option(None, help="Base WorldConfig YAML to start from."),
+    out: str | None = typer.Option(None, help="Where to write the calibrated config YAML."),
 ) -> None:
     """Fit generator priors to aggregate statistics (moment matching)."""
     from pragmatiq import api

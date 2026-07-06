@@ -38,9 +38,10 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from pragmatiq.core.schema import UserRecord
+
 from ..progress import progress
 from ..registry import get_value_encoder, register_value_encoder
-from .schema import UserRecord
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ class TokenizerConfig:
     # GUESS: a float-parsing field is treated as a continuous numeric (percentile
     # binned) only above this distinct-value count; below it, low-cardinality
     # codes (MCC, version strings) stay categorical. None ⇒ 4 × n_buckets.
-    numeric_min_cardinality: int | None = None
+    numeric_min_cardinality: int | None = None  # GUESS: separates low-cardinality codes from continuous magnitudes
     # Per-key overrides for the field-kind heuristic (rule 8): force keys
     # categorical (e.g. an MCC/ZIP/BIN code that parses as a number) or numeric
     # (a magnitude with few distinct values). Empty ⇒ the heuristic decides.
@@ -455,7 +456,7 @@ class PragmaTokenizer:
         """Tokenize one user's raw history (unseen → [UNK] + warning)."""
         if not self._fitted:
             raise RuntimeError("tokenizer is not fitted; call fit() or load()")
-        from .schema import SOURCES
+        from pragmatiq.core.schema import SOURCES
 
         k_l: list[int] = []
         v_l: list[int] = []
