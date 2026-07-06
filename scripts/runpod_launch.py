@@ -700,7 +700,15 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         else:
             run_cmd = PIPELINE
 
-        on_pod = f"set -euo pipefail\n{INSTALL}\n{run_cmd}"
+        # INSTALL drops errexit on purpose (the flash-attn fallback chain must
+        # be allowed to fail); restore it and prove the editable install
+        # actually works before spending GPU time on the real command.
+        on_pod = (
+            f"set -euo pipefail\n{INSTALL}\n"
+            "set -e\n"
+            'python -c "import pragmatiq; print(\'pragmatiq\', pragmatiq.__version__)"\n'
+            f"{run_cmd}"
+        )
 
         # ---- run on pod (hard deadline enforced by the watchdog) -------
         try:
