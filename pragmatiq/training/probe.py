@@ -228,9 +228,12 @@ class RawCountBaseline:
     classifier family.
     """
 
-    def __init__(self, seed: int = 0, model: str = "gbdt") -> None:
+    def __init__(self, seed: int = 0, model: str = "gbdt",
+                 max_iter: int = 1000, C: float = 1.0) -> None:
         self.seed = seed
         self.model = model
+        self.max_iter = max_iter
+        self.C = C
 
     def features(self, dataset: ShardDataset, user_ids: list[str],
                  cutoffs: dict[str, int] | None = None) -> np.ndarray:
@@ -272,7 +275,7 @@ class RawCountBaseline:
         X = self.features(dataset, users, cutoffs=cutoffs)
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=test_size, random_state=self.seed,
                                               stratify=y if len(np.unique(y)) > 1 else None)
-        clf, needs_scaling = build_probe_classifier(self.model, self.seed)
+        clf, needs_scaling = build_probe_classifier(self.model, self.seed, self.max_iter, self.C)
         auc, pr_auc, acc = _fit_score(clf, needs_scaling, Xtr, ytr, Xte, yte)
         return ProbeResult(auc=auc, pr_auc=pr_auc, accuracy=acc,
                            n_train=len(ytr), n_test=len(yte), prevalence=float(y.mean()))

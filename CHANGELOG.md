@@ -59,6 +59,19 @@ the checkpoint format.
 
 ### Fixed
 
+- **Fine-tune epochs batch only the labeled split** — the single-process
+  fine-tune path now uses the same subset sampler as the DDP path instead of
+  iterating the entire shard set and discarding unlabeled users. Epoch cost is
+  now proportional to the label table, not the dataset (a 3-epoch fine-tune of
+  a 100k-user shard set with partial labels dropped from ~21 h to well under
+  an hour per epoch on one GPU).
+- **GPU LoRA fine-tuning runs bf16 autocast** — the single-process CUDA path
+  now matches the DDP path's mixed precision, routing attention through the
+  flash varlen kernel. The previous fp32/SDPA path retained O(L^2) attention
+  scores through the frozen backbone's backward and could exhaust an 80 GB GPU
+  on the `large` preset for a single long-history user. CPU fine-tuning is
+  unchanged (fp32, byte-identical).
+
 - **Slim install can synthesize out of the box** — `api.synthesize` /
   `pragmatiq synth generate` now default `write_report` to *auto*: the realism
   report is written when matplotlib (the `[data]` extra) is installed and

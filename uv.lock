@@ -3068,7 +3068,7 @@ wheels = [
 
 [[package]]
 name = "pragmatiq"
-version = "0.1.0b4"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "fsspec" },
@@ -3157,7 +3157,7 @@ requires-dist = [
     { name = "fsspec", specifier = ">=2024.2" },
     { name = "gcsfs", marker = "extra == 'gcs'", specifier = ">=2024.2" },
     { name = "lightgbm", marker = "extra == 'gbdt'", specifier = ">=4.0" },
-    { name = "lightning", marker = "extra == 'train'", specifier = ">=2.2" },
+    { name = "lightning", marker = "extra == 'train'", specifier = ">=2.3" },
     { name = "lmdb", specifier = ">=1.4" },
     { name = "matplotlib", marker = "extra == 'data'", specifier = ">=3.9" },
     { name = "matplotlib", marker = "extra == 'train'", specifier = ">=3.9" },
