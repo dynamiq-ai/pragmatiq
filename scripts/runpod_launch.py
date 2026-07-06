@@ -567,24 +567,10 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
-    print(f"creating pod ({args.gpu} ×{gpu_count}, {args.cloud_type}) ...")
-    try:
-        pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
-                         min_vcpu=args.min_vcpu, gpu_count=gpu_count)
-    except RunPodAPIError as exc:
-        sys.exit(str(exc))
-    pod_id = pod.get("id")
-    if not pod_id:
-        sys.exit(f"pod create returned no id: {json.dumps(pod)[:300]}")
-    # Record the creation timestamp: billing starts here, so both the runtime
-    # cap and the cost printout are measured from it (not from SSH-ready).
-    create_ts = time.time()
-    print(f"pod {pod_id} created; polling for SSH ...")
-
-    # Exit-code tracking: stays 0 for a clean run; set to 1 on SSH non-zero,
-    # watchdog kill, or any unhandled exception.  Pod termination in the
-    # finally block is UNCONDITIONAL — the exit code is propagated only AFTER
-    # cleanup so a failed pod run doesn't leak a paid instance.
+    # Everything the finally block touches is initialized BEFORE the pod can
+    # exist, and pod creation itself happens INSIDE the try — so no exception
+    # (including a Ctrl-C converted by the handlers above) can land in a gap
+    # where a paid pod exists but cleanup cannot reach it.
     _exit_code = 0
     run_started = False
     ssh_base: list[str] | None = None
@@ -596,11 +582,23 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     pull_excludes: tuple[str, ...] = (
         tuple(args.pull_exclude) if args.pull_exclude else _DEFAULT_PULL_EXCLUDES
     )
+    pod_id: str | None = None
+    create_ts = time.time()
 
-    # The pod exists and is billing from this point: EVERY path below —
-    # SSH-poll failure, sync failure, Ctrl-C, watchdog deadline — must flow
-    # through the finally block so --terminate-on-done can clean up.
+    print(f"creating pod ({args.gpu} ×{gpu_count}, {args.cloud_type}) ...")
     try:
+        try:
+            pod = create_pod(key, args.gpu, args.run_name, cloud=args.cloud_type, pubkey=pubkey,
+                             min_vcpu=args.min_vcpu, gpu_count=gpu_count)
+        except RunPodAPIError as exc:
+            sys.exit(str(exc))
+        pod_id = pod.get("id")
+        if not pod_id:
+            sys.exit(f"pod create returned no id: {json.dumps(pod)[:300]}")
+        # Re-stamp at confirmed creation: billing starts here, so the runtime
+        # cap and the cost printout are measured from it (not from SSH-ready).
+        create_ts = time.time()
+        print(f"pod {pod_id} created; polling for SSH ...")
         # ---- watchdog: armed from creation, covers polling + sync too ----
         # The watchdog fires at create_ts + max_runtime_min*60 independently
         # of the SSH subprocess. On firing it kills SSH and sets
@@ -748,6 +746,11 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         # ---- pull artifacts BEFORE terminating (best-effort) ---------
         # Ordering is deliberate: on a watchdog deadline the pod is still
         # alive here, so the paid run's artifacts survive the cap.
+        if pod_id is None:
+            # Creation never completed; nothing exists to pull or terminate.
+            _run_done.set()
+            _cleanup_done.set()
+            raise SystemExit(_exit_code) if _exit_code else None
         if run_started and ssh_base is not None:
             _pull_artifacts(ssh_base, args.pull, args.pull_dest,
                             timeout_sec=args.pull_timeout_sec, excludes=pull_excludes)

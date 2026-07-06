@@ -362,7 +362,11 @@ class LoRAFineTuner:
                     self.fabric.backward(loss)
                     torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
                     opt.step()
-                local_probs.extend(torch.softmax(logits[sel], -1)[:, 1].detach().cpu().tolist())
+                # Float cast before softmax mirrors the single-process path:
+                # Fabric's bf16-mixed logits would otherwise yield lower-precision
+                # validation probabilities, letting the gathered AUC (and the
+                # early-stop decision it drives) differ from a 1-GPU run.
+                local_probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
                 local_ys.extend(y.cpu().tolist())
                 local_uids.extend(batch.user_ids[i] for i in idx)
         if train:
