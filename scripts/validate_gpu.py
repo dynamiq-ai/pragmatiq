@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import shutil
 import signal
@@ -374,8 +375,20 @@ def _count_failed_legs(
     return failed
 
 
+def _leg_logging() -> None:
+    """Route library INFO logs (finetune heartbeats etc.) to the leg's log file.
+
+    Legs run as subprocesses with stdout redirected to a file; without a
+    handler, ``logging.info`` output vanishes (root logger prints WARNING+
+    only), which made a 40-minute fine-tune leg look hung (B1, 2026-07-05).
+    """
+    logging.basicConfig(level=logging.INFO, stream=sys.stdout,
+                        format="%(asctime)s %(message)s", force=True)
+
+
 def _leg_pretrain(args: argparse.Namespace) -> None:
     """Run one pretrain leg and exit.  Invoked via subprocess by the orchestrator."""
+    _leg_logging()
     # Delay heavy imports until we are inside the leg (Fabric re-launch path).
     import pragmatiq.api as api  # noqa: PLC0415
 
@@ -398,11 +411,17 @@ def _leg_pretrain(args: argparse.Namespace) -> None:
 
 def _leg_finetune(args: argparse.Namespace) -> None:
     """Run one finetune leg and exit.  Invoked via subprocess by the orchestrator."""
+    _leg_logging()
     import pragmatiq.api as api  # noqa: PLC0415
 
     config: dict[str, Any] = {
         "max_epochs": args.steps,
         "devices": args.devices,
+        # Fine-tuning backprops through the frozen backbone in fp32 (no AMP),
+        # so attention takes the SDPA O(L^2) path — a 'large' model OOMs an
+        # 80 GB H100 at the pretrain-sized budget (observed 2026-07-06).
+        # Cap the fine-tune batch geometry independently of the pretrain one.
+        "token_budget": args.finetune_token_budget,
     }
     result = api.finetune(
         args.shard_dir,
@@ -768,6 +787,7 @@ def _training_sweep(
 def _run_finetune_leg(
     *,
     devices: int,
+    finetune_token_budget: int,
     shard_dir: Path,
     run_dir: Path,
     label_path: Path,
@@ -787,6 +807,7 @@ def _run_finetune_leg(
         "--run-dir", str(run_dir),
         "--label-path", str(label_path),
         "--steps", str(steps),
+        "--finetune-token-budget", str(finetune_token_budget),
         "--result-json", str(result_json),
     ]
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
@@ -820,6 +841,7 @@ def _run_finetune_leg(
 def _finetune_sweep(
     *,
     finetune_devices: list[int],
+    finetune_token_budget: int,
     shard_dir: Path,
     pretrained_run_dir: Path,
     label_path: Path,
@@ -846,6 +868,7 @@ def _finetune_sweep(
         print(f"[finetune] devices={d}", flush=True)
         result = _run_finetune_leg(
             devices=d,
+            finetune_token_budget=finetune_token_budget,
             shard_dir=shard_dir,
             run_dir=pretrained_run_dir,
             label_path=label_path,
@@ -2001,6 +2024,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Token budget per training batch (default: 32768)")
     ap.add_argument("--finetune-devices", default="1,8",
                     help="Comma-separated device counts for finetune legs (default: 1,8)")
+    ap.add_argument("--finetune-token-budget", type=int, default=4096, metavar="N",
+                    help="Per-batch token budget for fine-tune legs (default 4096: the "
+                         "fp32/SDPA fine-tune path is far more memory-hungry per token "
+                         "than bf16/flash pretraining).")
     ap.add_argument("--finetune-steps", type=int, default=3,
                     help="Max finetune epochs (default: 3)")
     ap.add_argument("--serving-concurrency", default="1,4,16,64",
@@ -2209,6 +2236,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
         else:
             print(f"[main] === Fine-tuning from {pretrained_run_dir.name} ===", flush=True)
             finetune_results = _finetune_sweep(
+                finetune_token_budget=args.finetune_token_budget,
                 finetune_devices=finetune_devices,
                 shard_dir=tok_dir,
                 pretrained_run_dir=pretrained_run_dir,
