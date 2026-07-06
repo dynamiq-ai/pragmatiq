@@ -234,16 +234,22 @@ class LoRAFineTuner:
 
         self.model.train(train)
         self.head.train(train)
+        # Batch only this split's users (mirrors the DDP path's subset sampler).
+        # Iterating the full shard set and discarding unlabeled users made an
+        # epoch cost O(dataset) instead of O(labels) — a 3-epoch fine-tune of a
+        # 100k-user shard set would have run ~21 hours on an A100 (measured
+        # 2026-07-06) even though only a fraction of users carried labels.
+        pos_of = {u: i for i, u in enumerate(dataset.index.order)}
+        subset = sorted(pos_of[u] for u in users if u in pos_of)
         sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
-                                      shuffle=train, seed=self.config.seed)
+                                      shuffle=train, seed=self.config.seed, subset=subset)
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
         probs, ys = [], []
-        # An epoch iterates every batch in the shard set (filtering to `users`),
-        # which can run for a long time at scale — heartbeat so operators and the
-        # GPU-validation harness can distinguish slow from stuck.
+        # Long epochs still need a liveness signal at scale — heartbeat so
+        # operators and the GPU-validation harness can tell slow from stuck.
         _hb_batches = _hb_users = 0
         _hb_t0 = time.time()
         for batch in loader:
