@@ -848,11 +848,16 @@ def _run_finetune_leg(
         "--finetune-max-users", str(finetune_max_users),
         "--result-json", str(result_json),
     ]
+    # Fine-tuning backprops through the whole frozen backbone; the caching
+    # allocator's reserved pool ratchets across varlen batch shapes and can
+    # exhaust the card even when per-batch allocation fits (measured: reserve
+    # 38->61 GiB over 15 batches without this, flat 19 GiB with it).
+    leg_env = {**(nccl_env or {}), "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"}
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
         t0 = time.time()
         returncode, timed_out = _run_leg_with_timeout(
             cmd, leg_timeout_sec, f"finetune_d{devices}",
-            log_dir=out_dir / "leg_logs", extra_env=nccl_env,
+            log_dir=out_dir / "leg_logs", extra_env=leg_env,
         )
         elapsed = time.time() - t0
 
