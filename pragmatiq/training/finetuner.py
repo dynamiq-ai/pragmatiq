@@ -9,6 +9,7 @@ A/B and the head are updated, so a downstream task is cheap to fit and ship
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -256,18 +257,33 @@ class LoRAFineTuner:
                 continue
             _hb_users += len(idx)
             batch = batch.to(self.device)
+            # On CUDA, run the forward under bf16 autocast — this is what routes
+            # attention through the flash varlen kernel (which requires bf16/fp16)
+            # with O(L) memory. The fp32 path falls back to SDPA's O(L^2) score
+            # matrix, and with the backbone's activations retained for the LoRA
+            # backward a single long-history user OOMs an 80 GB card on the
+            # 'large' preset (observed 2026-07-06). The DDP path already trains
+            # bf16-mixed via Fabric; this aligns the single-process path. CPU
+            # stays fp32 (nullcontext), preserving the byte-identical contract.
+            autocast = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                        if str(self.device).startswith("cuda")
+                        else contextlib.nullcontext())
             with torch.set_grad_enabled(train):
-                z = self.model.embed_users(batch)
-                logits = self.head(z)
-                sel = torch.tensor(idx, device=self.device)
-                y = torch.tensor([label_of[batch.user_ids[i]] for i in idx], device=self.device)
-                loss = torch.nn.functional.cross_entropy(logits[sel], y)
+                with autocast:
+                    z = self.model.embed_users(batch)
+                    logits = self.head(z)
+                    sel = torch.tensor(idx, device=self.device)
+                    y = torch.tensor([label_of[batch.user_ids[i]] for i in idx],
+                                     device=self.device)
+                    loss = torch.nn.functional.cross_entropy(logits[sel], y)
                 if train:
+                    # backward runs outside autocast (torch re-autocasts saved
+                    # ops itself); bf16 needs no GradScaler, grads are fp32.
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
                     opt.step()
-                probs.extend(torch.softmax(logits[sel], -1)[:, 1].detach().cpu().tolist())
+                probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
                 ys.extend(y.cpu().tolist())
         if not train and len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))
