@@ -180,12 +180,20 @@ def load(
     else:
         # Remote: stage to a local temp dir before loading
         tmp = tempfile.mkdtemp(prefix="pragmatiq-serve-")
-        materialize_dir(run_str, tmp)
         local_run = tmp
 
-    model = PragmaModel.from_pretrained(local_run, device=resolved_device)
+    # A failure between mkdtemp and a successful load would orphan the staged
+    # copy (close() only runs on a constructed Runtime) — clean it up inline.
+    try:
+        if tmp:
+            materialize_dir(run_str, tmp)
+        model = PragmaModel.from_pretrained(local_run, device=resolved_device)
+    except BaseException:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+        raise
     runtime = Runtime(model=model, device=resolved_device)
-    if not is_local(run_str):
+    if tmp:
         runtime._staging_dir = tmp
     return runtime
 
