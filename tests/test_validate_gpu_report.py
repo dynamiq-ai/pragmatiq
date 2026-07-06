@@ -260,3 +260,35 @@ class TestRankZero:
         monkeypatch.delenv("RANK", raising=False)
         monkeypatch.setenv("LOCAL_RANK", "2")
         assert not vg._is_rank_zero()
+
+
+class TestLabelSubsample:
+    """The fine-tune leg caps its label table via a seeded stratified subsample."""
+
+    def _table(self, tmp_path, n_pos, n_neg):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+        p = tmp_path / "labels.parquet"
+        uids = [f"u{i}" for i in range(n_pos + n_neg)]
+        labels = [1] * n_pos + [0] * n_neg
+        pq.write_table(pa.table({"user_id": uids, "label": labels}), p)
+        return p
+
+    def test_small_table_passes_through(self, vg, tmp_path) -> None:
+        src = self._table(tmp_path, 5, 15)
+        out = tmp_path / "sub.parquet"
+        assert vg._subsample_labels(src, out, max_users=100) == 20
+
+    def test_subsample_is_stratified_and_seeded(self, vg, tmp_path) -> None:
+        import pyarrow.parquet as pq
+        src = self._table(tmp_path, 100, 900)
+        out1, out2 = tmp_path / "s1.parquet", tmp_path / "s2.parquet"
+        n1 = vg._subsample_labels(src, out1, max_users=100)
+        n2 = vg._subsample_labels(src, out2, max_users=100)
+        assert n1 == n2
+        t1, t2 = pq.read_table(out1), pq.read_table(out2)
+        assert t1.column("user_id").to_pylist() == t2.column("user_id").to_pylist()
+        labels = t1.column("label").to_pylist()
+        # ~10% positives preserved
+        assert 5 <= sum(labels) <= 15
+        assert 90 <= len(labels) <= 110

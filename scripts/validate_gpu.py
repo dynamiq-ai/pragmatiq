@@ -375,6 +375,35 @@ def _count_failed_legs(
     return failed
 
 
+def _subsample_labels(label_path: Path, out_path: Path, max_users: int, seed: int = 0) -> int:
+    """Write a seeded, label-stratified subsample of a label table.
+
+    The fine-tune leg validates convergence, not population-scale training —
+    fine-tuning every labeled user of a full-scale dataset is a multi-hour job
+    by construction (~30k users x ~7k tokens x 3 epochs measured 2026-07-07).
+    Proportional per-label sampling keeps class balance; returns rows written.
+    """
+    import numpy as np  # noqa: PLC0415
+    import pyarrow as pa  # noqa: PLC0415
+    import pyarrow.parquet as pq  # noqa: PLC0415
+
+    table = pq.read_table(label_path)
+    n = table.num_rows
+    if n <= max_users:
+        pq.write_table(table, out_path)
+        return n
+    rng = np.random.default_rng(seed)
+    labels = table.column("label").to_numpy()
+    keep: list[np.ndarray] = []
+    for value in np.unique(labels):
+        idx = np.flatnonzero(labels == value)
+        quota = max(1, int(round(len(idx) / n * max_users)))
+        keep.append(rng.choice(idx, size=min(quota, len(idx)), replace=False))
+    sel = np.sort(np.concatenate(keep))
+    pq.write_table(pa.Table.from_batches(table.take(sel).to_batches()), out_path)
+    return len(sel)
+
+
 def _leg_logging() -> None:
     """Route library INFO logs (finetune heartbeats etc.) to the leg's log file.
 
@@ -414,6 +443,13 @@ def _leg_finetune(args: argparse.Namespace) -> None:
     _leg_logging()
     import pragmatiq.api as api  # noqa: PLC0415
 
+    label_path = Path(args.label_path)
+    if getattr(args, "finetune_max_users", 0):
+        sub = Path(args.result_json).with_suffix(".labels.parquet")
+        n = _subsample_labels(label_path, sub, int(args.finetune_max_users))
+        print(f"[leg-finetune] label subsample: {n} users -> {sub}", flush=True)
+        label_path = sub
+
     config: dict[str, Any] = {
         "max_epochs": args.steps,
         "devices": args.devices,
@@ -426,7 +462,7 @@ def _leg_finetune(args: argparse.Namespace) -> None:
     result = api.finetune(
         args.shard_dir,
         args.run_dir,
-        args.label_path,
+        label_path,
         config=config,
         device="auto",
     )
@@ -788,6 +824,7 @@ def _run_finetune_leg(
     *,
     devices: int,
     finetune_token_budget: int,
+    finetune_max_users: int,
     shard_dir: Path,
     run_dir: Path,
     label_path: Path,
@@ -808,6 +845,7 @@ def _run_finetune_leg(
         "--label-path", str(label_path),
         "--steps", str(steps),
         "--finetune-token-budget", str(finetune_token_budget),
+        "--finetune-max-users", str(finetune_max_users),
         "--result-json", str(result_json),
     ]
     with _monitor_workload(f"finetune_d{devices}", out_dir, util_records):
@@ -842,6 +880,7 @@ def _finetune_sweep(
     *,
     finetune_devices: list[int],
     finetune_token_budget: int,
+    finetune_max_users: int,
     shard_dir: Path,
     pretrained_run_dir: Path,
     label_path: Path,
@@ -869,6 +908,7 @@ def _finetune_sweep(
         result = _run_finetune_leg(
             devices=d,
             finetune_token_budget=finetune_token_budget,
+            finetune_max_users=finetune_max_users,
             shard_dir=shard_dir,
             run_dir=pretrained_run_dir,
             label_path=label_path,
@@ -2024,6 +2064,10 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="Token budget per training batch (default: 32768)")
     ap.add_argument("--finetune-devices", default="1,8",
                     help="Comma-separated device counts for finetune legs (default: 1,8)")
+    ap.add_argument("--finetune-max-users", type=int, default=2500, metavar="N",
+                    help="Cap the fine-tune legs' label table via a seeded stratified "
+                         "subsample (0 = use every label; the leg validates convergence, "
+                         "not population-scale training).")
     ap.add_argument("--finetune-token-budget", type=int, default=4096, metavar="N",
                     help="Per-batch token budget for fine-tune legs (default 4096: the "
                          "fp32/SDPA fine-tune path is far more memory-hungry per token "
@@ -2237,6 +2281,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
             print(f"[main] === Fine-tuning from {pretrained_run_dir.name} ===", flush=True)
             finetune_results = _finetune_sweep(
                 finetune_token_budget=args.finetune_token_budget,
+                finetune_max_users=args.finetune_max_users,
                 finetune_devices=finetune_devices,
                 shard_dir=tok_dir,
                 pretrained_run_dir=pretrained_run_dir,
