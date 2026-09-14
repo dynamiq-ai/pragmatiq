@@ -171,3 +171,48 @@ class TestEventCapAtCollate:
 
         loader = ShardDataLoader(dataset, DynamicBatchSampler(dataset.index, token_budget=2048, seed=0))
         assert loader.collator.max_events == 6500
+
+
+class TestStaleness:
+    """Staleness windows move every eval-point cutoff earlier (paper §3.4.2)."""
+
+    def test_window_parsing(self) -> None:
+        from pragmatiq.training.probe import staleness_to_us
+
+        assert staleness_to_us(None) == 0 and staleness_to_us("0") == 0 and staleness_to_us(0) == 0
+        assert staleness_to_us("90s") == 90_000_000
+        assert staleness_to_us("30m") == 30 * 60_000_000
+        assert staleness_to_us("6h") == 6 * 3_600_000_000
+        assert staleness_to_us("1d") == 86_400_000_000
+        assert staleness_to_us("2w") == 14 * 86_400_000_000
+        assert staleness_to_us(1.5) == 1_500_000
+        with pytest.raises(ValueError, match="staleness window"):
+            staleness_to_us("6 hours")
+        with pytest.raises(ValueError, match=">= 0"):
+            staleness_to_us(-1)
+
+    def test_cutoffs_shift_earlier(self) -> None:
+        from pragmatiq.training.probe import cutoffs_from_labels
+
+        eval_us = np.array([10_000_000_000, 20_000_000_000], dtype=np.int64)
+        fresh = cutoffs_from_labels(["a", "b"], eval_us)
+        stale = cutoffs_from_labels(["a", "b"], eval_us, staleness_us=3_600_000_000)
+        assert fresh == {"a": 10_000_000_000, "b": 20_000_000_000}
+        assert stale == {"a": 10_000_000_000 - 3_600_000_000, "b": 20_000_000_000 - 3_600_000_000}
+        assert cutoffs_from_labels(["a"], None, staleness_us=5) is None
+
+    def test_baseline_features_shrink_with_staleness(self, dataset: ShardDataset) -> None:
+        from pragmatiq.training.probe import RawCountBaseline, cutoffs_from_labels
+
+        uids = dataset.user_ids[:20]
+        recs = [dataset.get(u) for u in uids]
+        eval_us = np.array([int(r.event_ts[-1]) + 1 for r in recs], dtype=np.int64)  # just after the last event
+        base = RawCountBaseline(seed=0)
+        prev = None
+        for window in (0, 86_400_000_000, 30 * 86_400_000_000, 3 * 365 * 86_400_000_000):
+            feats = base.features(dataset, uids, cutoffs=cutoffs_from_labels(uids, eval_us, window))
+            n_events = feats[:, 0]
+            if prev is not None:
+                assert (n_events <= prev).all() and n_events.sum() < prev.sum()
+            prev = n_events
+        assert prev.sum() == 0  # a window longer than the horizon leaves nothing

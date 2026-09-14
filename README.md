@@ -270,6 +270,19 @@ paths, not this user-embedding probe.
 model=small, steps=2000, seed=0. Treat these as a pipeline check, not a
 performance claim.</sub>
 
+**Event staleness.** In production the event feed lags: the embedding you score
+at 09:00 was built from events that stopped arriving some time earlier. The
+paper checks that task metrics barely move when the most recent window of
+history is missing (§3.4.2). `pragmatiq probe --staleness-window 6h` (or
+`api.probe(..., staleness_window="6h")`) drops the last 6 hours before every
+user's eval point, for the probe and the baseline alike;
+`scripts/benchmarks/staleness_probe.py` sweeps 0 / 1h / 6h / 1d / 3d and writes
+the table below with `--write`.
+
+<!-- STALENESS_PROBE_RESULTS -->
+
+_Not yet measured on this build; run the benchmark script to fill this table._
+
 ## Using your own data
 
 pragmatiq trains on a small parquet contract — four files, strict dtypes

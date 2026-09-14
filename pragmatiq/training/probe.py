@@ -124,11 +124,50 @@ def _load_label_table(
     return uids, labels, eval_us
 
 
-def cutoffs_from_labels(uids: list[str], eval_us: np.ndarray | None) -> dict[str, int] | None:
-    """Build the per-user truncation map from a label table's eval_ts column."""
+_DURATION_UNITS_US = {"s": 1_000_000, "m": 60_000_000, "h": 3_600_000_000, "d": 86_400_000_000,
+                      "w": 7 * 86_400_000_000}
+
+
+def staleness_to_us(window: str | int | float | None) -> int:
+    """Parse a staleness window into microseconds.
+
+    Accepts ``None``/``0`` (no staleness), a number of seconds, or a string with a
+    unit suffix: ``"90s"``, ``"30m"``, ``"6h"``, ``"1d"``, ``"2w"``.
+    """
+    if window is None:
+        return 0
+    if isinstance(window, (int, float)):
+        us = int(round(float(window) * _DURATION_UNITS_US["s"]))
+    else:
+        text = window.strip().lower()
+        if not text or text == "0":
+            return 0
+        unit = text[-1]
+        if unit not in _DURATION_UNITS_US:
+            raise ValueError(f"staleness window {window!r}: expected <number><s|m|h|d|w>, e.g. '6h' or '1d'")
+        try:
+            value = float(text[:-1])
+        except ValueError as e:
+            raise ValueError(f"staleness window {window!r}: expected <number><s|m|h|d|w>") from e
+        us = int(round(value * _DURATION_UNITS_US[unit]))
+    if us < 0:
+        raise ValueError(f"staleness window must be >= 0, got {window!r}")
+    return us
+
+
+def cutoffs_from_labels(uids: list[str], eval_us: np.ndarray | None,
+                        staleness_us: int = 0) -> dict[str, int] | None:
+    """Build the per-user truncation map from a label table's eval_ts column.
+
+    ``staleness_us`` moves every cutoff earlier by that much, so the embedding is
+    computed as if the most recent ``staleness_us`` of history had not arrived
+    yet (paper §3.4.2, robustness to event staleness). A lagging feed is the
+    production norm, so a model whose task metrics survive a stale window is
+    safe to serve from a delayed event stream.
+    """
     if eval_us is None:
         return None
-    return {u: int(t) for u, t in zip(uids, eval_us)}
+    return {u: int(t) - int(staleness_us) for u, t in zip(uids, eval_us)}
 
 
 @dataclass
@@ -266,12 +305,18 @@ class RawCountBaseline:
                           np.log1p(idx.n_events[i])])
         return np.asarray(feats, dtype=np.float64)
 
-    def run(self, dataset: ShardDataset, label_path: str | Path, test_size: float = 0.3) -> ProbeResult:
-        """Fit/evaluate the raw-count baseline on a label table."""
+    def run(self, dataset: ShardDataset, label_path: str | Path, test_size: float = 0.3,
+            staleness_us: int = 0) -> ProbeResult:
+        """Fit/evaluate the raw-count baseline on a label table.
+
+        ``staleness_us`` shifts the eval-point cutoffs earlier (see
+        :func:`cutoffs_from_labels`) so the baseline sees exactly the history the
+        probe it is compared against saw.
+        """
         from sklearn.model_selection import train_test_split
 
         uids, labels, eval_us = _load_label_table(label_path)
-        cutoffs = cutoffs_from_labels(uids, eval_us)
+        cutoffs = cutoffs_from_labels(uids, eval_us, staleness_us)
         have = set(dataset.index.order)
         keep = [(u, int(lab)) for u, lab in zip(uids, labels) if u in have]
         users = [u for u, _ in keep]

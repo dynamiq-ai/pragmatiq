@@ -105,12 +105,16 @@ def probe_cmd(
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
     probe_model: str = typer.Option("gbdt", help="Probe head: gbdt | logistic | lightgbm."),
     seed: int = typer.Option(0, help="Probe random seed (for reproducible AUCs)."),
+    staleness_window: str | None = typer.Option(
+        None, help="Drop the most recent window of history before each eval point "
+                   "(e.g. 6h, 1d): the paper's event-staleness robustness check."),
 ) -> None:
     """Probe a trained model on a label table; reports ROC-AUC + PR-AUC vs baseline."""
     from pragmatiq import api
 
     typer.echo(json.dumps(
-        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed), indent=2))
+        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed,
+                  staleness_window=staleness_window), indent=2))
 
 
 @app.command("uplift")

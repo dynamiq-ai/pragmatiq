@@ -465,6 +465,7 @@ def probe(
     seed: int = 0,
     with_baseline: bool = True,
     probe_model: str = "gbdt",
+    staleness_window: str | int | None = None,
 ) -> dict[str, Any]:
     """Probe a trained model on a label table; compares to a raw-count baseline.
 
@@ -474,6 +475,11 @@ def probe(
     ROC-AUC and PR-AUC are returned. Histories are truncated at each user's ``eval_ts``
     (when present) before embedding, for both the probe and the baseline — task metrics
     must never be computed on embeddings that contain the outcome window.
+
+    ``staleness_window`` (``"6h"``, ``"1d"``, seconds as a number) additionally drops
+    the most recent window of history before every eval point — the paper's event
+    staleness check (§3.4.2): a model is safe to serve from a lagging feed when its
+    metrics barely move. Requires ``eval_ts`` in the label table.
     """
     with _staging() as stage:
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
@@ -487,22 +493,28 @@ def probe(
             _load_label_table,
             cutoffs_from_labels,
             embed_users,
+            staleness_to_us,
         )
 
+        staleness_us = staleness_to_us(staleness_window)
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
         model = PragmaModel.from_pretrained(run, device=device)
         ds = ShardDataset(shard_dir)
         uids, _, eval_us = _load_label_table(label_path)
-        cutoffs = cutoffs_from_labels(uids, eval_us)
+        if staleness_us and eval_us is None:
+            raise ValueError("staleness_window needs a label table with an eval_ts column")
+        cutoffs = cutoffs_from_labels(uids, eval_us, staleness_us)
         emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
         probe_res = EmbeddingProbe(model=probe_model, seed=seed).run(emb, label_path)
         out_dict: dict[str, Any] = {"probe_model": probe_model,
                                     "probe_auc": probe_res.auc, "probe_pr_auc": probe_res.pr_auc,
                                     "probe_accuracy": probe_res.accuracy,
-                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence}
+                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence,
+                                    "staleness_window": staleness_window, "staleness_us": staleness_us}
         if with_baseline:
-            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path)
+            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path,
+                                                                     staleness_us=staleness_us)
             out_dict["baseline_auc"] = base.auc
             out_dict["baseline_pr_auc"] = base.pr_auc
         ds.close()
