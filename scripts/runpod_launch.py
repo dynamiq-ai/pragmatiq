@@ -82,6 +82,10 @@ cd /workspace/pragmatiq
 # 2.8.0.dev20250319+cu128); the flash-attn wheel is built against the release
 # ABI, so pin the release build the wheel expects before anything else.
 pip install -q "torch=={TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{CUDA_TAG}
+# The image's torchvision/torchaudio are built against that nightly and break on
+# import once torch is the release build (torchmetrics, pulled in by lightning,
+# imports torchvision when present). pragmatiq uses neither: remove them.
+pip uninstall -q -y torchvision torchaudio || true
 pip install -q --no-deps -e .
 pip install -q -e ".[dev,full]" "torch=={TORCH_RELEASE}"
 echo "=== installing flash-attn ==="

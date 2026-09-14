@@ -41,6 +41,7 @@ def test_install_block_pins_the_release_torch(rl) -> None:
     assert "--no-deps -e ." in rl.INSTALL
     assert f'torch=={rl.TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{rl.CUDA_TAG}' in rl.INSTALL
     assert f'"torch=={rl.TORCH_RELEASE}"' in rl.INSTALL.split("[dev,full]")[1][:40]
+    assert "pip uninstall -q -y torchvision torchaudio" in rl.INSTALL  # nightly builds break on release torch
     assert rl.FLASH_WHEEL in rl.INSTALL
 
 
