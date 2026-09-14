@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import math
+import random
 import sys
 import time
 from pathlib import Path
@@ -33,12 +35,13 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from ..data.collate import PackedBatch
 from ..data.dataset import ShardDataLoader
 from ..experiments.run import Run
 from ..experiments.tracking import MetricLogger
-from ..models.heads import MLMHead, mlm_loss, text_mse_loss
+from ..models.heads import LABEL_SMOOTHING, MLMHead, mlm_loss, text_mse_loss
 from ..models.pragmatiq import CKPT_FORMAT, PragmaModel
 from ..registry import get_masker
 from .masking import TYPE_NAMES, MaskingStrategy
@@ -130,6 +133,20 @@ def _unpack_numpy_state(d: dict[str, Any]) -> tuple:
     return (d["name"], keys, d["pos"], d["has_gauss"], d["cached"])
 
 
+def _pack_py_random_state(state: tuple) -> dict[str, Any]:
+    """Convert ``random.getstate()`` to a torch ``weights_only``-safe form."""
+    version, internal, gauss_next = state
+    return {"version": int(version), "state": torch.tensor(list(internal), dtype=torch.int64),
+            "gauss_next": float("nan") if gauss_next is None else float(gauss_next)}
+
+
+def _unpack_py_random_state(d: dict[str, Any]) -> tuple:
+    """Inverse of :func:`_pack_py_random_state`."""
+    gauss = d["gauss_next"]
+    return (int(d["version"]), tuple(int(x) for x in d["state"].tolist()),
+            None if math.isnan(gauss) else gauss)
+
+
 _CHECKPOINT_OPERATIONAL_KEYS = {
     "max_steps",
     "log_every",
@@ -153,6 +170,10 @@ def _require_matching_config(
     ignored = ignored or set()
     mismatches = []
     for key in sorted((set(saved) | set(current)) - ignored):
+        if key not in saved:
+            # A field added to the config after the checkpoint was written: the
+            # current default applies, and the resumed run records it from here on.
+            continue
         if saved.get(key) != current.get(key):
             mismatches.append(f"{key}: checkpoint={saved.get(key)!r} current={current.get(key)!r}")
     if mismatches:
@@ -392,7 +413,11 @@ class PreTrainer:
             pred = self.head.reconstruct_text(out, text_idx)
             text_mse = text_mse_loss(pred, self._text_targets(out, text_idx))
             loss = ce + self.config.text_loss_weight * text_mse
-        if self.config.nan_skip and not torch.isfinite(loss):
+        # ONE device->host read per micro-batch: it feeds both the non-finite guard
+        # and the loss metric (the accuracy / per-type losses below stay on the
+        # device and are read back once per logged step).
+        loss_val = float(loss.detach())
+        if self.config.nan_skip and not math.isfinite(loss_val):
             if not ddp:
                 return False
             # DDP: a non-finite loss on this rank must NOT skip the backward — every
@@ -405,21 +430,24 @@ class PreTrainer:
             return False
         self._backward(loss / accum, sync=sync)
         with torch.no_grad():
-            agg["loss_sum"] += loss.item()
+            agg["loss_sum"] += loss_val
             agg["contributing"] += 1
-            if targets.numel():
-                agg["acc_correct"] += float((logits.argmax(-1) == targets).sum().item())
+            if self._will_log and targets.numel():
+                # Metrics only (never on the optimizer path): the argmax over the
+                # vocab and the per-mask-type CE are accumulated as device tensors
+                # and read back once when the step is logged.
+                agg["acc_correct"] = agg["acc_correct"] + (logits.argmax(-1) == targets).sum()
                 agg["acc_total"] += int(targets.numel())
-                mtype = masked.mask_type[sel]
-                for code, name in TYPE_NAMES.items():
-                    m = mtype == code
-                    n = int(m.sum())
-                    if n:
-                        agg[f"loss_{name}_sum"] = agg.get(f"loss_{name}_sum", 0.0) + \
-                            mlm_loss(logits[m], targets[m]).item() * n
-                        agg[f"loss_{name}_n"] = agg.get(f"loss_{name}_n", 0) + n
-            if text_mse is not None:
-                agg["text_mse_sum"] += text_mse.item()
+                per_tok = F.cross_entropy(logits, targets, ignore_index=-100,
+                                          label_smoothing=LABEL_SMOOTHING, reduction="none")
+                mtype = masked.mask_type[sel].long()  # int8 codes 0..2 at CE positions
+                n_codes = max(TYPE_NAMES) + 1
+                type_sum = torch.zeros(n_codes, dtype=per_tok.dtype, device=per_tok.device)
+                type_sum.index_add_(0, mtype, per_tok)
+                agg["type_loss_sum"] = agg.get("type_loss_sum", 0.0) + type_sum
+                agg["type_loss_n"] = agg.get("type_loss_n", 0) + torch.bincount(mtype, minlength=n_codes)
+            if text_mse is not None and self._will_log:
+                agg["text_mse_sum"] = agg["text_mse_sum"] + text_mse.detach()
                 agg["text_mse_n"] += 1
         self._tokens_seen += batch.n_tokens
         return True
@@ -438,6 +466,9 @@ class PreTrainer:
         accum = len(micro_batches)
         world_size = int(getattr(self.fabric, "world_size", 1))
         ddp = world_size > 1
+        # fit() logs the step that becomes self.step + 1; only then are the
+        # accuracy / per-type metrics worth computing.
+        self._will_log = ((self.step + 1) % self.config.log_every == 0) or self.step == 0
         for opt in self.optimizers:
             opt.zero_grad(set_to_none=True)
         agg: dict[str, Any] = {"loss_sum": 0.0, "contributing": 0, "acc_correct": 0.0,
@@ -553,12 +584,14 @@ class PreTrainer:
 
         metrics = {"loss": avg_loss, "grad_norm": gnorm, "lr_factor": lr_factor}
         if agg["acc_total"]:
-            metrics["mlm_acc"] = agg["acc_correct"] / agg["acc_total"]
-            for name in TYPE_NAMES.values():
-                if agg.get(f"loss_{name}_n"):
-                    metrics[f"loss_{name}"] = agg[f"loss_{name}_sum"] / agg[f"loss_{name}_n"]
+            metrics["mlm_acc"] = float(agg["acc_correct"]) / agg["acc_total"]
+            sums = agg["type_loss_sum"].tolist()
+            counts = agg["type_loss_n"].tolist()
+            for code, name in TYPE_NAMES.items():
+                if counts[code]:
+                    metrics[f"loss_{name}"] = sums[code] / counts[code]
         if agg["text_mse_n"]:
-            metrics["loss_text_mse"] = agg["text_mse_sum"] / agg["text_mse_n"]
+            metrics["loss_text_mse"] = float(agg["text_mse_sum"]) / agg["text_mse_n"]
         return metrics
 
     def _text_targets(self, out: Any, text_idx: torch.Tensor) -> torch.Tensor:
@@ -578,14 +611,17 @@ class PreTrainer:
                         p.grad.mul_(factor)
 
     def _grads_finite(self) -> bool:
-        """True iff every trainable grad is finite (used by the NaN-skip guard)."""
-        for opt in self.optimizers:
-            for group in opt.param_groups:
-                for p in group["params"]:
-                    g = p.grad
-                    if g is not None and not torch.isfinite(g).all():
-                        return False
-        return True
+        """True iff every trainable grad is finite (used by the NaN-skip guard).
+
+        One stacked reduction and a single device→host read per step, instead of
+        one read per parameter tensor.
+        """
+        grads = [p.grad for opt in self.optimizers for group in opt.param_groups
+                 for p in group["params"] if p.grad is not None]
+        if not grads:
+            return True
+        flags = torch.stack([torch.isfinite(g).all() for g in grads])
+        return bool(flags.all())
 
     def _dump_debug(self, batch: PackedBatch, masked: Any) -> None:
         dbg = self.run.dir / "debug"
@@ -765,6 +801,7 @@ class PreTrainer:
             "rng": {
                 "torch": torch.get_rng_state(),
                 "numpy": _pack_numpy_state(np.random.get_state()),
+                "python": _pack_py_random_state(random.getstate()),
                 "masking_gen": self.gen.get_state(),
                 "masking_gen_device": self.gen.device.type,
                 "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
@@ -863,6 +900,7 @@ class PreTrainer:
             reseed = self.config.seed + global_rank + self.step
             torch.manual_seed(reseed)  # torch CPU stream + all CUDA devices (dropout)
             np.random.seed(reseed % (2**32))
+            random.seed(reseed)
             self.gen.manual_seed(reseed)
             log.warning(
                 "multi-GPU resume: the checkpoint carries only rank-0's RNG states; "
@@ -873,6 +911,8 @@ class PreTrainer:
             return
         torch.set_rng_state(rng["torch"])
         np.random.set_state(_unpack_numpy_state(rng["numpy"]))
+        if "python" in rng:
+            random.setstate(_unpack_py_random_state(rng["python"]))
         # The masking generator is device-typed; its raw state is not portable
         # across device PRNG algorithms (CPU MT19937 vs CUDA Philox). Restore it
         # only on a matching device, else deterministically re-seed from this step.

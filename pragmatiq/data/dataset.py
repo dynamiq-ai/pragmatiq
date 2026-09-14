@@ -233,9 +233,16 @@ class ShardDataLoader:
     """Iterates (sampler → dataset → collator) yielding :class:`PackedBatch`.
 
     A lightweight loader (not ``torch.utils.data.DataLoader``) so the sampler's
-    resumable state and the varlen collation stay first-class. Single-process by
-    default; the collator is stateless, so wrapping in a worker pool later is
-    safe.
+    resumable state and the varlen collation stay first-class.
+
+    ``prefetch=N`` reads and collates up to ``N`` batches ahead on a background
+    thread so the shard reads and the Python-side collation overlap the model
+    step instead of running between steps (the main cost on a GPU). The batch
+    stream and the resume position are identical to the synchronous loader:
+    :meth:`state_dict` reports the sampler position of the batch most recently
+    handed to the caller, never the producer's read-ahead. ``pin_memory=True``
+    stages every batch in page-locked host memory so the trainer can copy it to
+    the GPU asynchronously (``PackedBatch.to(device, non_blocking=True)``).
     """
 
     def __init__(
@@ -243,24 +250,88 @@ class ShardDataLoader:
         dataset: ShardDataset,
         sampler: DynamicBatchSampler,
         collator: VarlenCollator | None = None,
+        prefetch: int = 0,
+        pin_memory: bool = False,
     ) -> None:
         self.dataset = dataset
         self.sampler = sampler
         self.collator = collator or VarlenCollator()
+        self.prefetch = max(0, int(prefetch))
+        self.pin_memory = bool(pin_memory)
         self._order = dataset.user_ids
+        self._yielded_state: dict[str, Any] | None = None
+
+    def _make(self, batch_idx: list[int]) -> PackedBatch:
+        uids = [self._order[i] for i in batch_idx]
+        batch = self.collator(self.dataset.get_many(uids))
+        return batch.pin_memory() if self.pin_memory else batch
 
     def __iter__(self) -> Iterator[PackedBatch]:
-        for batch_idx in self.sampler:
-            uids = [self._order[i] for i in batch_idx]
-            records = self.dataset.get_many(uids)
-            yield self.collator(records)
+        self._yielded_state = None
+        if self.prefetch == 0:
+            for batch_idx in self.sampler:
+                yield self._make(batch_idx)
+            return
+        yield from self._iter_prefetch()
+
+    def _iter_prefetch(self) -> Iterator[PackedBatch]:
+        import queue
+        import threading
+
+        q: queue.Queue[tuple[Any, dict[str, Any] | None]] = queue.Queue(maxsize=self.prefetch)
+        done = object()
+        stop = threading.Event()
+
+        def produce() -> None:
+            try:
+                for batch_idx in self.sampler:
+                    # The sampler advances its counter before yielding, so this
+                    # snapshot is the exact resume position after this batch.
+                    pos = self.sampler.state_dict()
+                    item: tuple[Any, dict[str, Any] | None] = (self._make(batch_idx), pos)
+                    while not stop.is_set():
+                        try:
+                            q.put(item, timeout=0.25)
+                            break
+                        except queue.Full:
+                            continue
+                    if stop.is_set():
+                        return
+                q.put((done, self.sampler.state_dict()))
+            except BaseException as exc:  # forwarded to the consumer, re-raised there
+                q.put((exc, None))
+
+        worker = threading.Thread(target=produce, name="pragmatiq-prefetch", daemon=True)
+        worker.start()
+        try:
+            while True:
+                item, pos = q.get()
+                if item is done:
+                    self._yielded_state = pos
+                    return
+                if isinstance(item, BaseException):
+                    raise item
+                self._yielded_state = pos
+                yield item
+        finally:
+            stop.set()
+            # Drain so a producer blocked on put() can observe the stop flag.
+            while not q.empty():
+                try:
+                    q.get_nowait()
+                except queue.Empty:
+                    break
+            worker.join(timeout=5.0)
 
     def __len__(self) -> int:
         return len(self.sampler)
 
     def state_dict(self) -> dict[str, Any]:
-        """Sampler resume state (dataset is stateless)."""
+        """Sampler resume state: the position after the batch last handed out."""
+        if self._yielded_state is not None:
+            return dict(self._yielded_state)
         return self.sampler.state_dict()
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
+        self._yielded_state = None
         self.sampler.load_state_dict(state)

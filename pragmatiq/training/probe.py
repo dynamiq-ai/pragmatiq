@@ -85,7 +85,10 @@ def embed_users(
         return model.embed_users(batch).float().cpu().numpy()
 
     out: dict[str, np.ndarray] = {}
-    with cpu_thread_cap():
+    # The intra-op thread cap only helps CPU forwards; on CUDA it would just
+    # throttle the host-side collation.
+    cap = cpu_thread_cap() if not str(device).startswith("cuda") else contextlib.nullcontext()
+    with cap:
         for batch_idx in progress(sampler, total=len(sampler), desc="embed", unit="batch"):
             uids = [order[i] for i in batch_idx]
 

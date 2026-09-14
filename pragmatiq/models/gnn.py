@@ -267,7 +267,9 @@ def _fit_gnn(graph: TransferGraph, seed: int, train_mask: torch.Tensor, val_mask
     yte = graph.y[test_mask].numpy()
     if len(np.unique(yva)) <= 1 or len(np.unique(yte)) <= 1:
         return float("nan")
-    best_val, bad = 0.5, 0
+    # -1.0 (not 0.5): the first evaluation always wins, so an arm whose val AUC
+    # never crosses chance still scores its best trained weights, not the random init.
+    best_val, bad = -1.0, 0
     best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
     for ep in range(epochs):
         model.train()

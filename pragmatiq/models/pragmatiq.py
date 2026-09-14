@@ -20,6 +20,7 @@ The forward returns these representations; the MLM head (heads.py) consumes
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,7 @@ def assemble_segments(
     prefix_idx = new_cu[:-1].to(torch.long)
     x = token_vals.new_zeros(T + S, d)
     is_prefix = torch.zeros(T + S, dtype=torch.bool, device=device)
-    is_prefix[prefix_idx] = True
+    is_prefix.index_fill_(0, prefix_idx, True)
     token_dst = (~is_prefix).nonzero(as_tuple=False).squeeze(1)
     # index_copy_ instead of advanced index-assignment so the scatter has a
     # deterministic CUDA implementation under torch.use_deterministic_algorithms.
@@ -124,6 +125,17 @@ def assemble_segments(
         if prefix_pos is not None:
             rope_pos.index_copy_(0, prefix_idx, prefix_pos.float())
     return x, new_cu, prefix_idx, token_dst, rope_pos
+
+
+def _max_segment_len(cu: torch.Tensor, hint: int | None) -> tuple[int, bool]:
+    """Longest assembled segment: the collator's host-side value when present, else a sync.
+
+    Returns ``(max_len, trusted)``; ``trusted`` tells the encoder it can skip its
+    own device→host validation of ``max_len``.
+    """
+    if hint is not None:
+        return int(hint), True
+    return (int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1), False
 
 
 def _segsum(values: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
@@ -230,8 +242,8 @@ class PragmaModel(nn.Module):
         seg_lengths = (batch.cu_seqlens_event[1:] - batch.cu_seqlens_event[:-1]).long()
         evt_marker = self.embed.embed(torch.full((seg_lengths.numel(),), EVT, device=x_tok.device))
         x, cu, prefix_idx, token_dst, _ = assemble_segments(seg_lengths, evt_marker, x_tok)
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.event_encoder(x, cu, max_len)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_event)
+        h = self.event_encoder(x, cu, max_len, check=not trusted)
         z_tok = h[token_dst]  # ẑ_e  [T, d]
         evt_vec = h[prefix_idx]  # [E, d]
         z_e = evt_vec + self.calendar(batch.event_hour, batch.event_dow, batch.event_dom)
@@ -249,8 +261,8 @@ class PragmaModel(nn.Module):
         x, cu, prefix_idx, _, rope_pos = assemble_segments(
             tokens_per_user, usr_marker, x_prof, tok_time, usr_pos
         )
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.profile_encoder(x, cu, max_len, rope_pos)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_profile)
+        h = self.profile_encoder(x, cu, max_len, rope_pos, check=not trusted)
         return h[prefix_idx]  # z_a  [n_users, d]
 
     def _encode_history(
@@ -262,8 +274,8 @@ class PragmaModel(nn.Module):
         x, cu, prefix_idx, token_dst, rope_pos = assemble_segments(
             events_per_user, z_a, z_e, evt_pos, usr_pos
         )
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.history_encoder(x, cu, max_len, rope_pos)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_history)
+        h = self.history_encoder(x, cu, max_len, rope_pos, check=not trusted)
         return h[prefix_idx], h[token_dst]  # z_h[USR] [n_users,d], z_h[event] [E,d]
 
     def forward(self, batch: PackedBatch) -> PragmaOutput:
@@ -296,11 +308,23 @@ class PragmaModel(nn.Module):
         tokenizer (global rule 3) and attaches it so :meth:`embed_records` works.
         ``run`` may be a run directory path or a ``runs/{name}`` path.
         """
+        from pragmatiq.core.env import resolve_device
+
         from ..data.tokenizer import PragmaTokenizer
 
+        device = resolve_device(device)
         run_dir = Path(run)
         tok = PragmaTokenizer.load(run_dir / "tokenizer")
-        ckpt = torch.load(run_dir / "checkpoints" / checkpoint, map_location=device, weights_only=False)
+        ckpt_path = run_dir / "checkpoints" / checkpoint
+        try:
+            # Checkpoints are written weights_only-safe (tensors, scalars, str);
+            # loading them that way never executes pickled code.
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+        except Exception as exc:  # pragma: no cover - only for foreign checkpoints
+            logging.getLogger(__name__).warning(
+                "checkpoint %s is not weights_only-loadable (%s); falling back to a full "
+                "unpickle — only do this for checkpoints you trust", ckpt_path, exc)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         fmt = ckpt.get("format")
         if fmt != CKPT_FORMAT:
             raise ValueError(

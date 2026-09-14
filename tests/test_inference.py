@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from pragmatiq import api
 from pragmatiq.data.collate import VarlenCollator
@@ -391,3 +392,18 @@ class TestTritonServingContract:
         assert emb.shape == (2, model.runtime.model.config.dim)
         assert emb.dtype == np.float32 and np.isfinite(emb).all()
         model.finalize()
+
+
+def test_from_pretrained_never_needs_full_unpickle(trained, monkeypatch) -> None:
+    """The run's checkpoint loads with weights_only=True (the safe path is the only one taken)."""
+    _work, run_dir = trained
+    calls: list[bool] = []
+    real = torch.load
+
+    def spy(*a, **kw):
+        calls.append(bool(kw.get("weights_only", False)))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(torch, "load", spy)
+    PragmaModel.from_pretrained(run_dir, device="auto")
+    assert calls == [True]

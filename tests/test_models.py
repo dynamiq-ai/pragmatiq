@@ -376,3 +376,80 @@ class TestTimeRoPERealistic:
         assert rope_pos.dtype == torch.float32  # positions never quantized to bf16
         got = torch.sort(rope_pos[rope_pos != 0]).values
         assert torch.allclose(got, torch.tensor([10.5, 74.3, 101.5]), atol=1e-5)
+
+
+class TestAttentionKernel:
+    """1.1 kernel changes: deterministic SDPA scatter, per-encoder layout hoist."""
+
+    def test_sdpa_fallback_runs_under_deterministic_algorithms(self) -> None:
+        """index_copy_/index_select scatter has a deterministic implementation (the old
+        advanced-index assignment raised under torch.use_deterministic_algorithms on CUDA)."""
+        from pragmatiq.models.layers import varlen_self_attention
+
+        prev = torch.are_deterministic_algorithms_enabled()
+        torch.use_deterministic_algorithms(True)
+        try:
+            torch.manual_seed(0)
+            q = torch.randn(9, 2, 8, requires_grad=True)
+            k = torch.randn(9, 2, 8, requires_grad=True)
+            v = torch.randn(9, 2, 8, requires_grad=True)
+            cu = torch.tensor([0, 4, 4, 9], dtype=torch.int32)  # includes an empty segment
+            out = varlen_self_attention(q, k, v, cu, max_seqlen=5)
+            out.sum().backward()
+            assert out.shape == (9, 2, 8)
+            assert torch.isfinite(out).all() and torch.isfinite(q.grad).all()
+        finally:
+            torch.use_deterministic_algorithms(prev)
+
+    def test_encoder_layout_hoist_is_bit_exact(self) -> None:
+        """One shared VarlenLayout per encoder forward == rebuilding it in every block."""
+        from pragmatiq.models.layers import Encoder
+
+        torch.manual_seed(1)
+        enc = Encoder(dim=16, depth=3, n_heads=2, dropout=0.0, use_rope=True).eval()
+        x = torch.randn(11, 16)
+        cu = torch.tensor([0, 3, 3, 8, 11], dtype=torch.int32)
+        pos = torch.rand(11) * 9.0
+        with torch.no_grad():
+            hoisted = enc(x, cu, 5, pos)
+            ref = x
+            for blk in enc.blocks:
+                ref = blk(ref, cu, 5, pos)  # layout=None -> rebuilt per block (the old path)
+            ref = enc.norm(ref)
+            trusted = enc(x, cu, 5, pos, check=False)  # host-provided max_len skips the sync
+        assert torch.equal(hoisted, ref)
+        assert torch.equal(trusted, ref)
+
+    def test_collator_max_lens_route_through_model(self, batch_and_vocab) -> None:
+        """PackedBatch.max_len_* (host ints) give the same forward as the device max()."""
+        import dataclasses
+
+        batch, vocab = batch_and_vocab
+        model = PragmaModel(ModelConfig.preset("nano", vocab)).eval()
+        assert batch.max_len_event is not None and batch.max_len_history is not None
+        stripped = dataclasses.replace(batch, max_len_event=None, max_len_history=None,
+                                       max_len_profile=None)
+        with torch.no_grad():
+            a = model.embed_users(batch)
+            b = model.embed_users(stripped)
+        assert torch.equal(a, b)
+
+
+class TestLoRATargets:
+    def test_targets_anchored_on_leaf_name(self) -> None:
+        """A decoy module whose path merely CONTAINS a target string is never adapted."""
+        from torch import nn
+
+        from pragmatiq.models.lora import LoRALinear
+
+        model = PragmaModel(ModelConfig.preset("nano", 1500))
+        model.decoy_output = nn.Linear(4, 4)  # "out" as a substring only
+        model.subnet = nn.Sequential(nn.Linear(4, 4))  # "net" as a substring only
+        cfg = model.config
+        expected = 4 * (cfg.depth_profile + cfg.depth_event + cfg.depth_history)  # qkv, out, net.0, net.3
+        n = inject_lora(model)
+        assert n == expected
+        assert not isinstance(model.decoy_output, LoRALinear)
+        assert not isinstance(model.subnet[0], LoRALinear)
+        adapted = {name for name, m in model.named_modules() if isinstance(m, LoRALinear)}
+        assert all(name.endswith(("attn.qkv", "attn.out", "ffn.net.0", "ffn.net.3")) for name in adapted)

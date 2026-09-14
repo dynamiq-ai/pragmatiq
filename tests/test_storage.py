@@ -258,10 +258,7 @@ def test_storage_public_api_complete():
 
 
 # --------------------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-
-# --------------------------------------------------------------------------- #
-# Parent-directory auto-creation in write_bytes / write_text / atomic_write
+# Parent-directory auto-creation in write_bytes / write_text
 # --------------------------------------------------------------------------- #
 
 class TestParentDirAutoCreate:

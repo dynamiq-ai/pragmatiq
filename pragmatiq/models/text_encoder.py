@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import inspect
+from collections import OrderedDict
 from typing import Protocol, runtime_checkable
 
 import torch
@@ -48,15 +49,30 @@ class HashTextEncoder:
     for tests/CI and as a baseline; use ``nemotron`` for real semantic embeddings.
     """
 
-    def __init__(self, dim: int = 64) -> None:
+    def __init__(self, dim: int = 64, cache_size: int = 200_000) -> None:
         self.dim = dim
+        # Strings repeat heavily within and across batches; memoize the vector so
+        # a training step does not re-hash and re-draw the same value every time.
+        self._cache: OrderedDict[str, torch.Tensor] = OrderedDict()
+        self._cache_size = cache_size
+
+    def _vector(self, text: str) -> torch.Tensor:
+        vec = self._cache.get(text)
+        if vec is not None:
+            self._cache.move_to_end(text)
+            return vec
+        seed = int(hashlib.sha1(text.encode("utf-8")).hexdigest()[:15], 16)
+        g = torch.Generator().manual_seed(seed)
+        vec = torch.randn(self.dim, generator=g)
+        self._cache[text] = vec
+        if len(self._cache) > self._cache_size:
+            self._cache.popitem(last=False)
+        return vec
 
     def encode(self, texts: list[str]) -> torch.Tensor:
         out = torch.empty(len(texts), self.dim, dtype=torch.float32)
         for i, t in enumerate(texts):
-            seed = int(hashlib.sha1((t or "").encode("utf-8")).hexdigest()[:15], 16)
-            g = torch.Generator().manual_seed(seed)
-            out[i] = torch.randn(self.dim, generator=g)
+            out[i] = self._vector(t or "")
         return out
 
 

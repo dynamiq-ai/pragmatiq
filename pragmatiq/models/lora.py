@@ -67,6 +67,15 @@ def _iter_named_linears(model: nn.Module):
                 yield module, child_name, child, f"{name}.{child_name}" if name else child_name
 
 
+def _is_target(qual: str, targets: tuple[str, ...]) -> bool:
+    """Match a qualified module name on its leaf (or Sequential-parent) attribute name."""
+    parts = qual.split(".")
+    leaf = parts[-1]
+    if leaf in targets:
+        return True
+    return leaf.isdigit() and len(parts) >= 2 and parts[-2] in targets
+
+
 def inject_lora(
     model: nn.Module,
     rank: int = 8,
@@ -76,12 +85,14 @@ def inject_lora(
 ) -> int:
     """Replace targeted ``nn.Linear`` layers in-place with :class:`LoRALinear`.
 
-    Returns the number of layers adapted. A layer is targeted if any string in
-    ``targets`` appears in its qualified name.
+    Returns the number of layers adapted. A layer is targeted when its own
+    attribute name is in ``targets`` (``attn.qkv`` → ``qkv``) or, for the numbered
+    children of an ``nn.Sequential``, when the container's name is
+    (``ffn.net.0`` → ``net``) — never by a substring match on the full path.
     """
     n = 0
     for parent, child_name, child, qual in list(_iter_named_linears(model)):
-        if any(t in qual for t in targets):
+        if _is_target(qual, targets):
             setattr(parent, child_name, LoRALinear(child, rank, alpha, dropout))
             n += 1
     return n

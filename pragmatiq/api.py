@@ -63,6 +63,8 @@ def _enforce_resume_config(saved: dict[str, Any], current: dict[str, Any]) -> No
     """Validate that a resumed run keeps architecture/objective config fixed."""
     mismatches = []
     for key in sorted((set(saved) | set(current)) - _RESUME_OPERATIONAL_KEYS):
+        if key not in saved:
+            continue  # field added after the checkpoint was written; the current default applies
         if saved.get(key) != current.get(key):
             mismatches.append(f"{key}: saved={saved.get(key)!r} current={current.get(key)!r}")
     if mismatches:

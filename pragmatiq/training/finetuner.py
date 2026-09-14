@@ -187,7 +187,8 @@ class LoRAFineTuner:
         train_users, val_users = _stratified_split(users, have, self.config.val_fraction, self.config.seed)
         label_of = have
 
-        opt = torch.optim.AdamW(self._trainable(), lr=self.config.lr,
+        self._params = list(self._trainable())
+        opt = torch.optim.AdamW(self._params, lr=self.config.lr,
                                 weight_decay=self.config.weight_decay)
         if self._ddp:
             opt = self.fabric.setup_optimizers(opt)
@@ -287,10 +288,11 @@ class LoRAFineTuner:
                     # ops itself); bf16 needs no GradScaler, grads are fp32.
                     opt.zero_grad(set_to_none=True)
                     loss.backward()
-                    torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self._params, 1.0)
                     opt.step()
-                probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
-                ys.extend(y.cpu().tolist())
+                if not train:  # the epoch AUC is only scored on validation batches
+                    probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
+                    ys.extend(y.cpu().tolist())
         if not train and len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))
         return float("nan")
@@ -360,15 +362,16 @@ class LoRAFineTuner:
                 if train:
                     opt.zero_grad(set_to_none=True)
                     self.fabric.backward(loss)
-                    torch.nn.utils.clip_grad_norm_(list(self._trainable()), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self._params, 1.0)
                     opt.step()
                 # Float cast before softmax mirrors the single-process path:
                 # Fabric's bf16-mixed logits would otherwise yield lower-precision
                 # validation probabilities, letting the gathered AUC (and the
                 # early-stop decision it drives) differ from a 1-GPU run.
-                local_probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
-                local_ys.extend(y.cpu().tolist())
-                local_uids.extend(batch.user_ids[i] for i in idx)
+                if not train:
+                    local_probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
+                    local_ys.extend(y.cpu().tolist())
+                    local_uids.extend(batch.user_ids[i] for i in idx)
         if train:
             return float("nan")
         # Gather every rank's (user_id, prob, label) so all ranks score ONE global
