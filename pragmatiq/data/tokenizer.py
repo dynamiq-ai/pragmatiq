@@ -353,7 +353,7 @@ class PragmaTokenizer:
                               total=n_pr_batches, desc="tokenizer fit (profiles)", unit="batch"):
             acc.consume_profiles_batch(batch)
 
-    def _binning_sample(self, key: str, values: list[float]) -> np.ndarray:
+    def _binning_sample(self, key: str, values: np.ndarray) -> np.ndarray:
         """The per-key sample the binner fits on, capped at ``max_numeric_sample``.
 
         Below the cap this is the whole finite stream (a prefix is order-stable).
@@ -365,15 +365,18 @@ class PragmaTokenizer:
         of the data, independent of how the rows were partitioned across workers.
         """
         cap = self.config.max_numeric_sample
-        if len(values) <= cap:
-            return np.asarray(values, dtype=np.float64)
+        values = np.asarray(values, dtype=np.float64)
+        if values.size <= cap:
+            return values
         res_rng = np.random.default_rng((self.config.seed, _RESERVOIR_SALT, _stable_key_hash(key)))
-        samp = values[:cap]
-        for m, x in enumerate(values[cap:], start=cap):
+        samp = values[:cap].copy()
+        # Same draw sequence as the list-based replay: one integer per value past
+        # the cap, so the sample (and hence the bin edges) is unchanged.
+        for m in range(cap, values.size):
             r = int(res_rng.integers(0, m + 1))
             if r < cap:
-                samp[r] = x
-        return np.asarray(samp, dtype=np.float64)
+                samp[r] = values[m]
+        return samp
 
     def _finalize(self, acc: _FitAccum) -> PragmaTokenizer:
         """Classify keys and build the vocab + binners + BPE from a merged accum."""
@@ -400,8 +403,9 @@ class PragmaTokenizer:
             # numeric *code* (real ISO-18245 MCC, ZIP, BIN with >numeric_min_card
             # distinct values) would be misrouted to the binner; use
             # force_categorical / force_numeric to override per key.
-            sample = acc.numeric_sample.get(k, [])
-            can_bin = len(sample) > 0
+            chunks = acc.numeric_sample.get(k, [])
+            sample = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float64)
+            can_bin = sample.size > 0
             looks_numeric = ratio >= 0.995 and n_tot >= 32 and high_card
             if k in self.config.force_categorical:
                 looks_numeric = False
@@ -802,16 +806,18 @@ class _FitAccum:
       stable;
     - ``numeric_ok`` / ``numeric_n`` — finite-parse and total counts driving the
       numeric-vs-categorical decision (a pure ratio, order-independent);
-    - ``numeric_sample`` — every finite value in row order; the parent derives
-      the binning sample from these (a prefix below the cap, else a reservoir
-      replay — see :meth:`PragmaTokenizer.fit`), so binning never depends on how
-      rows were partitioned.
+    - ``numeric_sample`` — every finite value in row order, as float64 array
+      chunks (one per batch; 8 bytes a value and a memcpy to pickle across
+      workers, where a Python list costs ~4x and a per-object walk); the parent
+      derives the binning sample from these (a prefix below the cap, else a
+      reservoir replay — see :meth:`PragmaTokenizer.fit`), so binning never
+      depends on how rows were partitioned.
     """
 
     counters: dict[str, Counter] = dataclasses.field(default_factory=dict)
     numeric_ok: Counter = dataclasses.field(default_factory=Counter)
     numeric_n: Counter = dataclasses.field(default_factory=Counter)
-    numeric_sample: dict[str, list[float]] = dataclasses.field(default_factory=dict)
+    numeric_sample: dict[str, list[np.ndarray]] = dataclasses.field(default_factory=dict)
 
     def see(self, key: str, values: np.ndarray) -> None:
         """Fold one key's batch of raw (string) values into the accumulator."""
@@ -826,7 +832,7 @@ class _FitAccum:
         self.numeric_n[key] += len(vals)
         finite = parsed[ok]
         if len(finite):
-            self.numeric_sample.setdefault(key, []).extend(finite.tolist())
+            self.numeric_sample.setdefault(key, []).append(finite)
         self.counters.setdefault(key, Counter()).update(vals.tolist())
 
     def consume_events_batch(self, batch: pa.RecordBatch) -> None:
@@ -869,17 +875,52 @@ def _day_of_month(ts_us: np.ndarray) -> np.ndarray:
     return (days - days.astype("datetime64[M]")).astype(np.int64) + 1
 
 
+_DAY_US = 86_400_000_000
+
+
 def _utc_offsets_us(ts_us: np.ndarray, tz: str) -> np.ndarray:
-    """Per-instant UTC offset (µs) of timezone ``tz``, DST-correct."""
+    """Per-instant UTC offset (µs) of timezone ``tz``, DST-correct.
+
+    The offset is piecewise-constant in UTC time and changes only at whole-second
+    transition instants (at most one per UTC day in every IANA zone), so it is
+    evaluated once per distinct UTC day present in ``ts_us`` — plus a bisection
+    to the exact transition second on a day whose start and end offsets differ —
+    and mapped back to every row with a ``searchsorted``. Row-for-row identical
+    to converting each instant with ``datetime.astimezone``, at O(days) instead
+    of O(rows) datetime calls.
+    """
     import datetime as _dt
     from zoneinfo import ZoneInfo
 
+    if ts_us.shape[0] == 0:
+        return np.zeros(0, dtype=np.int64)
     zone = ZoneInfo(tz)
-    offs = np.empty(ts_us.shape[0], dtype=np.int64)
-    for i, t in enumerate(ts_us.tolist()):
-        local = _dt.datetime.fromtimestamp(t / 1e6, tz=_dt.UTC).astimezone(zone)
-        offs[i] = int((local.utcoffset() or _dt.timedelta()).total_seconds()) * 1_000_000
-    return offs
+
+    def offset_at(t_us: int) -> int:
+        local = _dt.datetime.fromtimestamp(t_us / 1e6, tz=_dt.UTC).astimezone(zone)
+        return int((local.utcoffset() or _dt.timedelta()).total_seconds()) * 1_000_000
+
+    bounds: list[int] = []
+    offsets: list[int] = []
+    for day in np.unique(ts_us // _DAY_US).tolist():
+        start = int(day) * _DAY_US
+        end = start + _DAY_US - 1
+        off_start, off_end = offset_at(start), offset_at(end)
+        bounds.append(start)
+        offsets.append(off_start)
+        if off_end != off_start:
+            # Bisect on whole seconds for the first instant that carries off_end.
+            lo_s, hi_s = start // 1_000_000, end // 1_000_000
+            while hi_s - lo_s > 1:
+                mid_s = (lo_s + hi_s) // 2
+                if offset_at(mid_s * 1_000_000) == off_start:
+                    lo_s = mid_s
+                else:
+                    hi_s = mid_s
+            bounds.append(hi_s * 1_000_000)
+            offsets.append(off_end)
+    idx = np.searchsorted(np.asarray(bounds, dtype=np.int64), ts_us, side="right") - 1
+    return np.asarray(offsets, dtype=np.int64)[idx]
 
 
 def _calendar_fields(ts_us: np.ndarray, tz: str = "UTC") -> tuple[np.ndarray, np.ndarray, np.ndarray]:

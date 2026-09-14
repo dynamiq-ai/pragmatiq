@@ -69,8 +69,7 @@ class ShardDataset:
         from collections import defaultdict
 
         groups: dict[tuple[int, int], list[tuple[int, int]]] = defaultdict(list)
-        for out_pos, uid in enumerate(user_ids):
-            m = self.index.meta(uid)
+        for out_pos, m in enumerate(self.index.meta_many(user_ids)):
             groups[(m.band, m.shard)].append((out_pos, m.row))
         out: list[Any] = [None] * len(user_ids)
         for (band, shard), items in groups.items():

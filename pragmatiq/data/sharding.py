@@ -82,6 +82,21 @@ class UserMeta:
         return cls(**json.loads(blob.decode()))
 
 
+def _large_list(parts: list[np.ndarray], value_type: Any) -> pa.LargeListArray:
+    """One ``large_list`` column from per-record numpy arrays, without boxing values.
+
+    Offsets come from the per-record lengths and the values from a single
+    concatenation, so Arrow reads the numeric buffers directly instead of
+    unboxing one Python scalar per element.
+    """
+    lengths = np.fromiter((p.shape[0] for p in parts), dtype=np.int64, count=len(parts))
+    offsets = np.zeros(len(parts) + 1, dtype=np.int64)
+    np.cumsum(lengths, out=offsets[1:])
+    values = np.concatenate(parts) if parts else np.zeros(0, dtype=np.int64)
+    return pa.LargeListArray.from_arrays(pa.array(offsets, type=pa.int64()),
+                                         pa.array(values, type=value_type))
+
+
 def _record_to_arrays(rec: TokenizedRecord) -> dict[str, Any]:
     return {
         "key_ids": rec.key_ids, "value_ids": rec.value_ids, "positions": rec.positions,
@@ -150,7 +165,11 @@ class ShardWriter:
         self._uids: dict[int, list[str]] = {b: [] for b in range(len(bands))}
         self._shard_counter: dict[int, int] = {b: 0 for b in range(len(bands))}
         self._index: list[UserMeta] = []
-        self._profiles: dict[str, bytes] = {}
+        self._seen: set[str] = set()
+        # Profile blobs go to LMDB in batches as they arrive instead of piling
+        # up in RAM until close(); the index entries themselves are small.
+        self._pending_profiles: dict[str, bytes] = {}
+        self._env: Any = None
         self._map_size = map_size
 
     def add(self, rec: TokenizedRecord, profile: dict[str, Any] | None = None) -> None:
@@ -160,6 +179,12 @@ class ShardWriter:
         LMDB index so notebooks/serving can fetch a user's profile blob without
         opening a shard ("user_id -> profile blob + token stats").
         """
+        if rec.user_id in self._seen:
+            raise ValueError(
+                f"duplicate user_id {rec.user_id!r} in shard index — each user must map to "
+                "exactly one record; sort events by (user_id, ts) before tokenizing"
+            )
+        self._seen.add(rec.user_id)
         b = band_of(rec.n_events, self.bands)
         self._buffers[b].append(_record_to_arrays(rec))
         self._uids[b].append(rec.user_id)
@@ -170,23 +195,48 @@ class ShardWriter:
         )
         self._index.append(meta)
         if profile is not None:
-            self._profiles[rec.user_id] = json.dumps(profile, separators=(",", ":")).encode()
+            self._pending_profiles[rec.user_id] = json.dumps(profile, separators=(",", ":")).encode()
+            if len(self._pending_profiles) >= self.rows_per_shard:
+                self._flush_profiles()
         if len(self._buffers[b]) >= self.rows_per_shard:
             self._flush_band(b)
+
+    def _write_env(self) -> Any:
+        """The LMDB environment this writer appends to (opened on first use)."""
+        if self._env is None:
+            import lmdb
+
+            # Invalidate any cached read-only env at this path (shards rewritten).
+            key = str((self.out / "user_index.lmdb").resolve())
+            stale = _ENV_CACHE.pop(key, None)
+            if stale is not None:
+                stale.close()
+            self._env = lmdb.open(str(self.out / "user_index.lmdb"), map_size=self._map_size,
+                                  subdir=True)
+        return self._env
+
+    def _flush_profiles(self) -> None:
+        if not self._pending_profiles:
+            return
+        with self._write_env().begin(write=True) as txn:
+            for uid, blob in self._pending_profiles.items():
+                txn.put(b"prof:" + uid.encode(), blob)
+        self._pending_profiles.clear()
 
     def _flush_band(self, b: int) -> None:
         recs = self._buffers[b]
         if not recs:
             return
-        cols: dict[str, list] = {"user_id": self._uids[b]}
-        for name, _ in _ARRAY_FIELDS:
-            cols[name] = [r[name].tolist() for r in recs]
+        cols: dict[str, Any] = {"user_id": pa.array(self._uids[b], type=pa.string())}
+        for name, value_type in _ARRAY_FIELDS:
+            cols[name] = _large_list([r[name] for r in recs], value_type)
         # Only carry the text columns when the band actually has text (embed mode),
         # so BPE-mode shards stay byte-identical to a build without the variant.
         has_text = any(int(r["is_text"].sum()) > 0 for r in recs)
         if has_text:
-            cols["is_text"] = [r["is_text"].tolist() for r in recs]
-            cols["text_values"] = [list(r["text_values"]) for r in recs]
+            cols["is_text"] = _large_list([r["is_text"] for r in recs], pa.int8())
+            cols["text_values"] = pa.array([list(r["text_values"]) for r in recs],
+                                           type=pa.large_list(pa.large_string()))
         schema = SHARD_SCHEMA_TEXT if has_text else SHARD_SCHEMA
         table = pa.table(cols, schema=schema)
         path = self.out / "shards" / f"band{b}_shard{self._shard_counter[b]:05d}.parquet"
@@ -212,29 +262,13 @@ class ShardWriter:
         return manifest
 
     def _write_index(self) -> None:
-        import lmdb
-
-        # Invalidate any cached read-only env at this path (shards rewritten).
-        key = str((self.out / "user_index.lmdb").resolve())
-        stale = _ENV_CACHE.pop(key, None)
-        if stale is not None:
-            stale.close()
-        env = lmdb.open(str(self.out / "user_index.lmdb"), map_size=self._map_size, subdir=True)
+        self._flush_profiles()
+        env = self._write_env()
         with env.begin(write=True) as txn:
             order = []
-            seen_uids: set[str] = set()
             for m in self._index:
-                if m.user_id in seen_uids:
-                    raise ValueError(
-                        f"duplicate user_id {m.user_id!r} in shard index — each user must map to "
-                        "exactly one record; sort events by (user_id, ts) before tokenizing"
-                    )
-                seen_uids.add(m.user_id)
                 txn.put(m.user_id.encode(), m.pack())
                 order.append(m.user_id)
-                blob = self._profiles.get(m.user_id)
-                if blob is not None:
-                    txn.put(b"prof:" + m.user_id.encode(), blob)
             # ordered user-id list + fast columnar tables for the sampler
             txn.put(b"__order__", json.dumps(order).encode())
             tok = np.array([m.n_tokens for m in self._index], dtype=np.int64)
@@ -248,6 +282,7 @@ class ShardWriter:
             txn.put(b"__count__", struct.pack("<q", len(self._index)))
         env.sync()
         env.close()
+        self._env = None
 
 
 # Process-level cache of read-only LMDB environments. LMDB forbids opening the
@@ -296,11 +331,18 @@ class UserIndex:
 
     def meta(self, user_id: str) -> UserMeta:
         """Look up one user's index entry."""
+        return self.meta_many([user_id])[0]
+
+    def meta_many(self, user_ids: list[str]) -> list[UserMeta]:
+        """Look up several users' index entries in one read transaction."""
+        out: list[UserMeta] = []
         with self.env.begin() as txn:
-            blob = txn.get(user_id.encode())
-        if blob is None:
-            raise KeyError(f"user {user_id!r} not in index")
-        return UserMeta.unpack(bytes(blob))
+            for uid in user_ids:
+                blob = txn.get(uid.encode())
+                if blob is None:
+                    raise KeyError(f"user {uid!r} not in index")
+                out.append(UserMeta.unpack(bytes(blob)))
+        return out
 
     def profile(self, user_id: str) -> dict[str, Any] | None:
         """Return the stored raw profile blob (attributes + lifelong) or None."""

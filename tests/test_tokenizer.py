@@ -353,3 +353,57 @@ class TestEmbedTextMode:
         assert tr.is_text.shape == (tr.n_tokens,)
         assert len(tr.text_values) == n_text  # compact invariant survives truncation
         assert tr.text_values == out.text_values[:n_text]  # kept strings are a prefix
+
+
+class TestDataPathRefactors:
+    """The 1.1 speedups are byte-identical to the row-by-row code they replaced."""
+
+    def test_binning_sample_matches_list_reservoir(self) -> None:
+        """Float64-chunk reservoir replay == the original Python-list Algorithm R."""
+        from pragmatiq.data.tokenizer import _RESERVOIR_SALT, _stable_key_hash
+
+        cap = 500
+        values = np.random.default_rng(3).lognormal(3.0, 1.2, size=3_137)
+        tok = PragmaTokenizer(TokenizerConfig(max_numeric_sample=cap, seed=0))
+
+        # the pre-1.1 implementation, verbatim
+        vals_list = values.tolist()
+        rng = np.random.default_rng((0, _RESERVOIR_SALT, _stable_key_hash("amount")))
+        samp = vals_list[:cap]
+        for m, x in enumerate(vals_list[cap:], start=cap):
+            r = int(rng.integers(0, m + 1))
+            if r < cap:
+                samp[r] = x
+        expected = np.asarray(samp, dtype=np.float64)
+
+        got = tok._binning_sample("amount", values)
+        assert np.array_equal(got, expected)
+        # below the cap the whole stream is returned unchanged
+        assert np.array_equal(tok._binning_sample("amount", values[:cap]), values[:cap])
+
+    @pytest.mark.parametrize("tz", ["Europe/London", "Europe/Warsaw", "America/New_York", "Asia/Kolkata"])
+    def test_utc_offsets_match_per_row_reference_across_dst(self, tz: str) -> None:
+        """Per-day offsets + transition bisection == per-row astimezone, incl. DST edges."""
+        import datetime as _dt
+        from zoneinfo import ZoneInfo
+
+        from pragmatiq.data.tokenizer import _utc_offsets_us
+
+        rng = np.random.default_rng(7)
+        year = np.arange(np.datetime64("2023-01-01"), np.datetime64("2024-01-01"), np.timedelta64(1, "D"))
+        # every day of the year at random times, plus dense µs samples around the
+        # spring/autumn transitions of each zone
+        instants = [np.datetime64(d, "us").astype(np.int64) + int(t)
+                    for d in year for t in rng.integers(0, 86_400_000_000, size=3)]
+        for edge in ("2023-03-12T06:00", "2023-03-26T00:30", "2023-10-29T00:30", "2023-11-05T05:30"):
+            base = np.datetime64(edge, "us").astype(np.int64)
+            instants.extend(base + np.arange(-3, 4) * 3_600_000_000 + rng.integers(0, 60_000_000, size=7))
+            instants.extend(base + np.arange(-2, 3))  # µs around the boundary
+        ts = np.asarray(sorted(int(x) for x in instants), dtype=np.int64)
+
+        zone = ZoneInfo(tz)
+        expected = np.asarray([
+            int((_dt.datetime.fromtimestamp(t / 1e6, tz=_dt.UTC).astimezone(zone).utcoffset()
+                 or _dt.timedelta()).total_seconds()) * 1_000_000
+            for t in ts.tolist()], dtype=np.int64)
+        assert np.array_equal(_utc_offsets_us(ts, tz), expected)

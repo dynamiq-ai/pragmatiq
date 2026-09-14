@@ -563,3 +563,71 @@ class TestPrefetchLoader:
         moved = batch.to("cpu", non_blocking=True)
         assert self._same(batch, moved)
         ds.close()
+
+
+class TestShardWriterRefactors:
+    """Arrow-native shard columns and incremental profile puts leave the outputs unchanged."""
+
+    def test_large_list_columns_equal_python_list_construction(self, shards) -> None:
+        import pyarrow as pa
+
+        from pragmatiq.data.sharding import _ARRAY_FIELDS, SHARD_SCHEMA, _large_list, _record_to_arrays
+
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        recs = [_record_to_arrays(ds.get(u)) for u in ds.user_ids[:37]]
+        ds.close()
+        cols_new: dict = {"user_id": pa.array([f"u{i}" for i in range(len(recs))], type=pa.string())}
+        cols_old: dict = {"user_id": [f"u{i}" for i in range(len(recs))]}
+        for name, t in _ARRAY_FIELDS:
+            cols_new[name] = _large_list([r[name] for r in recs], t)
+            cols_old[name] = [r[name].tolist() for r in recs]
+        new = pa.table(cols_new, schema=SHARD_SCHEMA)
+        old = pa.table(cols_old, schema=SHARD_SCHEMA)
+        assert new.equals(old)
+
+    def test_duplicate_user_raises_at_add(self, shards, tmp_path: Path) -> None:
+        shard_dir, tok = shards
+        ds = ShardDataset(shard_dir)
+        rec = ds.get(ds.user_ids[0])
+        ds.close()
+        w = ShardWriter(tmp_path / "dup", tokenizer_hash=tok.content_hash, rows_per_shard=8)
+        w.add(rec)
+        with pytest.raises(ValueError, match="duplicate user_id"):
+            w.add(rec)
+
+    def test_profiles_written_incrementally_and_index_complete(self, shards, tmp_path: Path) -> None:
+        shard_dir, tok = shards
+        src = ShardDataset(shard_dir)
+        uids = src.user_ids[:20]
+        recs = [src.get(u) for u in uids]
+        w = ShardWriter(tmp_path / "inc", tokenizer_hash=tok.content_hash, rows_per_shard=4)
+        for rec in recs:
+            w.add(rec, profile={"attributes": {"country": "GB"}, "lifelong": [], "as_of": 0})
+        manifest = w.close()
+        assert manifest["n_users"] == 20
+        idx = UserIndex(tmp_path / "inc")
+        assert idx.order == uids
+        assert all(idx.profile(u) == {"attributes": {"country": "GB"}, "lifelong": [], "as_of": 0} for u in uids)
+        metas = idx.meta_many(uids[::3])
+        assert [m.user_id for m in metas] == uids[::3]
+        assert metas[1] == idx.meta(uids[3])
+        idx.close()
+        src.close()
+
+    def test_get_many_uses_one_index_transaction(self, shards, monkeypatch) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        calls = {"meta_many": 0, "meta": 0}
+        real_meta_many = ds.index.meta_many
+
+        def counting_meta_many(user_ids):
+            calls["meta_many"] += 1
+            return real_meta_many(user_ids)
+
+        monkeypatch.setattr(ds.index, "meta_many", counting_meta_many)
+        monkeypatch.setattr(ds.index, "meta", lambda uid: calls.__setitem__("meta", calls["meta"] + 1))
+        out = ds.get_many(ds.user_ids[:50])
+        assert [r.user_id for r in out] == ds.user_ids[:50]
+        assert calls == {"meta_many": 1, "meta": 0}  # one batched index read, no per-user lookups
+        ds.close()
