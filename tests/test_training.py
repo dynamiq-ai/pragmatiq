@@ -40,7 +40,7 @@ def shards(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _nano(tok_hash: str, steps: int, run: Run, vocab: int, work: Path, **over):
     cfg = TrainConfig(max_steps=steps, token_budget=4096, warmup_steps=5, seed=0,
-                      checkpoint_every_min=1000.0, log_every=1, **over)
+                      checkpoint_every_min=1000.0, **{"log_every": 1, **over})
     seed_everything(cfg.seed)
     model = PragmaModel(ModelConfig.preset("small", vocab))
     trainer = PreTrainer(model, run, cfg, tok_hash, logger=MetricLogger(run.dir))
