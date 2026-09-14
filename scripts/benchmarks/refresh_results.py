@@ -45,6 +45,7 @@ def main() -> int:
     ap.add_argument("--max-steps", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-aml", action="store_true", help="skip the full-scale gate 6")
+    ap.add_argument("--aml-seeds", default="0,1,2", help="seeds for the AML ablation (gate 6)")
     ap.add_argument("--skip-multitask", action="store_true", help="skip the multi-task probe benchmark")
     ap.add_argument("--skip-staleness", action="store_true", help="skip the staleness benchmark")
     ap.add_argument("--out", default="outputs/gpu-validation-results")
@@ -61,7 +62,8 @@ def main() -> int:
     if not args.skip_staleness and _run([py, "scripts/benchmarks/staleness_probe.py", *scale, "--write"]):
         failures.append("staleness_probe")
     if not args.skip_aml:
-        env = dict(os.environ, PRAGMATIQ_GATE_FULL="1", PRAGMATIQ_WRITE_RESULTS="1")
+        env = dict(os.environ, PRAGMATIQ_GATE_FULL="1", PRAGMATIQ_WRITE_RESULTS="1",
+                   PRAGMATIQ_GATE6_SEEDS=args.aml_seeds)
         if _run(["bash", "scripts/gates/gate_6.sh"], env=env):
             failures.append("gate_6_full")
 
