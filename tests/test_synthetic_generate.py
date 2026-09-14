@@ -246,3 +246,89 @@ class TestStochasticProcesses:
         day = counts[[10, 12, 13, 17, 18]].mean()    # peak hours (HOUR_CURVE)
         night = counts[[1, 2, 3, 4]].mean()           # trough hours
         assert day > 3 * night, f"no day/night NHPP structure: day~{day:.0f} night~{night:.0f}"
+
+
+class TestRealismV2:
+    """Generator v2 realism: FX amounts, payday schedules, market hours, fee feedback."""
+
+    @staticmethod
+    def _txn(dataset: Path):
+        ev = pq.read_table(dataset / "events.parquet").to_pandas()
+        ev = ev[ev["source"] == "transaction"].copy()
+        f = ev["fields"].map(dict)
+        for k in ("amount", "currency", "mcc", "txn_type", "country", "merchant", "channel"):
+            ev[k] = f.map(lambda d, k=k: d.get(k))
+        ev["amount"] = ev["amount"].astype(float)
+        return ev
+
+    def test_amounts_are_in_the_transaction_currency(self, dataset: Path) -> None:
+        from pragmatiq.data.synthetic.config import FX_PER_GBP
+
+        ev = self._txn(dataset)
+        card = ev[(ev["txn_type"] == "card_payment") & (ev["mcc"] == "5411")]  # grocery
+        med = card.groupby("currency")["amount"].median()
+        assert "GBP" in med and "EUR" in med
+        assert med["EUR"] / med["GBP"] == pytest.approx(FX_PER_GBP["EUR"], rel=0.25)
+        if "PLN" in med:
+            assert med["PLN"] / med["GBP"] == pytest.approx(FX_PER_GBP["PLN"], rel=0.35)
+        fee = ev[ev["txn_type"] == "overdraft_fee"]
+        assert set(fee[fee["currency"] == "GBP"]["amount"].round(2)) <= {5.0}
+        assert set(fee[fee["currency"] == "EUR"]["amount"].round(2)) <= {round(5 * FX_PER_GBP["EUR"], 2)}
+        # A legitimate event's currency follows its country, never the user's home
+        # currency alone (account-takeover drains carry the attacker's card currency).
+        from pragmatiq.data.synthetic.config import COUNTRY_CCY
+
+        fraud = pq.read_table(dataset / "labels" / "fraud.parquet").to_pandas()
+        stolen = set(zip(fraud["user_id"], fraud["ts"].astype("int64")))
+        legit = ~np.array([(u, t) in stolen for u, t in zip(ev["user_id"], ev["ts"].astype("int64"))])
+        mism = ev[legit & (ev["txn_type"] == "card_payment").to_numpy()
+                  & (ev["country"].map(COUNTRY_CCY) != ev["currency"]).to_numpy()]
+        assert len(mism) == 0
+
+    def test_salary_paydays_vary_across_users(self, dataset: Path) -> None:
+        ev = self._txn(dataset)
+        sal = ev[ev["merchant"] == "EMPLOYER PAYROLL"].copy()
+        dom = ((sal["ts"].astype("int64") // 86_400_000_000).map(
+            lambda d: (np.datetime64(0, "D") + int(d)).astype("datetime64[D]").item().day))
+        sal["dom"] = dom
+        per_user = sal.groupby("user_id")["dom"].agg(lambda s: s.median())
+        assert per_user.between(22, 25).any()  # fixed-date / four-weekly payers
+        assert (per_user >= 28).any()  # last-business-day payers
+        # Four-weekly payers see 13 credits a year: some users have >1 credit in a month.
+        sal["month"] = (sal["ts"].astype("int64") // 86_400_000_000 // 30)
+        assert (sal.groupby(["user_id", "month"]).size() > 1).any()
+
+    def test_equity_orders_keep_market_hours_crypto_does_not(self, dataset: Path) -> None:
+        ev = pq.read_table(dataset / "events.parquet").to_pandas()
+        tr = ev[ev["source"] == "trading"].copy()
+        assert len(tr) > 50
+        tr["instrument"] = tr["fields"].map(lambda d: dict(d)["instrument"])
+        ts = tr["ts"].astype("int64")
+        tr["hour"] = (ts // 3_600_000_000) % 24
+        tr["dow"] = ((ts // 86_400_000_000) + 3) % 7
+        crypto = tr["instrument"].isin(["BTC", "ETH", "SOL"])
+        eq = tr[~crypto]
+        assert (eq["dow"] < 5).all()  # no weekend equity orders
+        assert (eq["hour"].between(7, 21)).mean() > 0.97  # market hours (+ pre-market)
+        assert (eq["hour"] < 6).mean() < 0.01  # essentially nothing overnight
+        if crypto.sum() > 30:
+            assert (tr[crypto]["dow"] >= 5).any()
+
+    def test_overdraft_fees_debit_the_balance(self) -> None:
+        from pragmatiq.data.synthetic.episodes import SourceBuffer
+        from pragmatiq.data.synthetic.simulator import UserSimulator
+        from pragmatiq.data.synthetic.world import World
+
+        cfg = WorldConfig(n_users=20, months=14, n_merchants=200, seed=3,
+                          eval_month_credit=2, eval_month_short=8)
+        sim = UserSimulator(World.build(cfg))
+        cal = sim.world.calendar
+        t0 = cal.start_us()
+        cash = [(t0 + 86_400_000_000 * d, -100.0) for d in range(1, 40)]  # steadily overdrawn
+        txn = SourceBuffer()
+        _, min_bal, end_bal = sim._balance(np.random.default_rng(0), 1000.0, txn, "GBP", list(cash), 0)
+        n_fee = sum(len(ts) for _, ts, _ in txn.groups())
+        assert n_fee > 0
+        opening = 1000.0 * np.random.default_rng(0).uniform(0.15, 1.1)  # _balance's first draw
+        assert end_bal == pytest.approx(opening + sum(a for _, a in cash) - 5.0 * n_fee)
+        assert min_bal == pytest.approx(end_bal)

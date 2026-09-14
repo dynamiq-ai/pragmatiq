@@ -15,10 +15,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from .config import WorldConfig
+from .config import COUNTRY_CCY, FX_PER_GBP, WorldConfig
 from .episodes import _CRYPTO_EXCHANGES, EpisodeInjector, LatentLog, SourceBuffer
 from .personas import ARCHETYPE_NAMES, ARCHETYPES
-from .world import DAY_US, MCC_CATALOG, MCC_IDX, MCC_KEYS, World
+from .world import DAY_US, MCC_CATALOG, MCC_IDX, MCC_KEYS, Calendar, World
 
 # mcc_key -> 4-digit MCC code, from the world catalog
 MCC_CATALOG_CODE: dict[str, str] = {row[1]: row[0] for row in MCC_CATALOG}
@@ -79,7 +79,56 @@ _INSTRUMENTS = np.array(
 )
 _OSES = np.array(["android_14", "android_15", "ios_17", "ios_18"], dtype=object)
 
-_CCY = {"GB": "GBP", "IE": "EUR", "FR": "EUR", "DE": "EUR", "ES": "EUR", "PL": "PLN", "LT": "EUR"}
+_CRYPTO_INSTRUMENTS = frozenset({"BTC", "ETH", "SOL"})
+
+
+def _normalize24(curve: list[float]) -> np.ndarray:
+    arr = np.asarray(curve, dtype=np.float64)
+    return arr / arr.mean()
+
+
+# Equity orders cluster in market hours (UK time): the LSE session 08:00-16:30
+# and the US overlap 14:30-21:00; almost nothing overnight. Crypto trades
+# around the clock with an evening tilt and no weekend closure. # GUESS shapes.
+_MARKET_HOUR_CURVE = _normalize24(
+    # 0     1     2     3     4     5     6     7     8    9    10   11   12   13   14   15   16   17   18   19   20   21    22    23
+    [0.02, 0.02, 0.02, 0.02, 0.02, 0.02, 0.05, 0.30, 2.2, 2.6, 1.7, 1.2, 1.1, 1.0, 1.6, 2.6, 2.4, 1.4, 1.0, 1.0, 1.3, 0.8, 0.10, 0.03]
+)
+_CRYPTO_HOUR_CURVE = _normalize24(
+    [0.6, 0.5, 0.4, 0.3, 0.3, 0.3, 0.4, 0.7, 1.0, 1.1, 1.1, 1.1, 1.2, 1.2, 1.2, 1.3, 1.4, 1.5, 1.7, 1.9, 2.0, 1.9, 1.5, 1.0]
+)
+
+# Salary schedules (monthly-paid archetypes only). # GUESS mix: most UK payrolls
+# run on the last business day; fixed dates and four-weekly cycles are common
+# enough that "payday" must not be a global calendar constant.
+_PAY_RULES = ("last_business_day", "day_25", "day_28", "four_weekly")
+_PAY_RULE_P = np.array([0.55, 0.20, 0.15, 0.10])
+
+
+def _user_paydays(cal: Calendar, rule: str, anchor: int) -> np.ndarray:
+    """Day offsets of one user's paydays over the horizon (always business days).
+
+    Fixed-date rules roll back to the previous business day when the date falls
+    on a weekend or bank holiday; the four-weekly cycle repeats every 28 days
+    from ``anchor`` (a day in the first four weeks), so some months carry two
+    paydays.
+    """
+    if rule == "last_business_day":
+        return cal.payday.astype(np.int64)
+    business = ~(cal.is_weekend | cal.is_holiday)
+
+    def prev_business(day: int) -> int:
+        while day > 0 and not business[day]:
+            day -= 1
+        return day
+
+    if rule in ("day_25", "day_28"):
+        dom = 25 if rule == "day_25" else 28
+        return np.array([
+            prev_business(min(int(cal.month_start_day[m]) + dom - 1, int(cal.month_start_day[m + 1]) - 1))
+            for m in range(cal.months)
+        ], dtype=np.int64)
+    return np.array([prev_business(int(d)) for d in range(anchor % 28, cal.n_days, 28)], dtype=np.int64)
 
 
 @dataclass
@@ -108,7 +157,7 @@ class UserTrace:
     insolvency_day: int  # day offset of first insolvency, -1 if none
     churn_month: int  # month the user reached CHURNED, -1 if never
     lifecycle: np.ndarray  # int8[months]
-    monthly_spend: np.ndarray  # float64[months] card spend (profit input)
+    monthly_card_spend: np.ndarray  # float64[months] card spend in GBP (interchange input)
     monthly_trades: np.ndarray  # float64[months] traded notional
     monthly_fx: np.ndarray  # float64[months] foreign-currency spend
     is_premium: bool
@@ -219,7 +268,7 @@ class UserSimulator:
         spec = ARCHETYPES[arch]
         tr = {k: float(v[user_idx]) for k, v in p.traits.items()}
         country = str(p.country[user_idx])
-        ccy = _CCY.get(country, "EUR")
+        ccy = COUNTRY_CCY.get(country, "EUR")
         income = float(p.income_monthly[user_idx])
         signup_day = int(p.signup_day[user_idx])
         signup_month = int(cal.month_of_day(np.array([signup_day]))[0])
@@ -243,7 +292,7 @@ class UserSimulator:
         fraud_rows: list[int] = []
         cash: list[tuple[int, float]] = []  # (ts_us, signed amount) for balance tracking
 
-        monthly_spend = np.zeros(cfg.months)
+        monthly_card_spend = np.zeros(cfg.months)
         monthly_trades = np.zeros(cfg.months)
         monthly_fx = np.zeros(cfg.months)
 
@@ -253,12 +302,20 @@ class UserSimulator:
         devices = [f"dev_{rng.integers(10**9, 10**10 - 1)}" for _ in range(n_devices)]
         os_name = str(_OSES[rng.integers(0, len(_OSES))])
 
+        # Salary schedule: drawn once per user so payday spend bumps and the
+        # salary series share the same dates.
+        pay_rule = (_PAY_RULES[int(rng.choice(len(_PAY_RULES), p=_PAY_RULE_P))]
+                    if spec["salary_kind"] == "monthly" else "last_business_day")
+        paydays = _user_paydays(cal, pay_rule, int(rng.integers(0, 28)))
+        if spec["salary_kind"] == "pension":
+            paydays = cal.month_start_day[:-1].astype(np.int64)
+
         rent_m, subs_m = self._recurring(rng, user_idx, arch, spec, income, stress_months,
                                          act_mult, signup_month, ccy, txn, recurring_rows,
-                                         cash, monthly_spend)
+                                         cash, pay_rule, paydays)
         self._spending(rng, user_idx, arch, spec, tr, income, rent_m + subs_m, stress_months,
-                       act_mult, signup_day, country, ccy, txn, cash, monthly_spend, monthly_fx,
-                       app, devices, os_name)
+                       act_mult, signup_day, country, ccy, txn, cash, monthly_card_spend,
+                       monthly_fx, app, devices, os_name, paydays)
         self._sessions(rng, spec, tr, act_mult, signup_day, country, app, devices, os_name)
         is_premium = self._maybe_premium(rng, tr, income)
         self._trading(rng, tr, act_mult, signup_day, ccy, trd, cash, monthly_trades)
@@ -288,7 +345,7 @@ class UserSimulator:
             group_of_event=group_of_event, row_of_event=row_of_event, groups=groups,
             attributes=attributes, lifelong=lifelong, recurring_rows=recurring_rows,
             fraud_rows=fraud_rows, insolvency_day=insolvency_day, churn_month=churn_month,
-            lifecycle=lifecycle, monthly_spend=monthly_spend, monthly_trades=monthly_trades,
+            lifecycle=lifecycle, monthly_card_spend=monthly_card_spend, monthly_trades=monthly_trades,
             monthly_fx=monthly_fx, is_premium=is_premium, comm_rows=comm_rows,
             min_balance=min_bal, end_balance=end_bal, latent=latent,
         )
@@ -296,11 +353,16 @@ class UserSimulator:
     # ------------------------------------------------------------------ recurring
     def _recurring(self, rng, user_idx, arch, spec, income, stress_months, act_mult,
                    signup_month, ccy, txn: SourceBuffer, recurring_rows, cash,
-                   monthly_spend) -> tuple[float, float]:
-        """Salary/rent/subscription series; returns (rent, subs) monthly costs."""
+                   pay_rule: str, paydays: np.ndarray) -> tuple[float, float]:
+        """Salary/rent/subscription series; returns (rent, subs) monthly costs (GBP).
+
+        Rent (standing order) and subscriptions (direct debit) are bank-transfer
+        legs, not card payments, so they do not feed ``monthly_card_spend``.
+        """
         cal, cfg = self.world.calendar, self.cfg
         infl = cal.inflation_mult
         country = str(self.world.personas.country[user_idx])
+        fx = FX_PER_GBP.get(ccy, 1.0)
         # Accumulate rows, then flush as one dense block (fast path for Arrow).
         rows: list[tuple[int, float, str, str, str, str]] = []  # ts, amt, merchant, mcc, type, channel
 
@@ -320,8 +382,28 @@ class UserSimulator:
 
         # --- salary / pension / student loan / invoices
         kind = spec["salary_kind"]
+        if kind == "monthly":
+            # One credit per payday of the user's schedule; a four-weekly cycle
+            # pays 28/30.44 of the monthly figure 13 times a year.
+            per_pay = income * (28.0 / 30.44 if pay_rule == "four_weekly" else 1.0)
+            pay_month = cal.month_of_day(paydays)
+            for day, m in zip(paydays.tolist(), pay_month.tolist()):
+                if m < signup_month:
+                    continue
+                if act_mult[m] <= 0:
+                    break
+                stress = stress_months[m]
+                pay_mult = max(0.0, 1.0 - 1.6 * stress)  # stress shrinks, then stops, salary
+                if rng.random() < 0.02:  # occasional missed/late payment even when healthy
+                    pay_mult *= rng.uniform(0.0, 0.6)
+                if pay_mult <= 0.05:
+                    continue
+                day = min(max(day + int(rng.integers(-1, 2)), int(cal.month_start_day[m])),
+                          int(cal.month_start_day[m + 1]) - 1)
+                emit(day, 9 + rng.random() * 2, per_pay * float(infl[day]) * pay_mult * rng.uniform(0.98, 1.02),
+                     "EMPLOYER PAYROLL", "income", "credit_transfer", f"sal_{user_idx}")
         for m in range(signup_month, cfg.months):
-            if act_mult[m] <= 0:
+            if kind == "monthly" or act_mult[m] <= 0:
                 break
             stress = stress_months[m]
             pay_mult = max(0.0, 1.0 - 1.6 * stress)  # stress shrinks, then stops, salary
@@ -330,12 +412,7 @@ class UserSimulator:
             if pay_mult <= 0.05:
                 continue
             base = income * float(infl[cal.payday[m]])
-            if kind == "monthly":
-                day = int(cal.payday[m]) + int(rng.integers(-1, 2))
-                day = min(max(day, int(cal.month_start_day[m])), int(cal.month_start_day[m + 1]) - 1)
-                emit(day, 9 + rng.random() * 2, base * pay_mult * rng.uniform(0.98, 1.02),
-                     "EMPLOYER PAYROLL", "income", "credit_transfer", f"sal_{user_idx}")
-            elif kind == "pension":
+            if kind == "pension":
                 day = int(cal.month_start_day[m])
                 emit(day, 8 + rng.random() * 2, base * pay_mult, "STATE PENSION", "income",
                      "credit_transfer", f"pen_{user_idx}")
@@ -368,7 +445,6 @@ class UserSimulator:
                 amt = rent * float(infl[day]) * rng.uniform(0.999, 1.001)
                 emit(day, 7 + rng.random() * 3, amt, "LANDLORD STANDING ORDER", "income",
                      "standing_order", f"rent_{user_idx}")
-                monthly_spend[m] += amt
 
         # --- subscriptions: start/cancel with jitter and price drift
         n_subs = int(rng.poisson(spec["subs_lambda"]))
@@ -393,13 +469,12 @@ class UserSimulator:
                 day = max(day, int(cal.month_start_day[m]))
                 amt = price * float(infl[day]) * (1.0 + 0.04 * (rng.random() < 0.04))
                 emit(day, rng.random() * 24, amt, name, mcc_key, "direct_debit", sid)
-                monthly_spend[m] += amt
 
         if rows:
             n = len(rows)
             txn.append(
                 np.array([r[0] for r in rows], dtype=np.int64),
-                amount=np.array([f"{r[1]:.2f}" for r in rows], dtype=object),
+                amount=np.array([f"{r[1] * fx:.2f}" for r in rows], dtype=object),
                 currency=np.full(n, ccy, dtype=object),
                 mcc=np.array([r[3] for r in rows], dtype=object),
                 merchant=np.array([r[2] for r in rows], dtype=object),
@@ -412,8 +487,8 @@ class UserSimulator:
     # ------------------------------------------------------------------ spending
     def _spending(self, rng, user_idx, arch, spec, tr, income, fixed_costs, stress_months,
                   act_mult, signup_day, country, ccy, txn: SourceBuffer, cash,
-                  monthly_spend, monthly_fx, app: SourceBuffer, devices: list[str],
-                  os_name: str) -> None:
+                  monthly_card_spend, monthly_fx, app: SourceBuffer, devices: list[str],
+                  os_name: str, paydays: np.ndarray) -> None:
         cal, w = self.world.calendar, self.world
         mu_shift = 0.35 * np.log1p(income / 2500.0)  # richer users spend more per txn
 
@@ -431,11 +506,11 @@ class UserSimulator:
         # more even outside acute arcs.
         pers_w[gambling_i] *= 1.0 + 1.5 * tr["financial_stress"] * tr["risk_appetite"]
 
-        # Personal merchant loyalty pools: a few favorites per likely MCC.
+        # Personal merchant loyalty pools: a few home-country favorites per likely MCC.
         pool: dict[int, np.ndarray] = {}
         for mi in range(len(MCC_KEYS)):
             n_fav = 3 if pers_w[mi] > 0.01 else 1
-            pool[mi] = w.merchants.sample_in_mcc(mi, rng.random(n_fav))
+            pool[mi] = w.merchants.sample_in_mcc(mi, rng.random(n_fav), country)
 
         # Day-level intensity over the user's active life. The rate is coupled
         # to an income-derived budget so spending tracks means: without this,
@@ -463,9 +538,8 @@ class UserSimulator:
             * cal.DOW_MULT[cal.day_of_week[days]]
             * (1.0 + 0.15 * stress_months[m_of_day])  # desperation spending during arcs
         )
-        # Payday bumps: +60% on payday and the 2 days after.
-        for m in range(self.cfg.months):
-            pd = int(cal.payday[m])
+        # Payday bumps: +60% on the user's own paydays and the 2 days after.
+        for pd in paydays.tolist():
             sel = (days >= pd) & (days <= pd + 2)
             daily[sel] *= 1.6
 
@@ -503,24 +577,47 @@ class UserSimulator:
         cdf = np.cumsum(wts, axis=1)
         mcc_ev = (rng.random((n, 1)) < cdf).argmax(axis=1)
 
-        # Merchant: 78% loyalty pool, else fresh Zipf draw within the MCC.
+        online = rng.random(n) < w.merchants.mcc_online_p[mcc_ev] * (0.6 + 0.8 * tr["tech_savviness"])
+
+        # Travel weeks: a trip country is drawn per trip from the rest of the
+        # population's countries (more trips for HNW / traders); the trip's
+        # events go to that country's merchants in its currency.
+        travel_p = 0.02 + 0.08 * (arch in ("high_net_worth", "trader")) + 0.02 * tr["risk_appetite"]
+        n_trips = rng.poisson(travel_p * self.cfg.months)
+        trip_pool = [c for c in self.cfg.country_mix if c != country] or [country]
+        trip_country = np.full(n, "", dtype=object)  # "" = at home
+        for _ in range(int(n_trips)):
+            t0 = int(rng.integers(day0, max(day0 + 1, cal.n_days - 8)))
+            dest = trip_pool[int(rng.integers(0, len(trip_pool)))]
+            trip_country[(ev_day >= t0) & (ev_day < t0 + int(rng.integers(3, 9)))] = dest
+        abroad = trip_country != ""
+        # Cross-border e-commerce: a slice of online orders goes to a merchant
+        # anywhere in the population (a foreign one lands as an FX purchase).
+        foreign_online = online & ~abroad & (rng.random(n) < 0.10)
+
+        # Merchant: at home 78% loyalty pool, else a fresh home-country Zipf draw;
+        # abroad the trip country's pool; cross-border online the global pool.
         merchant_id = np.zeros(n, dtype=np.int64)
         loyal = rng.random(n) < 0.78
+        u = rng.random(n)
         for mi in np.unique(mcc_ev):
-            sel = mcc_ev == mi
-            ids = np.where(
-                loyal[sel],
-                pool[mi][rng.integers(0, len(pool[mi]), size=int(sel.sum()))],
-                w.merchants.sample_in_mcc(int(mi), rng.random(int(sel.sum()))),
-            )
-            merchant_id[sel] = ids
+            idx = np.nonzero(mcc_ev == mi)[0]
+            ids = w.merchants.sample_in_mcc(int(mi), u[idx], country)
+            lo = loyal[idx] & ~abroad[idx] & ~foreign_online[idx]
+            ids[lo] = pool[mi][rng.integers(0, len(pool[mi]), size=int(lo.sum()))]
+            fo = foreign_online[idx]
+            if fo.any():
+                ids[fo] = w.merchants.sample_in_mcc(int(mi), u[idx][fo])
+            for dest in np.unique(trip_country[idx][abroad[idx]]):
+                sub = trip_country[idx] == dest
+                ids[sub] = w.merchants.sample_in_mcc(int(mi), u[idx][sub], str(dest))
+            merchant_id[idx] = ids
 
         amt = rng.lognormal(w.merchants.mcc_mu[mcc_ev] + mu_shift, w.merchants.mcc_sigma[mcc_ev])
         gambling_ev = mcc_ev == gambling_i
         amt = np.where(gambling_ev, amt * (1.0 + 1.2 * stress_ev), amt)  # chasing losses
-        amt = np.round(np.clip(amt * cal.inflation_mult[ev_day], 0.5, 25_000.0), 2)
+        amt = np.round(np.clip(amt * cal.inflation_mult[ev_day], 0.5, 25_000.0), 2)  # GBP
 
-        online = rng.random(n) < w.merchants.mcc_online_p[mcc_ev] * (0.6 + 0.8 * tr["tech_savviness"])
         contactless = (~online) & (rng.random(n) < 0.65) & (amt < 100)
         channel = np.where(online, "online", np.where(contactless, "contactless", "pos")).astype(object)
         atm = np.array([MCC_KEYS[m] == "atm" for m in mcc_ev])
@@ -528,23 +625,17 @@ class UserSimulator:
         txn_type = np.where(atm, "atm_withdrawal", "card_payment").astype(object)
 
         m_country = w.merchants.countries[merchant_id]
-        # Travel weeks: occasionally spend abroad (more for HNW / high income).
-        travel_p = 0.02 + 0.08 * (arch in ("high_net_worth", "trader")) + 0.02 * tr["risk_appetite"]
-        n_trips = rng.poisson(travel_p * self.cfg.months)
-        abroad = np.zeros(n, dtype=bool)
-        for _ in range(int(n_trips)):
-            t0 = int(rng.integers(day0, max(day0 + 1, cal.n_days - 8)))
-            abroad |= (ev_day >= t0) & (ev_day < t0 + int(rng.integers(3, 9)))
-        ev_country = np.where(abroad, m_country, country).astype(object)
-        is_fx = np.array([_CCY.get(str(c), "EUR") != ccy for c in ev_country])
-        ev_ccy = np.where(is_fx, [_CCY.get(str(c), "EUR") for c in ev_country], ccy).astype(object)
+        ev_country = np.where(abroad | foreign_online, m_country, country).astype(object)
+        ev_ccy = np.array([COUNTRY_CCY.get(str(c), "EUR") for c in ev_country], dtype=object)
+        is_fx = ev_ccy != ccy
+        fx_rate = np.array([FX_PER_GBP.get(str(c), 1.0) for c in ev_ccy])
 
         mcc_codes = np.array([MCC_CATALOG_CODE[MCC_KEYS[m]] for m in mcc_ev], dtype=object)
         names = w.merchants.names[merchant_id]
 
         txn.append(
             ts,
-            amount=_round2str(amt),
+            amount=_round2str(amt * fx_rate),  # in the transaction currency
             currency=ev_ccy,
             mcc=mcc_codes,
             merchant=names.astype(object),
@@ -554,7 +645,7 @@ class UserSimulator:
         )
         for t, a in zip(ts.tolist(), amt.tolist()):
             cash.append((t, -a))
-        np.add.at(monthly_spend, ev_month, amt)
+        np.add.at(monthly_card_spend, ev_month, np.where(atm, 0.0, amt))  # ATM earns no interchange
         np.add.at(monthly_fx, ev_month, np.where(is_fx, amt, 0.0))
 
         # Organic crypto top-ups for risk-appetite users (after the crypto
@@ -572,7 +663,7 @@ class UserSimulator:
                 cx_amt = np.round(np.exp(rng.normal(3.6, 0.9, size=n_cx)), 2)
                 txn.append(
                     cx_ts,
-                    amount=_round2str(cx_amt),
+                    amount=_round2str(cx_amt * FX_PER_GBP.get(ccy, 1.0)),
                     currency=np.full(n_cx, ccy, dtype=object),
                     mcc=np.full(n_cx, MCC_CATALOG_CODE["online_retail"], dtype=object),
                     merchant=_CRYPTO_EXCHANGES[rng.integers(0, len(_CRYPTO_EXCHANGES), size=n_cx)],
@@ -582,7 +673,7 @@ class UserSimulator:
                 )
                 for t, a in zip(cx_ts.tolist(), cx_amt.tolist()):
                     cash.append((int(t), -float(a)))
-                np.add.at(monthly_spend, cal.month_of_day(np.minimum(
+                np.add.at(monthly_card_spend, cal.month_of_day(np.minimum(
                     (cx_ts - cal.start_us()) // DAY_US, cal.n_days - 1)), cx_amt)
 
         # Sessions sometimes precede a payment: a fraction of in-app (online)
@@ -686,14 +777,29 @@ class UserSimulator:
         days = np.arange(day0, cal.n_days)
         m_of_day = cal.month_of_day(days)
         rate = 6.0 * (tr["risk_appetite"] - 0.45) * 2.0  # trades / month
-        daily = rate / 30.44 * act_mult[m_of_day] * (~cal.is_weekend[days])
-        offs = _nhpp_thinning(rng, day0, n_days, daily, cal.HOUR_CURVE)
-        if len(offs) == 0:
-            return
-        ts = cal.start_us() + day0 * DAY_US + np.sort(offs)
-        n = len(ts)
         favs = _INSTRUMENTS[rng.choice(len(_INSTRUMENTS), size=min(4, len(_INSTRUMENTS)), replace=False)]
-        instr = favs[rng.integers(0, len(favs), size=n)]
+        cx_favs = np.array([f for f in favs if f in _CRYPTO_INSTRUMENTS], dtype=object)
+        eq_favs = np.array([f for f in favs if f not in _CRYPTO_INSTRUMENTS], dtype=object)
+        cx_share = len(cx_favs) / len(favs)
+        # Two order streams: equities only on trading days within market hours,
+        # crypto every day around the clock (see the hour curves above).
+        open_day = ~(cal.is_weekend[days] | cal.is_holiday[days])
+        eq_offs = _nhpp_thinning(rng, day0, n_days, rate * (1.0 - cx_share) / 30.44 * act_mult[m_of_day] * open_day,
+                                 _MARKET_HOUR_CURVE)
+        cx_offs = _nhpp_thinning(rng, day0, n_days, rate * cx_share / 30.44 * act_mult[m_of_day],
+                                 _CRYPTO_HOUR_CURVE)
+        n_eq, n_cx = len(eq_offs), len(cx_offs)
+        n = n_eq + n_cx
+        if n == 0:
+            return
+        instr = np.concatenate([
+            eq_favs[rng.integers(0, len(eq_favs), size=n_eq)] if n_eq else np.zeros(0, dtype=object),
+            cx_favs[rng.integers(0, len(cx_favs), size=n_cx)] if n_cx else np.zeros(0, dtype=object),
+        ]).astype(object)
+        offs = np.concatenate([eq_offs, cx_offs])
+        order = np.argsort(offs, kind="stable")
+        ts = cal.start_us() + day0 * DAY_US + offs[order]
+        instr = instr[order]
         side = np.where(rng.random(n) < 0.58, "buy", "sell").astype(object)
         price = np.round(np.exp(rng.normal(4.2, 1.4, size=n)), 2)
         qty = np.round(np.exp(rng.normal(0.4, 1.0, size=n)), 4)
@@ -779,11 +885,12 @@ class UserSimulator:
         in_i = tg.user_incoming(user_idx)
         out_i = out_i[tg.is_mule_leg[out_i] == 0]
         in_i = in_i[tg.is_mule_leg[in_i] == 0]
+        fx = FX_PER_GBP.get(ccy, 1.0)  # ledger amounts are GBP; shown in the account currency
         if len(out_i):
             ts = tg.ts_us[out_i]
             amt = tg.amount[out_i]
             cps = np.array([f"u_{i:08d}" for i in tg.to_idx[out_i]], dtype=object)
-            txn.append(ts, amount=_round2str(amt), currency=np.full(len(ts), ccy, dtype=object),
+            txn.append(ts, amount=_round2str(amt * fx), currency=np.full(len(ts), ccy, dtype=object),
                        mcc=np.full(len(ts), "4829", dtype=object),
                        merchant=np.full(len(ts), "P2P TRANSFER", dtype=object),
                        txn_type=np.full(len(ts), "p2p_out", dtype=object),
@@ -796,7 +903,7 @@ class UserSimulator:
             ts = tg.ts_us[in_i]
             amt = tg.amount[in_i]
             cps = np.array([f"u_{i:08d}" for i in tg.from_idx[in_i]], dtype=object)
-            txn.append(ts, amount=_round2str(amt), currency=np.full(len(ts), ccy, dtype=object),
+            txn.append(ts, amount=_round2str(amt * fx), currency=np.full(len(ts), ccy, dtype=object),
                        mcc=np.full(len(ts), "4829", dtype=object),
                        merchant=np.full(len(ts), "P2P TRANSFER", dtype=object),
                        txn_type=np.full(len(ts), "p2p_in", dtype=object),
@@ -824,20 +931,30 @@ class UserSimulator:
         bal = opening + np.cumsum(amt)
         overdraft_limit = -max(500.0, income * 1.25)
         below = bal < 0
-        # Overdraft fee events: at most one per day while below zero.
+        # Overdraft fee events: at most one per day while below zero. The fees
+        # are debited from the balance (one pass: fee days are decided on the
+        # pre-fee trajectory), so a long overdraft compounds toward insolvency.
         od_days = np.unique((ts[below] - cal.start_us()) // DAY_US)
         if len(od_days):
             od_days = od_days[:60]  # cap pathological cases
-            od_ts = cal.start_us() + od_days * DAY_US + 23 * HOUR_US + 59 * MIN_US
+            od_ts = (cal.start_us() + od_days * DAY_US + 23 * HOUR_US + 59 * MIN_US).astype(np.int64)
             n = len(od_ts)
-            txn.append(od_ts.astype(np.int64),
-                       amount=np.full(n, "5.00", dtype=object),
+            fee_gbp = 5.0
+            txn.append(od_ts,
+                       amount=np.full(n, f"{fee_gbp * FX_PER_GBP.get(ccy, 1.0):.2f}", dtype=object),
                        currency=np.full(n, ccy, dtype=object),
                        mcc=np.full(n, "6012", dtype=object),
                        merchant=np.full(n, "OVERDRAFT FEE", dtype=object),
                        txn_type=np.full(n, "overdraft_fee", dtype=object),
                        channel=np.full(n, "system", dtype=object),
                        country=np.full(n, country, dtype=object))
+            fee_legs = [(int(t), -fee_gbp) for t in od_ts.tolist()]
+            cash.extend(fee_legs)
+            ts = np.concatenate([ts, od_ts])
+            amt = np.concatenate([amt, np.full(n, -fee_gbp)])
+            order = np.argsort(ts, kind="stable")
+            ts, amt = ts[order], amt[order]
+            bal = opening + np.cumsum(amt)
         # Insolvency: balance stays below the overdraft limit for 14+
         # consecutive days (deep arrears default even if income later resumes).
         insolvency_day = -1

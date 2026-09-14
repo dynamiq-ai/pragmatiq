@@ -123,7 +123,7 @@ class LabelOracle:
             # ---- ltv_positive shares the same eligible population: 6m gross profit
             # AFTER the short eval point (interchange + premium + trading + FX − servicing).
             sl = slice(m_eval, horizon)
-            interchange = 0.007 * float(trace.monthly_spend[sl].sum())
+            interchange = 0.007 * float(trace.monthly_card_spend[sl].sum())  # card spend only
             premium_fee = 6.99 * (horizon - m_eval) if trace.is_premium else 0.0
             trading_fee = 0.001 * float(trace.monthly_trades[sl].sum())
             fx_markup = 0.01 * float(trace.monthly_fx[sl].sum())
