@@ -159,13 +159,25 @@ def precision_agreement(run_dir: Path, shard_dir: Path, label_path: Path,
     uids = [u for u in uids if u in have][: (max_users or len(uids))]
     cutoffs = cutoffs_from_labels(uids, eval_us) if eval_us is not None else None
     aucs: dict[str, float] = {}
+    embs: dict[str, dict[str, Any]] = {}
     for prec in ("fp32", "bf16"):
         emb = embed_users(model, ds, device=device, user_ids=uids, cutoffs=cutoffs, precision=prec)
+        embs[prec] = emb
         aucs[prec] = EmbeddingProbe(seed=0).run(emb, label_path).auc
     ds.close()
+    # Direct closeness of the two embedding sets (the probe AUC on an
+    # undertrained model is noisy at the 0.01 level; the cosine is not).
+    import numpy as np
+
+    common = [u for u in embs["fp32"] if u in embs["bf16"]]
+    a = np.stack([embs["fp32"][u] for u in common]).astype(np.float64)
+    b = np.stack([embs["bf16"][u] for u in common]).astype(np.float64)
+    cos = (a * b).sum(1) / (np.linalg.norm(a, axis=1) * np.linalg.norm(b, axis=1) + 1e-12)
+    out["mean_cosine"] = float(cos.mean())
+    out["min_cosine"] = float(cos.min())
     out["fp32_probe_auc"], out["bf16_probe_auc"] = aucs["fp32"], aucs["bf16"]
     out["abs_auc_delta"] = abs(aucs["fp32"] - aucs["bf16"])
-    out["passed"] = out["abs_auc_delta"] <= 0.01
+    out["passed"] = out["abs_auc_delta"] <= 0.02 and out["mean_cosine"] >= 0.99
     print(f"[precision] fp32 auc={aucs['fp32']:.4f} bf16 auc={aucs['bf16']:.4f} "
-          f"delta={out['abs_auc_delta']:.4f}", flush=True)
+          f"delta={out['abs_auc_delta']:.4f} mean_cosine={out['mean_cosine']:.4f}", flush=True)
     return out

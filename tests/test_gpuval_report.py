@@ -74,7 +74,7 @@ def test_acceptance_table_flags_failures_and_skips(report) -> None:
     ev["legs"]["finetune"][0]["epoch_stats"][2]["tokens_per_sec"] = 60000.0  # -40%
     ev["legs"]["precision"]["abs_auc_delta"] = 0.03
     ev["legs"]["precision"]["passed"] = False
-    ev["utilisation"][0]["gpu"]["mean_util_pct"] = 12.0
+    ev["utilisation"][0]["gpu"]["mean_util_pct"] = 5.0  # below the 10% host-bound floor
     ev["legs"]["flash_check"] = {"skipped": True, "skip_reason": "no CUDA"}
     del ev["legs"]["export"]
     rows = {r["check"]: r for r in report.acceptance_table(ev)}
