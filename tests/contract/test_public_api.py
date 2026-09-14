@@ -160,8 +160,10 @@ GOLDEN_DEFAULTS: dict[str, dict[str, Any]] = {
     "probe": {"device": "auto", "token_budget": 16_384, "seed": 0,
               "with_baseline": True, "probe_model": "gbdt"},
     "uplift": {"device": "auto", "token_budget": 16_384, "seed": 0, "learner": "t"},
-    "export": {"out": "pragmatiq_embedder.onnx", "device": "cpu"},
-    "benchmark": {"device": "auto", "out": "deploy/benchmarks/RESULTS.md", "max_users": None},
+    # 1.1.0: export accepts any device (the graph is built on CPU regardless) and the
+    # benchmark writes next to the caller instead of into the repo's deploy/ tree.
+    "export": {"out": "pragmatiq_embedder.onnx", "device": "auto"},
+    "benchmark": {"device": "auto", "out": "benchmark_results.md", "max_users": None},
     "gnn": {"seeds": (0, 1, 2), "device": "auto", "epochs": 150},
     "validate": {},
     "quickstart": {"out": "runs/quickstart", "n_users": 50_000, "seed": 0,

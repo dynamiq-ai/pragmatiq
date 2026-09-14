@@ -3,8 +3,8 @@
 This module owns the *serving-specific* logic that used to live inside the
 Triton ``model.py``:
 
-1. :func:`resolve_serve_device` — CPU-first device policy (mirrors the old
-   Triton ``initialize()`` logic verbatim).
+1. :func:`resolve_serve_device` — GPU-first device policy (CUDA when visible,
+   ``PRAGMATIQ_SERVE_CPU=1`` to pin the CPU).
 2. :class:`Runtime` / :func:`load` — stage a run directory (remote or local),
    load ``PragmaModel.from_pretrained``, and expose :meth:`Runtime.embed`.
 
@@ -45,15 +45,14 @@ def resolve_serve_device(
     instance_kind: str | None = None,
     instance_device_id: str | int | None = None,
 ) -> str:
-    """Return the serving device string using the CPU-first policy.
+    """Return the serving device string using the GPU-first policy.
 
-    The decision tree matches the original Triton ``initialize()`` exactly:
-
-    1. If the Triton instance kind is ``"GPU"`` **and** CUDA is available →
+    1. ``PRAGMATIQ_SERVE_CPU=1`` → ``"cpu"`` (the escape hatch for a CPU-only
+       deployment or a GPU host that must keep its GPUs for training).
+    2. Else if the Triton instance kind is ``"GPU"`` **and** CUDA is available →
        ``cuda:<instance_device_id>`` (pin to the assigned GPU).
-    2. Else if ``PRAGMATIQ_SERVE_GPU=1`` **and** CUDA is available →
-       ``"cuda"`` (the deploy script sets this for an all-GPU pod).
-    3. Else → ``"cpu"`` (global rule 5: CPU is always the safe baseline).
+    3. Else if CUDA is available → ``"cuda"``.
+    4. Else → ``"cpu"`` (always a correct target; CPU inference is fp32).
 
     Args:
         instance_kind: Triton ``model_instance_kind`` (``"GPU"`` or ``"CPU"``).
@@ -67,13 +66,36 @@ def resolve_serve_device(
     """
     import torch  # lazy: keep top-level import-time lean
 
-    serve_gpu = os.environ.get("PRAGMATIQ_SERVE_GPU", "") == "1"
-    if instance_kind == "GPU" and torch.cuda.is_available():
+    if os.environ.get("PRAGMATIQ_SERVE_CPU", "") == "1":
+        return "cpu"
+    if not torch.cuda.is_available():
+        return "cpu"
+    if instance_kind == "GPU":
         device_id = instance_device_id if instance_device_id is not None else "0"
         return f"cuda:{device_id}"
-    if serve_gpu and torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    return "cuda"
+
+
+def request_limits() -> tuple[int, int]:
+    """``(max_records, token_budget)`` for one serving request, from the environment.
+
+    ``PRAGMATIQ_SERVE_MAX_RECORDS`` (default 1024) caps the users per request so
+    one oversized payload cannot exhaust the device; ``PRAGMATIQ_SERVE_TOKEN_BUDGET``
+    (default 16384) is the per-forward token cap the request is split into.
+    """
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except ValueError as e:
+            raise ValueError(f"{name} must be an integer, got {raw!r}") from e
+        if value <= 0:
+            raise ValueError(f"{name} must be > 0, got {value}")
+        return value
+
+    return _env_int("PRAGMATIQ_SERVE_MAX_RECORDS", 1024), _env_int("PRAGMATIQ_SERVE_TOKEN_BUDGET", 16_384)
 
 
 # ---------------------------------------------------------------------------
@@ -121,14 +143,27 @@ class Runtime:
     def embed(self, records: list[dict]) -> np.ndarray:
         """Embed *records* and return a contiguous float32 ``[n_users, dim]`` array.
 
+        The request is capped by :func:`request_limits` and split into forward
+        passes of at most the configured token budget; on CUDA the forward runs
+        in bf16 unless ``PRAGMATIQ_INFERENCE_PRECISION=fp32``.
+
         Args:
             records: List of plain user-record dicts.  Each dict must carry at
                      minimum ``user_id`` and ``events``.
 
         Returns:
             ``np.ndarray`` of dtype ``float32`` and shape ``[n_users, dim]``.
+
+        Raises:
+            ValueError: if the request holds more than ``PRAGMATIQ_SERVE_MAX_RECORDS`` users.
         """
-        raw = self._model.embed_records(records)
+        max_records, token_budget = request_limits()
+        if len(records) > max_records:
+            raise ValueError(
+                f"request holds {len(records)} records; the server accepts at most {max_records} "
+                "per request (PRAGMATIQ_SERVE_MAX_RECORDS). Split the request."
+            )
+        raw = self._model.embed_records(records, token_budget=token_budget)
         return encode_response(raw)
 
 
@@ -200,6 +235,7 @@ def load(
 
 __all__ = [
     "resolve_serve_device",
+    "request_limits",
     "Runtime",
     "load",
 ]

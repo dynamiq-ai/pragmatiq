@@ -76,7 +76,9 @@ def pretrain_cmd(
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     run_name: str = typer.Option(..., "--name", help="Run name (runs/{name})."),
     model_size: str = typer.Option("small", help="small | medium | large."),
-    config: str | None = typer.Option(None, help="Pretrain YAML (configs/pretrain.yaml)."),
+    config: str | None = typer.Option(
+        "auto", help="Pretrain YAML (configs/pretrain.yaml), or 'auto' to size the batch and "
+                     "schedule from the data and the device."),
     runs_root: str = typer.Option("runs", help="Runs root directory."),
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
     wandb: bool = typer.Option(False, "--wandb",
@@ -192,11 +194,12 @@ def export_cmd(
     run: str = typer.Option(..., help="Run directory of a trained model."),
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory (for an example user)."),
     out: str = typer.Option("pragmatiq_embedder.onnx", help="Output ONNX path."),
+    device: str = typer.Option("auto", help="Accepted for symmetry; the graph is built on CPU."),
 ) -> None:
     """Export the padded-embedder ONNX variant (varlen caveat documented)."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.export(run, shard_dir, out=out), indent=2))
+    typer.echo(json.dumps(api.export(run, shard_dir, out=out, device=device), indent=2))
 
 
 @app.command("benchmark")
@@ -204,12 +207,14 @@ def benchmark_cmd(
     run: str = typer.Option(..., help="Run directory of a trained model."),
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
-    out: str = typer.Option("deploy/benchmarks/RESULTS.md", help="Results markdown."),
+    out: str = typer.Option("benchmark_results.md", help="Results markdown."),
+    precision: str = typer.Option("auto", help="auto | bf16 | fp32 (CUDA autocast dtype)."),
 ) -> None:
     """Benchmark batch-embedding throughput; writes RESULTS.md."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.benchmark(run, shard_dir, device=device, out=out), indent=2))
+    typer.echo(json.dumps(api.benchmark(run, shard_dir, device=device, out=out, precision=precision),
+                          indent=2))
 
 
 @app.command("gnn")

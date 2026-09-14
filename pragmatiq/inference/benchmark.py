@@ -1,7 +1,7 @@
 """Serving + batch-embed benchmarks.
 
 ``benchmark_batch_embed`` measures local batch-embedding throughput and a cost
-table; ``write_results`` renders ``deploy/benchmarks/RESULTS.md``. The Triton
+table; ``write_results`` renders a results markdown file (``benchmark_results.md`` by default). The Triton
 ``perf_analyzer`` wrapper (latency percentiles vs concurrency) is emitted as a
 runnable command when a live Triton endpoint is configured — it needs the GPU
 serving stack, so it is not executed in CI.
@@ -15,42 +15,50 @@ from typing import Any
 
 import torch
 
+from ..core.env import inference_context, resolve_device, resolve_precision
 from ..data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
 from ..models.pragmatiq import PragmaModel
 
 
-@torch.no_grad()
 def benchmark_batch_embed(
-    model: PragmaModel, shard_dir: str | Path, device: str = "cpu",
-    token_budget: int = 16_384, max_users: int | None = None,
+    model: PragmaModel, shard_dir: str | Path, device: str = "auto",
+    token_budget: int = 16_384, max_users: int | None = None, precision: str = "auto",
 ) -> dict[str, Any]:
-    """Measure batch-embedding throughput (users/sec, tokens/sec)."""
+    """Measure batch-embedding throughput (users/sec, tokens/sec).
+
+    Uses the same prefetching loader and inference context as
+    :class:`~pragmatiq.inference.embedder.BatchEmbedder`, so the number is the
+    production batch path, not a synthetic kernel benchmark.
+    """
+    device = resolve_device(device)
     model = model.to(device).eval()
     ds = ShardDataset(shard_dir)
     sampler = DynamicBatchSampler(ds.index, token_budget=token_budget, shuffle=False)
     sampler.set_epoch(0)
-    loader = ShardDataLoader(ds, sampler)
+    is_cuda = str(device).startswith("cuda")
+    loader = ShardDataLoader(ds, sampler, prefetch=2, pin_memory=is_cuda)
     n_users = n_tokens = 0
     # CUDA kernels launch asynchronously, so the wall clock must bracket a
     # synchronize on each side — otherwise the loop returns before the GPU has
     # finished and the measured throughput is overstated.
-    is_cuda = str(device).startswith("cuda")
     if is_cuda:
         torch.cuda.synchronize()
     t0 = time.time()
-    for batch in loader:
-        batch = batch.to(device)
-        model.embed_users(batch)
-        n_users += batch.n_users
-        n_tokens += batch.n_tokens
-        if max_users is not None and n_users >= max_users:
-            break
+    with inference_context(device, precision):
+        for batch in loader:
+            batch = batch.to(device, non_blocking=is_cuda)
+            model.embed_users(batch)
+            n_users += batch.n_users
+            n_tokens += batch.n_tokens
+            if max_users is not None and n_users >= max_users:
+                break
     if is_cuda:
         torch.cuda.synchronize()
     elapsed = max(time.time() - t0, 1e-6)
     ds.close()
     return {
-        "device": device, "n_users": n_users, "n_tokens": n_tokens,
+        "device": device, "precision": resolve_precision(precision, device),
+        "n_users": n_users, "n_tokens": n_tokens,
         "elapsed_sec": round(elapsed, 3),
         "users_per_sec": round(n_users / elapsed, 1),
         "tokens_per_sec": round(n_tokens / elapsed, 1),
@@ -87,7 +95,7 @@ def perf_analyzer_command(model_name: str = "pragmatiq_embedder", url: str = "lo
             f"--input-data records.json --shape records_json:1")
 
 
-def write_results(stats: dict[str, Any], out_path: str | Path = "deploy/benchmarks/RESULTS.md") -> Path:
+def write_results(stats: dict[str, Any], out_path: str | Path = "benchmark_results.md") -> Path:
     """Render a benchmark results markdown file."""
     out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -98,6 +106,7 @@ def write_results(stats: dict[str, Any], out_path: str | Path = "deploy/benchmar
         "## Batch embedding throughput", "",
         "| metric | value |", "|---|---|",
         f"| device | {stats.get('device')} |",
+        f"| precision | {stats.get('precision')} |",
         f"| users/sec | {stats.get('users_per_sec')} |",
         f"| tokens/sec | {stats.get('tokens_per_sec')} |",
         f"| USD / 1M users | {stats.get('usd_per_million_users')} |", "",

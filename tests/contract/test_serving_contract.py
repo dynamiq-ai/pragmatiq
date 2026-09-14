@@ -19,6 +19,7 @@ Structure
 
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 
@@ -140,6 +141,7 @@ def test_contract_importable_from_package() -> None:
         "Runtime",
         "load",
         "resolve_serve_device",
+        "request_limits",
     ):
         assert hasattr(serve, sym), f"pragmatiq.inference.serve is missing {sym!r}"
 
@@ -373,3 +375,82 @@ def test_runtime_model_property(nano_model_and_records) -> None:
     runtime = Runtime(model=model, device="cpu")
     assert runtime.model is model
     assert runtime.device == "cpu"
+
+
+# ---------------------------------------------------------------------------
+# 1.1.0: GPU-first device policy, request validation and caps
+# ---------------------------------------------------------------------------
+
+
+def test_serve_device_policy_is_gpu_first(monkeypatch) -> None:
+    import torch
+
+    from pragmatiq.inference.serve.runtime import resolve_serve_device
+
+    monkeypatch.delenv("PRAGMATIQ_SERVE_CPU", raising=False)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    assert resolve_serve_device() == "cuda"
+    assert resolve_serve_device(instance_kind="GPU", instance_device_id=1) == "cuda:1"
+    assert resolve_serve_device(instance_kind="CPU") == "cuda"  # a visible GPU is used
+    monkeypatch.setenv("PRAGMATIQ_SERVE_CPU", "1")
+    assert resolve_serve_device(instance_kind="GPU") == "cpu"  # the escape hatch wins
+    monkeypatch.delenv("PRAGMATIQ_SERVE_CPU")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert resolve_serve_device(instance_kind="GPU") == "cpu"
+
+
+def test_decode_request_validates_records() -> None:
+    from pragmatiq.inference.serve.contract import decode_request
+
+    with pytest.raises(ValueError, match="expected a dict"):
+        decode_request(json.dumps([1, 2]))
+    with pytest.raises(ValueError, match="user_id"):
+        decode_request(json.dumps([{"events": []}]))
+    with pytest.raises(ValueError, match="events"):
+        decode_request(json.dumps([{"user_id": "u", "events": "nope"}]))
+    assert decode_request(json.dumps([{"user_id": "u", "events": []}])) == [{"user_id": "u", "events": []}]
+
+
+def test_request_limits_from_env(monkeypatch) -> None:
+    from pragmatiq.inference.serve.runtime import request_limits
+
+    monkeypatch.delenv("PRAGMATIQ_SERVE_MAX_RECORDS", raising=False)
+    monkeypatch.delenv("PRAGMATIQ_SERVE_TOKEN_BUDGET", raising=False)
+    assert request_limits() == (1024, 16_384)
+    monkeypatch.setenv("PRAGMATIQ_SERVE_MAX_RECORDS", "2")
+    monkeypatch.setenv("PRAGMATIQ_SERVE_TOKEN_BUDGET", "512")
+    assert request_limits() == (2, 512)
+    monkeypatch.setenv("PRAGMATIQ_SERVE_MAX_RECORDS", "0")
+    with pytest.raises(ValueError, match="> 0"):
+        request_limits()
+
+
+def test_runtime_rejects_oversized_requests(nano_model_and_records, monkeypatch) -> None:
+    from pragmatiq.inference.serve.runtime import Runtime
+
+    model, records = nano_model_and_records
+    rt = Runtime(model=model, device="cpu")
+    monkeypatch.setenv("PRAGMATIQ_SERVE_MAX_RECORDS", "1")
+    with pytest.raises(ValueError, match="at most 1"):
+        rt.embed(records)
+    monkeypatch.setenv("PRAGMATIQ_SERVE_MAX_RECORDS", "1000")
+    monkeypatch.setenv("PRAGMATIQ_SERVE_TOKEN_BUDGET", "1")  # one record per forward
+    split = rt.embed(records)
+    monkeypatch.delenv("PRAGMATIQ_SERVE_TOKEN_BUDGET")
+    whole = rt.embed(records)
+    assert split.shape == whole.shape and np.allclose(split, whole, atol=1e-4)
+
+
+def test_deploy_manifests_are_gpu_first_with_cpu_overlay() -> None:
+    root = Path(__file__).resolve().parents[2]
+    gpu = (root / "deploy/triton/model_repository/pragmatiq_embedder/config.pbtxt").read_text()
+    cpu = (root / "deploy/triton/config.cpu.pbtxt").read_text()
+    assert "KIND_GPU" in gpu and "KIND_CPU" in cpu
+    for cfg in (gpu, cpu):  # the contract is identical in both
+        assert 'name: "pragmatiq_embedder"' in cfg and 'backend: "python"' in cfg
+        assert "max_batch_size: 0" in cfg and 'name: "records_json"' in cfg and 'name: "embeddings"' in cfg
+    compose = (root / "deploy/docker-compose.yaml").read_text()
+    compose_cpu = (root / "deploy/docker-compose.cpu.yaml").read_text()
+    assert 'capabilities: ["gpu"]' in compose and "PRAGMATIQ_SERVE_CPU" not in compose
+    assert "PRAGMATIQ_SERVE_CPU=1" in compose_cpu and "config.cpu.pbtxt" in compose_cpu
+    assert "PRAGMATIQ_SERVE_GPU" not in (root / "scripts/deploy_serving.sh").read_text()

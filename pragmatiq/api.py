@@ -388,7 +388,8 @@ def _pretrain_inner(
     trainer = PreTrainer(model, run, tcfg, tok.content_hash, logger=logger)
     ds = ShardDataset(shard_dir)
     sampler = DynamicBatchSampler(ds.index, token_budget=tcfg.token_budget, seed=tcfg.seed)
-    loader = ShardDataLoader(ds, sampler)
+    loader = ShardDataLoader(ds, sampler, prefetch=tcfg.prefetch_batches,
+                             pin_memory=str(trainer.fabric.device).startswith("cuda"))
     trainer.fit(loader, resume=resume)
     logger.close()
     ds.close()
@@ -624,12 +625,14 @@ def export(
     run: str | Path,
     shard_dir: str | Path,
     out: str | Path = "pragmatiq_embedder.onnx",
-    device: str = "cpu",
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Export the dense ONNX reformulation of the model from one example user.
 
-    ONNX export runs on CPU (the dense graph and its constants are built on CPU and
-    validated against onnxruntime's CPU provider); ``device`` must be ``"cpu"``.
+    The dense graph is traced and validated on CPU against onnxruntime's CPU
+    provider whatever ``device`` says (the export is a graph, not a run), so
+    ``"auto"`` and ``"cuda"`` are accepted and the model is simply loaded on CPU.
+    Needs torch >= 2.6 (the dynamo exporter) and the ``serve`` extra.
     """
     with _staging() as stage:
         run = stage.input(run)  # type: ignore[assignment]
@@ -642,10 +645,8 @@ def export(
         from pragmatiq.inference.export import export_onnx
         from pragmatiq.models.pragmatiq import PragmaModel
 
-        if _resolve_device(device) != "cpu":
-            raise ValueError(f"ONNX export runs on CPU; pass device='cpu' (got {device!r})")
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
-        model = PragmaModel.from_pretrained(run, device="cpu")
+        model = PragmaModel.from_pretrained(run, device="cpu")  # the graph is built on CPU
         ds = ShardDataset(shard_dir)
         example = VarlenCollator(max_events=ds.max_events)([ds.get(ds.user_ids[0])])
         ds.close()
@@ -661,10 +662,15 @@ def benchmark(
     run: str | Path,
     shard_dir: str | Path,
     device: str = "auto",
-    out: str | Path = "deploy/benchmarks/RESULTS.md",
+    out: str | Path = "benchmark_results.md",
     max_users: int | None = None,
+    precision: str = "auto",
 ) -> dict[str, Any]:
-    """Benchmark batch-embedding throughput and write RESULTS.md."""
+    """Benchmark batch-embedding throughput and write a results markdown file.
+
+    ``precision`` (``auto`` | ``bf16`` | ``fp32``) is the CUDA autocast dtype;
+    ``auto`` is bf16 on CUDA and fp32 on CPU.
+    """
     with _staging() as stage:
         run = stage.input(run)  # type: ignore[assignment]
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
@@ -675,7 +681,8 @@ def benchmark(
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
         model = PragmaModel.from_pretrained(run, device=device)
-        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users)
+        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users,
+                                      precision=precision)
         write_results(stats, out)
         return stats
 

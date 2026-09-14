@@ -89,6 +89,13 @@ def decode_request(raw: bytes | str | np.generic) -> list[dict]:
         raise ValueError(
             f"decode_request: expected a JSON list of dicts, got {type(records).__name__!r}"
         )
+    for i, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            raise ValueError(f"decode_request: record {i} is a {type(rec).__name__}, expected a dict")
+        if not isinstance(rec.get("user_id"), str) or not rec["user_id"]:
+            raise ValueError(f"decode_request: record {i} needs a non-empty string 'user_id'")
+        if not isinstance(rec.get("events"), list):
+            raise ValueError(f"decode_request: record {i} ({rec['user_id']!r}) needs an 'events' list")
     return records
 
 

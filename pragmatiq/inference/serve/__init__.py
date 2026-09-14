@@ -35,6 +35,7 @@ from pragmatiq.inference.serve.contract import (
 from pragmatiq.inference.serve.runtime import (
     Runtime,
     load,
+    request_limits,
     resolve_serve_device,
 )
 
@@ -42,6 +43,7 @@ __all__ = [
     # Runtime
     "Runtime",
     "load",
+    "request_limits",
     "resolve_serve_device",
     # Contract constants
     "INPUT_NAME",

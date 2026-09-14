@@ -239,6 +239,13 @@ class TrainConfig:
     # so adding ranks trains disjoint slices in lockstep with an independent mask stream.
     devices: int | str = "auto"
     num_nodes: int = 1
+    # accelerator: "auto" (CUDA when visible, else CPU), "cpu" or "cuda". An
+    # explicit "cpu" on a GPU host trains on the CPU — useful for byte-exact
+    # reproductions and CI on a shared box.
+    accelerator: str = "auto"
+    # Batches collated ahead on a background thread (0 = synchronous). The host
+    # collation is the bottleneck for a fast GPU; two in flight keeps it fed.
+    prefetch_batches: int = 2
 
 
 def resolve_device_count(devices: int | str, use_cuda: bool) -> int:
@@ -299,7 +306,8 @@ class PreTrainer:
         self.run = run
         self.tokenizer_hash = tokenizer_hash
         self.fabric = fabric or _make_fabric(
-            devices=config.devices, deterministic=config.deterministic, num_nodes=config.num_nodes
+            devices=config.devices, deterministic=config.deterministic, num_nodes=config.num_nodes,
+            accelerator=None if config.accelerator == "auto" else config.accelerator,
         )
         self.masker = masker or get_masker(config.masker)(
             p_token=config.p_token, p_event=config.p_event, p_key=config.p_key, p_unk=config.p_unk

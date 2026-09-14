@@ -300,13 +300,15 @@ class PragmaModel(nn.Module):
     # ------------------------------------------------------------------ loading
     @classmethod
     def from_pretrained(
-        cls, run: str | Path, device: str = "cpu", checkpoint: str = "last.pt"
+        cls, run: str | Path, device: str = "auto", checkpoint: str = "last.pt"
     ) -> PragmaModel:
         """Load a trained model from a run directory (notebook entry point).
 
         Verifies the checkpoint's tokenizer hash against the run's copied
         tokenizer (global rule 3) and attaches it so :meth:`embed_records` works.
-        ``run`` may be a run directory path or a ``runs/{name}`` path.
+        ``run`` may be a run directory path or a ``runs/{name}`` path. ``device``
+        defaults to ``"auto"``: CUDA when available (or ``PRAGMATIQ_DEVICE``),
+        else CPU.
         """
         from pragmatiq.core.env import resolve_device
 
@@ -342,14 +344,21 @@ class PragmaModel(nn.Module):
         model._tokenizer = tok  # type: ignore[assignment]
         return model.to(device).eval()
 
-    @torch.no_grad()
-    def embed_records(self, records: list[dict[str, Any]]) -> np.ndarray:
+    def embed_records(self, records: list[dict[str, Any]], precision: str = "auto",
+                      token_budget: int | None = None) -> np.ndarray:
         """Embed plain-dict user records (no shard pipeline) → ``[N, d]``.
 
         Each dict has ``user_id`` and ``events`` (+ optional ``attributes``,
         ``lifelong``, ``as_of``); see :class:`~pragmatiq.core.schema.UserRecord`.
         Requires a model loaded via :meth:`from_pretrained` (carries a tokenizer).
+
+        ``precision`` (``auto`` | ``bf16`` | ``fp32``) selects the CUDA autocast
+        dtype (CPU is always fp32). ``token_budget`` splits large requests into
+        forward passes of at most that many tokens (a single record always goes
+        through whole), so a request of thousands of users does not have to fit
+        one forward; the output order matches the input. ``None`` runs one forward.
         """
+        from pragmatiq.core.env import inference_context
         from pragmatiq.core.schema import UserRecord
 
         from ..data.collate import VarlenCollator
@@ -358,6 +367,25 @@ class PragmaModel(nn.Module):
         if tok is None:
             raise RuntimeError("embed_records needs a tokenizer; load via from_pretrained()")
         recs = [tok.encode(r if isinstance(r, UserRecord) else UserRecord.from_dict(r)) for r in records]
-        batch = VarlenCollator(max_events=tok.config.max_events_per_user)(recs)
+        if not recs:
+            return np.zeros((0, self.config.dim), dtype=np.float32)
+        collate = VarlenCollator(max_events=tok.config.max_events_per_user)
         device = next(self.parameters()).device
-        return self.embed_users(batch.to(device)).float().cpu().numpy()
+        chunks: list[list[Any]] = [[]]
+        if token_budget is None:
+            chunks = [recs]
+        else:
+            used = 0
+            for r in recs:
+                n = r.n_tokens + int(r.prof_key_ids.size)
+                if chunks[-1] and used + n > token_budget:
+                    chunks.append([])
+                    used = 0
+                chunks[-1].append(r)
+                used += n
+        outs: list[np.ndarray] = []
+        with inference_context(device, precision):
+            for chunk in chunks:
+                batch = collate(chunk).to(device)
+                outs.append(self.embed_users(batch).float().cpu().numpy())
+        return outs[0] if len(outs) == 1 else np.concatenate(outs)

@@ -10,6 +10,7 @@ A/B and the head are updated, so a downstream task is cheap to fit and ship
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import logging
 import time
 from dataclasses import dataclass
@@ -68,7 +69,12 @@ class FineTuneConfig:
     weight_decay: float = 0.01
     max_epochs: int = 20
     patience: int = 3  # early-stopping patience (epochs without val improvement)
-    token_budget: int = 16_384
+    # Per-forward token cap. None sizes it from the device: 16_384 on CPU, and on
+    # CUDA the same memory-based budget pretraining's auto-config uses for the
+    # backbone's size (the LoRA backward keeps the backbone's activations, so a
+    # fixed CPU-sized budget wastes most of a large GPU).
+    token_budget: int | None = None
+    prefetch_batches: int = 2  # batches collated ahead on a background thread
     n_classes: int = 2
     seed: int = 0
     val_fraction: float = 0.2
@@ -86,12 +92,42 @@ class FineTuneConfig:
     num_nodes: int = 1
 
 
-class LoRAFineTuner:
-    """Fine-tunes a frozen backbone with LoRA + a classification head."""
+def _lightning_available() -> bool:
+    try:
+        import lightning.fabric  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
-    def __init__(self, model: PragmaModel, config: FineTuneConfig, device: str = "cpu") -> None:
+
+def _size_name(model: PragmaModel) -> str:
+    """The size preset a model's width corresponds to (for memory-based budgets)."""
+    dim = int(model.config.dim)
+    for name, width in (("nano", 64), ("small", 192), ("medium", 512)):
+        if dim <= width:
+            return name
+    return "large"
+
+
+class LoRAFineTuner:
+    """Fine-tunes a frozen backbone with LoRA + a classification head.
+
+    ``device="auto"`` picks CUDA when available. On CUDA the forward runs under
+    bf16 autocast (flash varlen attention); CPU stays fp32.
+    """
+
+    def __init__(self, model: PragmaModel, config: FineTuneConfig, device: str = "auto") -> None:
+        from ..core.env import resolve_device
+        from .autoconfig import token_budget_for
+
+        device = resolve_device(device)
+        if config.token_budget is None:
+            budget = (token_budget_for(device, _size_name(model)) if str(device).startswith("cuda")
+                      else 16_384)
+            config = dataclasses.replace(config, token_budget=budget)
         self.config = config
         self.device = device
+        self._epoch_stats: list[dict[str, Any]] = []
         # Resolve the data-parallel world size early so the single-process path
         # (world == 1) can stay byte-identical: it never touches Fabric, while
         # world > 1 routes through the DDP path. resolve_device_count is shared
@@ -103,6 +139,12 @@ class LoRAFineTuner:
         world = resolve_device_count(config.devices, use_cuda) * max(1, config.num_nodes)
         self._ddp = world > 1
         self.fabric: Any = None
+        if self._ddp and config.devices == "auto" and not _lightning_available():
+            # Several GPUs are visible but the [train] extra is absent: run on one
+            # device rather than fail — the user did not ask for DDP explicitly.
+            log.warning("lightning is not installed; %d devices visible but fine-tuning on a "
+                        "single device (pip install 'pragmatiq[train]' for DDP)", world)
+            self._ddp = False
         if not self._ddp:
             # ---- single-process path: UNCHANGED (no Fabric) ----
             self.model = model.to(device)
@@ -227,7 +269,8 @@ class LoRAFineTuner:
             head_mod.load_state_dict(best_state["head"])
             model_mod.load_state_dict(best_state["lora"], strict=False)
         return {"best_val_auc": best_auc, "epochs_run": len(history), "n_adapted": self.n_adapted,
-                "val_auc_history": history}
+                "val_auc_history": history, "epoch_stats": list(self._epoch_stats),
+                "token_budget": self.config.token_budget}
 
     def _run_epoch(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
                    opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
@@ -242,16 +285,18 @@ class LoRAFineTuner:
         # 2026-07-06) even though only a fraction of users carried labels.
         pos_of = {u: i for i, u in enumerate(dataset.index.order)}
         subset = sorted(pos_of[u] for u in users if u in pos_of)
-        sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
+        sampler = DynamicBatchSampler(dataset.index, token_budget=int(self.config.token_budget or 16_384),
                                       shuffle=train, seed=self.config.seed, subset=subset)
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
-        loader = ShardDataLoader(dataset, sampler, collator=collator)
+        is_cuda = str(self.device).startswith("cuda")
+        loader = ShardDataLoader(dataset, sampler, collator=collator,
+                                 prefetch=self.config.prefetch_batches, pin_memory=is_cuda)
         probs, ys = [], []
         # Long epochs still need a liveness signal at scale — heartbeat so
         # operators and the GPU-validation harness can tell slow from stuck.
-        _hb_batches = _hb_users = 0
+        _hb_batches = _hb_users = _hb_tokens = 0
         _hb_t0 = time.time()
         for batch in loader:
             _hb_batches += 1
@@ -263,7 +308,8 @@ class LoRAFineTuner:
             if not idx:
                 continue
             _hb_users += len(idx)
-            batch = batch.to(self.device)
+            _hb_tokens += batch.n_tokens
+            batch = batch.to(self.device, non_blocking=is_cuda)
             # On CUDA, run the forward under bf16 autocast — this is what routes
             # attention through the flash varlen kernel (which requires bf16/fp16)
             # with O(L) memory. The fp32 path falls back to SDPA's O(L^2) score
@@ -293,6 +339,12 @@ class LoRAFineTuner:
                 if not train:  # the epoch AUC is only scored on validation batches
                     probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
                     ys.extend(y.cpu().tolist())
+        elapsed = max(time.time() - _hb_t0, 1e-6)
+        self._epoch_stats.append({
+            "epoch": epoch + 1, "phase": "train" if train else "val", "batches": _hb_batches,
+            "users": _hb_users, "tokens": _hb_tokens, "seconds": round(elapsed, 2),
+            "tokens_per_sec": round(_hb_tokens / elapsed, 1),
+        })
         if not train and len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))
         return float("nan")
@@ -326,13 +378,15 @@ class LoRAFineTuner:
         # solely by the sampler's replica padding (equal across ranks).
         pos_of = {u: i for i, u in enumerate(dataset.index.order)}
         subset = sorted(pos_of[u] for u in users if u in pos_of)
-        sampler = DynamicBatchSampler(dataset.index, token_budget=self.config.token_budget,
+        sampler = DynamicBatchSampler(dataset.index, token_budget=int(self.config.token_budget or 16_384),
                                       shuffle=train, seed=self.config.seed, subset=subset)
         sampler.set_replica_info(int(self.fabric.world_size), int(self.fabric.global_rank))
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
-        loader = ShardDataLoader(dataset, sampler, collator=collator)
+        loader = ShardDataLoader(dataset, sampler, collator=collator,
+                                 prefetch=self.config.prefetch_batches,
+                                 pin_memory=str(self.fabric.device).startswith("cuda"))
         local_probs: list[float] = []
         local_ys: list[int] = []
         local_uids: list[str] = []

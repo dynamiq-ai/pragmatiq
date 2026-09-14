@@ -56,16 +56,21 @@ def embed_users(
     model: PragmaModel,
     dataset: ShardDataset,
     token_budget: int = 16_384,
-    device: str | torch.device = "cpu",
+    device: str | torch.device = "auto",
     user_ids: list[str] | None = None,
     cutoffs: dict[str, int] | None = None,
+    precision: str = "auto",
 ) -> dict[str, np.ndarray]:
     """Compute ``z_h[USR]`` embeddings for users; returns ``{user_id: vector}``.
 
     ``cutoffs`` (user_id -> µs) truncates each user's history at their label
     eval point before encoding, so task embeddings never see the outcome
-    window (the no-hindcasting rule).
+    window (the no-hindcasting rule). ``device="auto"`` picks CUDA when
+    available; ``precision`` selects the CUDA autocast dtype (CPU stays fp32).
     """
+    from ..core.env import inference_context, resolve_device
+
+    device = resolve_device(str(device))
     model = model.to(device).eval()
     # Restrict the forward pass to the requested users (by their position in the
     # index) so only that cohort is encoded; None embeds everyone. Users not in
@@ -83,7 +88,8 @@ def embed_users(
 
     def _embed_chunk(chunk: list[str]) -> np.ndarray:
         batch = collator(dataset.get_many(chunk)).to(device)
-        return model.embed_users(batch).float().cpu().numpy()
+        with inference_context(device, precision):
+            return model.embed_users(batch).float().cpu().numpy()
 
     out: dict[str, np.ndarray] = {}
     # The intra-op thread cap only helps CPU forwards; on CUDA it would just

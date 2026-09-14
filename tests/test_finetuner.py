@@ -291,3 +291,32 @@ def test_explicit_cpu_device_never_launches_cuda_ddp(monkeypatch) -> None:
     ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4), device="cpu")
     assert ft.fabric is None, "explicit CPU run must take the single-process path"
     assert next(ft.model.parameters()).device.type == "cpu"
+
+
+def test_token_budget_none_resolves_per_device_and_epoch_stats_reported(ft_work: Path) -> None:
+    from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
+
+    tok = PragmaTokenizer.load(ft_work / "tok" / "tokenizer")
+    model = PragmaModel(ModelConfig.preset("nano", tok.vocab_size))
+    ft = LoRAFineTuner(model, FineTuneConfig(max_epochs=1, lora_rank=4), device="cpu")
+    assert ft.config.token_budget == 16_384  # CPU default
+    ft2 = LoRAFineTuner(model, FineTuneConfig(max_epochs=1, lora_rank=4, token_budget=2048), device="cpu")
+    assert ft2.config.token_budget == 2048  # explicit wins
+    ds = ShardDataset(ft_work / "tok")
+    res = ft2.fit(ds, ft_work / "raw" / "labels" / "default_12m.parquet")
+    ds.close()
+    stats = res["epoch_stats"]
+    assert [s["phase"] for s in stats] == ["train", "val"]
+    assert stats[0]["batches"] > 0 and stats[0]["tokens"] > 0 and stats[0]["seconds"] > 0
+    assert res["token_budget"] == 2048
+
+
+def test_missing_lightning_falls_back_to_single_process(monkeypatch) -> None:
+    import pragmatiq.training.finetuner as FT
+    from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
+
+    monkeypatch.setattr(FT, "_lightning_available", lambda: False)
+    monkeypatch.setattr(FT, "resolve_device_count", lambda devices, use_cuda: 4)
+    model = PragmaModel(ModelConfig.preset("nano", 1500))
+    ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4), device="cpu")  # devices="auto"
+    assert ft.fabric is None and not ft._ddp
