@@ -517,8 +517,8 @@ CUDA and the forward runs in bf16/fp16 (the default at inference and in
 training), varlen attention calls `flash_attn_varlen_func` directly on the
 packed, padding-free token stream. Everywhere else — CPU, fp32 on CUDA,
 `PRAGMATIQ_DISABLE_FLASH=1` — pragmatiq falls back to PyTorch SDPA over
-per-segment padded blocks built from `cu_seqlens` with a deterministic
-scatter. The two paths agree to fp32 atol 1e-4 (the padding-equivalence test)
+length-bucketed padded blocks built from `cu_seqlens` with a deterministic
+scatter (a single long history does not pad the whole batch to its width). The two paths agree to fp32 atol 1e-4 (the padding-equivalence test)
 and to bf16 precision (~1e-2) against each other on CUDA (checked on every GPU
 validation run). flash-attn ships CUDA-specific wheels, so install the wheel
 that matches your torch and CUDA build rather than `pip install flash-attn`

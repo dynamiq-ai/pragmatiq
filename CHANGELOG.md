@@ -132,8 +132,23 @@ states the pre-2.0 policy that allows this.
   scatters with `index_copy_` / `index_select` (deterministic under
   `torch.use_deterministic_algorithms`, no more crash on CUDA); the segment
   layout (positions, mask, RoPE tables) is built once per encoder forward and
-  threaded through the blocks; `attention_backend()` / `flash_available()`
-  report the active kernel; `PRAGMATIQ_DISABLE_FLASH=1` forces SDPA.
+  threaded through the blocks; segments are grouped into length buckets so one
+  6,500-event history no longer pads every other segment in the batch to its
+  width (the padded path was O(n_seg × max_len²) on heavy books — a GPU
+  fine-tune without flash-attn ran at 1% utilisation); `attention_backend()` /
+  `flash_available()` report the active kernel; `PRAGMATIQ_DISABLE_FLASH=1`
+  forces SDPA.
+- **Shard cache** (`ShardDataset`): sized in bytes (a quarter of RAM, up to
+  16 GiB) instead of four shards; `cache_shards=` still pins a count.
+- **Fine-tune `epoch_stats`** carry `data_wait_seconds` (time spent waiting on
+  the loader) next to `tokens_per_sec`, so a slow epoch can be attributed to the
+  host or the device from the result dict alone.
+- **GPU validation harness**: serving legs warm up and send 64+ requests per
+  concurrency level; `scripts/benchmarks/refresh_results.py` regenerates every
+  README/notebook result table on one pod; `scripts/validate_gpu.py
+  --render-json` re-renders a validation JSON into the README block; the RunPod
+  launcher pins the release torch build the flash-attn wheel targets and drops
+  the image's nightly torchvision/torchaudio.
 - **Collator** vectorized with `np.repeat` / `np.diff`; `PackedBatch` carries
   host-side `max_len_event` / `max_len_history` / `max_len_profile` so the
   model never syncs to size a block; `PackedBatch.pin_memory()` and

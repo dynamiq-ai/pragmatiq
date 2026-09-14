@@ -298,10 +298,12 @@ longest segment (`max_seqlen`) so the fallback can size its block.
 - **flash-attn varlen** on CUDA in fp16/bf16, when `flash_attn_varlen_func` is
   available and `PRAGMATIQ_DISABLE_FLASH` is unset — the default at inference
   (`inference_context` autocasts to bf16 on CUDA) and in bf16-mixed training;
-- **SDPA fallback** otherwise (always on CPU): each segment is scattered into a
-  padded `[n_seg, max_len, H, hd]` block with a deterministic
-  `index_copy_` / `index_select` pair, and a key-padding mask hides the
-  padding so attention is confined to real tokens.
+- **SDPA fallback** otherwise (always on CPU): segments are grouped into
+  length buckets (`ceil(log2(len))`) and each bucket is scattered into its own
+  padded `[n_seg_b, L_b, H, hd]` block with a deterministic
+  `index_copy_` / `index_select` pair; a key-padding mask hides the padding so
+  attention is confined to real tokens, and a single long history no longer
+  pads every other segment in the batch to its width.
 
 The segment layout (positions, mask, RoPE tables) is built once per encoder
 forward and threaded through every block; the collator ships the longest
