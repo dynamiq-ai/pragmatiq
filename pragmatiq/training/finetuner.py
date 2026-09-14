@@ -298,12 +298,15 @@ class LoRAFineTuner:
         # operators and the GPU-validation harness can tell slow from stuck.
         _hb_batches = _hb_users = _hb_tokens = 0
         _hb_t0 = time.time()
+        _wait_s = 0.0  # time spent waiting on the loader (host-bound signal)
+        _t_iter = time.time()
         for batch in loader:
+            _wait_s += time.time() - _t_iter
             _hb_batches += 1
             if _hb_batches % 200 == 0:
-                log.info("finetune %s epoch %d: %d batches, %d labeled users, %.0fs",
+                log.info("finetune %s epoch %d: %d batches, %d labeled users, %.0fs (%.0fs waiting on data)",
                          "train" if train else "val", epoch + 1, _hb_batches,
-                         _hb_users, time.time() - _hb_t0)
+                         _hb_users, time.time() - _hb_t0, _wait_s)
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 continue
@@ -339,11 +342,13 @@ class LoRAFineTuner:
                 if not train:  # the epoch AUC is only scored on validation batches
                     probs.extend(torch.softmax(logits[sel].float(), -1)[:, 1].detach().cpu().tolist())
                     ys.extend(y.cpu().tolist())
+            _t_iter = time.time()
         elapsed = max(time.time() - _hb_t0, 1e-6)
         self._epoch_stats.append({
             "epoch": epoch + 1, "phase": "train" if train else "val", "batches": _hb_batches,
             "users": _hb_users, "tokens": _hb_tokens, "seconds": round(elapsed, 2),
             "tokens_per_sec": round(_hb_tokens / elapsed, 1),
+            "data_wait_seconds": round(_wait_s, 2),
         })
         if not train and len(set(ys)) > 1:
             return float(roc_auc_score(ys, probs))

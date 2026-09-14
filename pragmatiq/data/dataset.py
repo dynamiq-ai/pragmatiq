@@ -13,6 +13,7 @@ the parquet shards by ``(band, shard, row)`` with a small LRU shard cache.
 from __future__ import annotations
 
 import json
+import os
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
@@ -26,10 +27,28 @@ from .sharding import UserIndex, record_from_row
 from .tokenizer import TokenizedRecord
 
 
-class ShardDataset:
-    """Random-access view over tokenized records stored in parquet shards."""
+def _default_cache_bytes() -> int:
+    """Shard-cache budget: a quarter of physical RAM, capped at 16 GiB (4 GiB fallback)."""
+    try:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    except (ValueError, OSError, AttributeError):
+        return 4 << 30
+    return int(min(total // 4, 16 << 30))
 
-    def __init__(self, shard_dir: str | Path, cache_shards: int = 4) -> None:
+
+class ShardDataset:
+    """Random-access view over tokenized records stored in parquet shards.
+
+    Decoded shards are cached in memory. The cache is sized in bytes
+    (``cache_bytes``, default a quarter of RAM up to 16 GiB) rather than in
+    shards: a shard of 4,096 real users decodes to close to a gigabyte of Arrow
+    memory, and a fine-tune or probe over a label subset touches many shards per
+    batch — with a four-shard cache every batch re-read parquet and the GPU sat
+    idle (observed: 1% utilisation). ``cache_shards`` pins a shard count instead.
+    """
+
+    def __init__(self, shard_dir: str | Path, cache_shards: int | None = None,
+                 cache_bytes: int | None = None) -> None:
         self.dir = Path(shard_dir)
         self.index = UserIndex(self.dir)
         manifest_path = self.dir / "shard_manifest.json"
@@ -38,6 +57,9 @@ class ShardDataset:
         self.max_events: int | None = manifest.get("max_events_per_user")
         self._cache: OrderedDict[tuple[int, int], Any] = OrderedDict()
         self._cache_n = cache_shards
+        self._cache_bytes = cache_bytes if cache_bytes is not None else (
+            None if cache_shards is not None else _default_cache_bytes())
+        self._cached_bytes = 0
 
     def __len__(self) -> int:
         return len(self.index)
@@ -54,8 +76,13 @@ class ShardDataset:
         path = self.dir / "shards" / f"band{band}_shard{shard:05d}.parquet"
         table = pq.read_table(path)
         self._cache[key] = table
-        if len(self._cache) > self._cache_n:
-            self._cache.popitem(last=False)
+        self._cached_bytes += int(table.nbytes)
+        while len(self._cache) > 1 and (
+            (self._cache_n is not None and len(self._cache) > self._cache_n)
+            or (self._cache_bytes is not None and self._cached_bytes > self._cache_bytes)
+        ):
+            _, evicted = self._cache.popitem(last=False)
+            self._cached_bytes -= int(evicted.nbytes)
         return table
 
     def get(self, user_id: str) -> TokenizedRecord:

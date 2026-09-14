@@ -535,8 +535,16 @@ def _measure_serving(
                     idx = min(int(len(s) * p / 100.0 + 0.5), len(s) - 1)
                     return s[max(0, idx)]
 
+            # Warm up before measuring: the first requests on a device pay for
+            # kernel/allocator initialisation and would otherwise dominate p99 and
+            # the concurrency-1 throughput.
+            for _ in range(4):
+                try:
+                    _embed_one_fn(-1, rt, records_batch)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[serving] warmup request failed: {e}", flush=True)
             for concurrency in serving_concurrency:
-                n_requests = max(concurrency * 4, 16)
+                n_requests = max(concurrency * 4, 64)
                 print(
                     f"[serving]  device={device_label} concurrency={concurrency} "
                     f"n_requests={n_requests}",

@@ -631,3 +631,23 @@ class TestShardWriterRefactors:
         assert [r.user_id for r in out] == ds.user_ids[:50]
         assert calls == {"meta_many": 1, "meta": 0}  # one batched index read, no per-user lookups
         ds.close()
+
+
+class TestShardCacheBudget:
+    def test_byte_budget_keeps_hot_shards_and_evicts_by_size(self, shards) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)  # default: byte budget, not a shard count
+        assert ds._cache_n is None and ds._cache_bytes is not None and ds._cache_bytes > 0
+        keys = sorted({(m.band, m.shard) for m in ds.index.meta_many(ds.user_ids)})
+        first = ds._shard_table(*keys[0])
+        assert ds._cached_bytes == int(first.nbytes)
+        tiny = ShardDataset(shard_dir, cache_bytes=1)  # every load evicts the previous one
+        for k in keys:
+            tiny._shard_table(*k)
+        assert len(tiny._cache) == 1 and tiny._cached_bytes == int(tiny._cache[keys[-1]].nbytes)
+        pinned = ShardDataset(shard_dir, cache_shards=2)
+        for k in keys:
+            pinned._shard_table(*k)
+        assert len(pinned._cache) == min(2, len(keys))
+        for d in (ds, tiny, pinned):
+            d.close()
