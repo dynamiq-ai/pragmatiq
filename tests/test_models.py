@@ -401,6 +401,15 @@ class TestAttentionKernel:
         finally:
             torch.use_deterministic_algorithms(prev)
 
+    def test_empty_token_stream_returns_empty(self) -> None:
+        """Every user truncated to zero events (a staleness window before the first event)
+        yields an empty token stream; attention must return it untouched on every backend."""
+        from pragmatiq.models.layers import varlen_self_attention
+
+        q = torch.zeros(0, 2, 8)
+        out = varlen_self_attention(q, q, q, torch.zeros(1, dtype=torch.int32), max_seqlen=0)
+        assert out.shape == (0, 2, 8)
+
     def test_sdpa_length_buckets_match_single_padded_block(self) -> None:
         """Mixed segment lengths land in several buckets; the per-segment result must equal
         a naive per-segment softmax attention (padding is masked, so bucketing is invisible)."""

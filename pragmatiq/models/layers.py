@@ -168,6 +168,11 @@ def varlen_self_attention(
     the RoPE angles and the SDPA scatter plan; without it they are rebuilt here.
     """
     T, H, hd = q.shape
+    if T == 0:
+        # A batch with no tokens at all (every user truncated to zero events by
+        # an eval-point or staleness cutoff): nothing to attend over. The flash
+        # kernel rejects an empty batch ("batch size must be positive").
+        return q
     if layout is None:
         layout = build_layout(cu_seqlens, max_seqlen, T, rope, rope_pos)
     if rope is not None and layout.cos is not None and layout.sin is not None:

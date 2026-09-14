@@ -45,6 +45,8 @@ def main() -> int:
     ap.add_argument("--max-steps", type=int, default=2000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--skip-aml", action="store_true", help="skip the full-scale gate 6")
+    ap.add_argument("--skip-multitask", action="store_true", help="skip the multi-task probe benchmark")
+    ap.add_argument("--skip-staleness", action="store_true", help="skip the staleness benchmark")
     ap.add_argument("--out", default="outputs/gpu-validation-results")
     args = ap.parse_args()
 
@@ -54,9 +56,9 @@ def main() -> int:
     scale = ["--n-users", str(args.n_users), "--model-size", args.model_size,
              "--max-steps", str(args.max_steps), "--seed", str(args.seed)]
     failures: list[str] = []
-    if _run([py, "scripts/benchmarks/multitask_probe.py", *scale, "--write"]):
+    if not args.skip_multitask and _run([py, "scripts/benchmarks/multitask_probe.py", *scale, "--write"]):
         failures.append("multitask_probe")
-    if _run([py, "scripts/benchmarks/staleness_probe.py", *scale, "--write"]):
+    if not args.skip_staleness and _run([py, "scripts/benchmarks/staleness_probe.py", *scale, "--write"]):
         failures.append("staleness_probe")
     if not args.skip_aml:
         env = dict(os.environ, PRAGMATIQ_GATE_FULL="1", PRAGMATIQ_WRITE_RESULTS="1")
