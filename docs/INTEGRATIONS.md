@@ -204,8 +204,14 @@ provisioning requires manual operator steps.
 - `package(run_dir, dest, image)` — writes two ready-to-submit YAML specs:
   - `serving_spec.yaml` — Nebius AI Token Factory model-serving spec with
     image, GPU config, S3 mount, and contract port.
-  - `batch_embed_job.yaml` — Soperator `SlurmJob` spec for batch embedding,
-    referencing the pragmatiq CLI `embed` command and Nebius Object Storage.
+  - `batch_embed_job.yaml` — Soperator `SlurmJob` spec for batch embedding:
+    runs `pragmatiq embed /opt/pragmatiq/shard_dir --run /opt/pragmatiq/run_dir
+    --out s3://<bucket>/embeddings/<release_name>.parquet` with two Object
+    Storage mounts — the run directory (`s3_prefix`, default `pragmatiq/run_dir`)
+    and the tokenized shards (`s3_shard_prefix`, default `pragmatiq/shards`).
+    The CLI writes the parquet back to Object Storage itself, so the job image
+    must include `pip install 'pragmatiq[s3]'`; the job env points the S3
+    client at the Nebius endpoint.
 
 **What is NOT implemented (raises `NotImplementedError`):**
 - `deploy_live()` — live Nebius provisioning is documented below, not automated.
@@ -215,7 +221,9 @@ provisioning requires manual operator steps.
 ```bash
 IMAGE="cr.eu-north1.nebius.cloud/pragmatiq:latest"
 RUN_DIR="runs/my-run"
+SHARD_DIR="data/tokenized"      # output of `pragmatiq tokenize` (batch embed only)
 DEST="/tmp/nebius-specs"
+S3_ENDPOINT="https://storage.eu-north1.nebius.cloud:443"
 
 # 1. Generate the job specs
 python -c "
@@ -223,6 +231,7 @@ from integrations.nebius import NebiusAdapter
 a = NebiusAdapter(
     image='$IMAGE',
     s3_bucket='my-pragmatiq-bucket',
+    # defaults: s3_prefix='pragmatiq/run_dir', s3_shard_prefix='pragmatiq/shards'
 )
 a.package('$RUN_DIR', dest='$DEST', image='$IMAGE')
 print('Specs written to:', '$DEST')
@@ -232,9 +241,11 @@ print('Specs written to:', '$DEST')
 docker tag pragmatiq:latest cr.eu-north1.nebius.cloud/pragmatiq:latest
 docker push cr.eu-north1.nebius.cloud/pragmatiq:latest
 
-# 3. Upload run directory to Nebius Object Storage (S3-compatible)
-aws s3 sync "$RUN_DIR" s3://my-pragmatiq-bucket/run_dir \
-    --endpoint-url https://storage.eu-north1.nebius.cloud:443
+# 3. Upload the run directory to Nebius Object Storage (S3-compatible).
+#    The key prefix must equal the adapter's s3_prefix (default pragmatiq/run_dir);
+#    both specs mount it at /opt/pragmatiq/run_dir.
+aws s3 sync "$RUN_DIR" s3://my-pragmatiq-bucket/pragmatiq/run_dir \
+    --endpoint-url "$S3_ENDPOINT"
 
 # 4. Submit to Token Factory
 nebius ai token-factory model create --spec "$DEST/serving_spec.yaml"
@@ -248,10 +259,18 @@ curl https://<endpoint>.inference.eu-north1.nebius.cloud/v2/health/ready
 ```bash
 # (after completing steps 1-3 above)
 
-# 4. Submit the batch embed job
+# 4. Upload the tokenized shards. The key prefix must equal the adapter's
+#    s3_shard_prefix (default pragmatiq/shards); the job mounts it at
+#    /opt/pragmatiq/shard_dir — the positional argument of `pragmatiq embed`.
+aws s3 sync "$SHARD_DIR" s3://my-pragmatiq-bucket/pragmatiq/shards \
+    --endpoint-url "$S3_ENDPOINT"
+
+# 5. Fill in the Nebius access keys in the spec's env (AWS_ACCESS_KEY_ID /
+#    AWS_SECRET_ACCESS_KEY placeholders) and submit the batch embed job
 kubectl apply -f "$DEST/batch_embed_job.yaml"
 
-# 5. Monitor job status
+# 6. Monitor job status; the parquet lands at
+#    s3://my-pragmatiq-bucket/embeddings/pragmatiq-embedder.parquet
 kubectl get slurmjobs -n pragmatiq
 kubectl logs -l job-name=pragmatiq-embedder-embed -n pragmatiq
 ```

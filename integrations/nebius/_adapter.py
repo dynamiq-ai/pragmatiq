@@ -56,6 +56,13 @@ _CONTRACT_INFER_PATH = "/v2/models/pragmatiq_embedder/infer"
 _DEFAULT_S3_ENDPOINT = "https://storage.eu-north1.nebius.cloud:443"
 _DEFAULT_REGION = "eu-north1"
 
+# Container mount points shared by the serving spec, the batch job spec and
+# ``manifest()``.  The batch job passes _SHARD_DIR_MOUNT as the positional
+# ``shard_dir`` of ``pragmatiq embed`` and _RUN_DIR_MOUNT as ``--run``; each MUST
+# have a matching ``storage:`` entry in the job spec or the CLI cannot open it.
+_RUN_DIR_MOUNT = "/opt/pragmatiq/run_dir"
+_SHARD_DIR_MOUNT = "/opt/pragmatiq/shard_dir"
+
 # ---------------------------------------------------------------------------
 # YAML spec templates
 # ---------------------------------------------------------------------------
@@ -107,6 +114,11 @@ _BATCH_JOB_TMPL = """\
 # See docs/INTEGRATIONS.md for the full runbook.
 #
 # CLI usage: pragmatiq embed <shard_dir> --run <run_dir> --out <output.parquet>
+# Both directories are Object Storage mounts (see `storage:` below): the trained
+# run dir from s3://{s3_bucket}/{s3_prefix} and the tokenized shards from
+# s3://{s3_bucket}/{s3_shard_prefix}. The parquet is written back to Object
+# Storage by the CLI itself, so the image needs `pragmatiq[s3]` and the AWS_*
+# env below must point at the Nebius endpoint.
 
 apiVersion: soperator.nebius.com/v1alpha1
 kind: SlurmJob
@@ -134,12 +146,18 @@ spec:
     AWS_ACCESS_KEY_ID: "<NEBIUS_ACCESS_KEY>"
     AWS_SECRET_ACCESS_KEY: "<NEBIUS_SECRET_KEY>"
     AWS_DEFAULT_REGION: "{region}"
+    AWS_ENDPOINT_URL_S3: "{s3_endpoint}"
   storage:
     - type: s3
       bucket: "{s3_bucket}"
       prefix: "{s3_prefix}"
       endpoint: "{s3_endpoint}"
       mountPath: "{run_dir_mount}"
+    - type: s3
+      bucket: "{s3_bucket}"
+      prefix: "{s3_shard_prefix}"
+      endpoint: "{s3_endpoint}"
+      mountPath: "{shard_dir_mount}"
   restartPolicy: Never
 """
 
@@ -159,9 +177,16 @@ class NebiusAdapter:
 
     Args:
         image: The container image URI for the Triton / pragmatiq serving image.
-        s3_bucket: Nebius Object Storage bucket name for run-dir staging.
-        s3_prefix: S3 key prefix under the bucket.  Defaults to
-                   ``"pragmatiq/run_dir"``.
+        s3_bucket: Nebius Object Storage bucket holding the run directory, the
+                   tokenized shards, and the batch embed output.
+        s3_prefix: Key prefix (under ``s3_bucket``) of the trained run
+                   directory; both specs mount it at ``/opt/pragmatiq/run_dir``.
+                   Defaults to ``"pragmatiq/run_dir"``.
+        s3_shard_prefix: Key prefix (under ``s3_bucket``) of the tokenized
+                   shards; the batch embed job mounts it at
+                   ``/opt/pragmatiq/shard_dir``, the positional ``shard_dir``
+                   argument of ``pragmatiq embed``.  Defaults to
+                   ``"pragmatiq/shards"``.
         s3_endpoint: Nebius S3-compatible endpoint URL.
         region: Nebius region.  Defaults to ``"eu-north1"``.
         namespace: Kubernetes / Soperator namespace.
@@ -181,6 +206,7 @@ class NebiusAdapter:
         *,
         s3_bucket: str = "pragmatiq-runs",
         s3_prefix: str = "pragmatiq/run_dir",
+        s3_shard_prefix: str = "pragmatiq/shards",
         s3_endpoint: str = _DEFAULT_S3_ENDPOINT,
         region: str = _DEFAULT_REGION,
         namespace: str = "pragmatiq",
@@ -193,6 +219,7 @@ class NebiusAdapter:
         self._image = image
         self._s3_bucket = s3_bucket
         self._s3_prefix = s3_prefix
+        self._s3_shard_prefix = s3_shard_prefix
         self._s3_endpoint = s3_endpoint
         self._region = region
         self._namespace = namespace
@@ -201,6 +228,15 @@ class NebiusAdapter:
         self._gpu_count = gpu_count
         self._memory_gib = memory_gib
         self._release_name = release_name
+
+    def _s3_output_path(self) -> str:
+        """Object Storage key the batch embed job writes its parquet to.
+
+        ``pragmatiq embed --out`` treats the path as a *file* (it is staged out
+        with ``is_dir=False``), so the key must name the parquet itself rather
+        than a ``.../`` prefix.
+        """
+        return f"s3://{self._s3_bucket}/embeddings/{self._release_name}.parquet"
 
     # ------------------------------------------------------------------
     # OFFLINE: manifest()
@@ -218,7 +254,8 @@ class NebiusAdapter:
             * ``"adapter"`` — adapter name ``"nebius"``.
             * ``"token_factory"`` — Token Factory serving configuration.
             * ``"soperator_batch"`` — Soperator batch embed job configuration.
-            * ``"storage"`` — Nebius Object Storage configuration.
+            * ``"storage"`` — Nebius Object Storage configuration: bucket, the
+              run-dir and shard prefixes, and their container mount paths.
             * ``"live_ops_status"`` — honest stub declaration.
         """
         return {
@@ -245,9 +282,9 @@ class NebiusAdapter:
                 "image": self._image,
                 "command": [
                     "python", "-m", "pragmatiq.cli", "embed",
-                    "/opt/pragmatiq/shard_dir",
-                    "--run", "/opt/pragmatiq/run_dir",
-                    "--out", f"s3://{self._s3_bucket}/embeddings/",
+                    _SHARD_DIR_MOUNT,
+                    "--run", _RUN_DIR_MOUNT,
+                    "--out", self._s3_output_path(),
                 ],
                 "resources": {
                     "gpu_type": self._gpu_type,
@@ -258,9 +295,11 @@ class NebiusAdapter:
             "storage": {
                 "s3_bucket": self._s3_bucket,
                 "s3_prefix": self._s3_prefix,
+                "s3_shard_prefix": self._s3_shard_prefix,
                 "s3_endpoint": self._s3_endpoint,
                 "region": self._region,
-                "run_dir_mount": "/opt/pragmatiq/run_dir",
+                "run_dir_mount": _RUN_DIR_MOUNT,
+                "shard_dir_mount": _SHARD_DIR_MOUNT,
                 "note": (
                     "Nebius Object Storage is S3-compatible; use standard AWS SDK "
                     "with the Nebius endpoint and access keys."
@@ -292,7 +331,11 @@ class NebiusAdapter:
             └── batch_embed_job.yaml   (Soperator batch embed job)
 
         Both specs reference the Triton image URI and the serving contract's
-        container port / health path.  Fully offline — stdlib file writes only.
+        container port / health path.  The batch job mounts two Object Storage
+        prefixes: ``s3_prefix`` (run dir) at ``/opt/pragmatiq/run_dir`` and
+        ``s3_shard_prefix`` (tokenized shards) at ``/opt/pragmatiq/shard_dir``,
+        the positional argument of ``pragmatiq embed``.  Fully offline — stdlib
+        file writes only.
 
         Args:
             run_dir: Path to the trained run directory (used in artifact details;
@@ -308,10 +351,6 @@ class NebiusAdapter:
         dest_path = Path(dest)
         dest_path.mkdir(parents=True, exist_ok=True)
 
-        run_dir_mount = "/opt/pragmatiq/run_dir"
-        shard_dir_mount = "/opt/pragmatiq/shard_dir"
-        s3_output = f"s3://{self._s3_bucket}/embeddings/"
-
         common_kw = dict(
             release_name=self._release_name,
             namespace=self._namespace,
@@ -325,11 +364,12 @@ class NebiusAdapter:
             memory_gib=self._memory_gib,
             s3_bucket=self._s3_bucket,
             s3_prefix=self._s3_prefix,
+            s3_shard_prefix=self._s3_shard_prefix,
             s3_endpoint=self._s3_endpoint,
-            s3_output_path=s3_output,
+            s3_output_path=self._s3_output_path(),
             region=self._region,
-            run_dir_mount=run_dir_mount,
-            shard_dir_mount=shard_dir_mount,
+            run_dir_mount=_RUN_DIR_MOUNT,
+            shard_dir_mount=_SHARD_DIR_MOUNT,
         )
 
         # 1. Token Factory serving spec
@@ -351,7 +391,12 @@ class NebiusAdapter:
                 "run_dir": str(run_dir),
                 "image": image,
                 "s3_bucket": self._s3_bucket,
+                "s3_prefix": self._s3_prefix,
+                "s3_shard_prefix": self._s3_shard_prefix,
                 "s3_endpoint": self._s3_endpoint,
+                "run_dir_mount": _RUN_DIR_MOUNT,
+                "shard_dir_mount": _SHARD_DIR_MOUNT,
+                "s3_output_path": self._s3_output_path(),
                 "files": ["serving_spec.yaml", "batch_embed_job.yaml"],
             },
         )
@@ -366,7 +411,9 @@ class NebiusAdapter:
         The YAML specs produced by :meth:`package` are real and ready to
         submit.  Completing the deployment requires:
 
-        1. Uploading the run directory to Nebius Object Storage.
+        1. Uploading the run directory (and, for batch embed, the tokenized
+           shards) to Nebius Object Storage under ``s3_prefix`` /
+           ``s3_shard_prefix``.
         2. Creating a Token Factory endpoint or submitting a Soperator job.
 
         See ``docs/INTEGRATIONS.md`` for the full step-by-step runbook.

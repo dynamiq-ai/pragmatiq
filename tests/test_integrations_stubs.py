@@ -18,6 +18,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import yaml
 
 # ---------------------------------------------------------------------------
 # Helpers — build a minimal fake run-dir (mirrors the pattern in the real tests)
@@ -589,3 +590,121 @@ class TestNebiusBatchEmbedCliFlags:
         assert "--out" in cmd, (
             "manifest() soperator_batch command is missing '--out' flag"
         )
+
+
+# ===========================================================================
+# Regression: Nebius batch-embed job mounts the tokenized shards
+# (Bugbot PR #10 — "Nebius batch job missing shard mount")
+# ===========================================================================
+
+
+class TestNebiusBatchEmbedShardMount:
+    """The Soperator batch job must mount the shard prefix at the CLI's positional path.
+
+    ``pragmatiq embed <shard_dir> --run <run_dir> --out <out>`` opens ``<shard_dir>``
+    on the pod.  The old spec mounted only the run directory, so the embed leg
+    failed as soon as the CLI opened the (absent) shard directory.  The same job
+    writes its parquet back to Object Storage through the CLI, so the env must
+    point the S3 client at the Nebius endpoint and the output must be a file key.
+    """
+
+    _IMAGE = "cr.eu-north1.nebius.cloud/pragmatiq:latest"
+
+    def _batch_job_spec(self, **adapter_kw: object) -> dict:
+        """package() the specs and parse batch_embed_job.yaml."""
+        from integrations.nebius import NebiusAdapter
+
+        run_dir = _make_fake_run_dir()
+        dest = Path(tempfile.mkdtemp(prefix="pragmatiq-neb-shardmount-")) / "specs"
+        adapter = NebiusAdapter(image=self._IMAGE, **adapter_kw)  # type: ignore[arg-type]
+        adapter.package(run_dir, dest=str(dest), image=self._IMAGE)
+        return yaml.safe_load((dest / "batch_embed_job.yaml").read_text())
+
+    @staticmethod
+    def _mounts(spec: dict) -> dict[str, dict]:
+        """Map mountPath -> storage entry for the job spec."""
+        return {entry["mountPath"]: entry for entry in spec["spec"]["storage"]}
+
+    def test_positional_shard_dir_has_a_mount(self) -> None:
+        """The command's positional shard_dir is a storage mountPath (default shard prefix)."""
+        spec = self._batch_job_spec()
+        cmd = spec["spec"]["command"]
+        shard_dir = cmd[cmd.index("embed") + 1]
+        mounts = self._mounts(spec)
+        assert shard_dir in mounts, (
+            f"positional shard_dir {shard_dir!r} has no storage mount; mounts: {sorted(mounts)}"
+        )
+        assert mounts[shard_dir]["prefix"] == "pragmatiq/shards"
+
+    def test_run_dir_flag_has_a_mount(self) -> None:
+        """The '--run' value is still a storage mountPath (run-dir prefix)."""
+        spec = self._batch_job_spec()
+        cmd = spec["spec"]["command"]
+        run_dir = cmd[cmd.index("--run") + 1]
+        mounts = self._mounts(spec)
+        assert run_dir in mounts, f"--run {run_dir!r} has no storage mount; mounts: {sorted(mounts)}"
+        assert mounts[run_dir]["prefix"] == "pragmatiq/run_dir"
+
+    def test_shard_and_run_mounts_are_distinct(self) -> None:
+        """Shards and run dir are separate mounts backed by separate prefixes."""
+        spec = self._batch_job_spec()
+        cmd = spec["spec"]["command"]
+        shard_dir = cmd[cmd.index("embed") + 1]
+        run_dir = cmd[cmd.index("--run") + 1]
+        mounts = self._mounts(spec)
+        assert shard_dir != run_dir
+        assert mounts[shard_dir]["prefix"] != mounts[run_dir]["prefix"]
+
+    def test_custom_bucket_and_shard_prefix_flow_into_mount(self) -> None:
+        """s3_bucket / s3_shard_prefix ctor args land in the shard mount entry."""
+        spec = self._batch_job_spec(s3_bucket="my-bucket", s3_shard_prefix="tokenized/v3")
+        entry = self._mounts(spec)["/opt/pragmatiq/shard_dir"]
+        assert entry["type"] == "s3"
+        assert entry["bucket"] == "my-bucket"
+        assert entry["prefix"] == "tokenized/v3"
+
+    def test_env_points_s3_client_at_nebius_endpoint(self) -> None:
+        """The CLI's s3:// stage-out must hit the Nebius endpoint, not AWS."""
+        endpoint = "https://storage.eu-west1.nebius.cloud:443"
+        spec = self._batch_job_spec(s3_endpoint=endpoint)
+        env = spec["spec"]["env"]
+        assert env["AWS_ENDPOINT_URL_S3"] == endpoint
+        for entry in spec["spec"]["storage"]:
+            assert entry["endpoint"] == endpoint
+
+    def test_out_is_a_parquet_key_in_the_bucket(self) -> None:
+        """'--out' names a parquet object (api.embed stages it as a file), not a '/' prefix."""
+        spec = self._batch_job_spec(s3_bucket="my-bucket", release_name="embedder-v3")
+        cmd = spec["spec"]["command"]
+        out = cmd[cmd.index("--out") + 1]
+        assert out == "s3://my-bucket/embeddings/embedder-v3.parquet"
+
+    def test_manifest_storage_exposes_shard_mount(self) -> None:
+        """manifest()['storage'] names the shard prefix and both mount paths the command uses."""
+        from integrations.nebius import NebiusAdapter
+
+        m = NebiusAdapter(image=self._IMAGE, s3_shard_prefix="tokenized/v3").manifest()
+        storage = m["storage"]
+        cmd = m["soperator_batch"]["command"]
+        assert storage["s3_shard_prefix"] == "tokenized/v3"
+        assert cmd[cmd.index("embed") + 1] == storage["shard_dir_mount"]
+        assert cmd[cmd.index("--run") + 1] == storage["run_dir_mount"]
+
+    def test_manifest_and_package_agree_on_command(self) -> None:
+        """manifest()'s batch command is the same command the YAML spec runs."""
+        from integrations.nebius import NebiusAdapter
+
+        spec = self._batch_job_spec(s3_bucket="my-bucket")
+        m = NebiusAdapter(image=self._IMAGE, s3_bucket="my-bucket").manifest()
+        assert spec["spec"]["command"] == m["soperator_batch"]["command"]
+
+    def test_package_artifact_details_expose_shard_prefix(self) -> None:
+        """Artifact.details carries the shard prefix + mount so operators know what to upload where."""
+        from integrations.nebius import NebiusAdapter
+
+        run_dir = _make_fake_run_dir()
+        dest = Path(tempfile.mkdtemp(prefix="pragmatiq-neb-shardmount-art-")) / "specs"
+        artifact = NebiusAdapter(image=self._IMAGE).package(run_dir, dest=str(dest), image=self._IMAGE)
+        assert artifact.details["s3_shard_prefix"] == "pragmatiq/shards"
+        assert artifact.details["shard_dir_mount"] == "/opt/pragmatiq/shard_dir"
+        assert artifact.details["s3_output_path"].endswith(".parquet")
