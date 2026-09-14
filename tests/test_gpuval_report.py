@@ -37,16 +37,18 @@ def _evidence() -> dict:
             ],
             "finetune": [
                 {"devices": 1, "returncode": 0, "best_val_auc": 0.71, "epochs_run": 3, "wall_time_s": 900.0,
-                 "epoch_stats": [{"phase": "train", "tokens_per_sec": 100000.0},
-                                 {"phase": "val", "tokens_per_sec": 300000.0},
-                                 {"phase": "train", "tokens_per_sec": 95000.0}]},
+                 "epoch_stats": [{"phase": "train", "tokens_per_sec": 100000.0, "seconds": 100.0,
+                                  "data_wait_seconds": 30.0},
+                                 {"phase": "val", "tokens_per_sec": 300000.0, "seconds": 5.0},
+                                 {"phase": "train", "tokens_per_sec": 95000.0, "seconds": 90.0,
+                                  "data_wait_seconds": 1.0}]},
             ],
             "serving": [
                 {"device": "cpu", "concurrency": 1, "req_s": 9.0, "p50_ms": 100.0, "p99_ms": 250.0},
                 {"device": "cuda", "concurrency": 1, "req_s": 30.0, "p50_ms": 10.0, "p99_ms": 90.0},
             ],
             "flash_check": {"skipped": False, "passed": True, "max_abs_diff": 3e-3, "tol": 1e-2},
-            "precision": {"passed": True, "abs_auc_delta": 0.004, "bf16_probe_auc": 0.701,
+            "precision": {"passed": True, "abs_auc_delta": 0.004, "mean_cosine": 0.9998, "bf16_probe_auc": 0.701,
                           "fp32_probe_auc": 0.705, "bf16_users_per_sec": 5000.0, "fp32_users_per_sec": 3000.0},
             "serve_caps": {"passed": True, "rejected_oversized": True, "chunked_vs_whole_max_abs": 1e-4},
             "export": {"passed": True, "max_abs_diff": 1e-5},
@@ -64,23 +66,25 @@ def test_acceptance_table_all_green(report) -> None:
     assert all(r["passed"] for r in rows), [r for r in rows if not r["passed"]]
     assert by["DDP scaling efficiency (max devices)"]["value"] == 0.81
     assert by["finetune d=1 epoch-2 tok/s vs epoch-1"]["value"] == 0.95
-    assert by["finetune_d1 GPU mean util"]["value"] == 72.0
-    assert "pretrain_d1 GPU mean util" not in by  # util gate is for the fine-tune leg
+    assert by["finetune d=1 loader wait share (last epoch)"]["value"] == pytest.approx(0.011, abs=0.001)
+    assert not any("GPU mean util" in k for k in by)  # utilisation is reported, not gated
     assert by["serving GPU req/s > CPU req/s (concurrency 1)"]["value"] == pytest.approx(3.33, abs=0.01)
 
 
 def test_acceptance_table_flags_failures_and_skips(report) -> None:
     ev = _evidence()
     ev["legs"]["finetune"][0]["epoch_stats"][2]["tokens_per_sec"] = 60000.0  # -40%
-    ev["legs"]["precision"]["abs_auc_delta"] = 0.03
+    ev["legs"]["precision"]["mean_cosine"] = 0.9
     ev["legs"]["precision"]["passed"] = False
-    ev["utilisation"][0]["gpu"]["mean_util_pct"] = 5.0  # below the 10% host-bound floor
+    for st in ev["legs"]["finetune"][0]["epoch_stats"]:
+        if st.get("phase") == "train":
+            st["data_wait_seconds"] = st["seconds"] * 0.9  # host-bound: the GPU waits on the loader
     ev["legs"]["flash_check"] = {"skipped": True, "skip_reason": "no CUDA"}
     del ev["legs"]["export"]
     rows = {r["check"]: r for r in report.acceptance_table(ev)}
     assert rows["finetune d=1 epoch-2 tok/s vs epoch-1"]["passed"] is False
-    assert rows["|ΔROC-AUC| bf16 vs fp32"]["passed"] is False
-    assert rows["finetune_d1 GPU mean util"]["passed"] is False
+    assert rows["bf16 vs fp32 embeddings mean cosine (|ΔROC-AUC| reported)"]["passed"] is False
+    assert rows["finetune d=1 loader wait share (last epoch)"]["passed"] is False
     assert "flash-attn ≡ SDPA max abs diff" not in rows  # skipped → not listed as a failure
     assert "ONNX export on the pod" not in rows
 

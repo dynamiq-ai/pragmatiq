@@ -132,6 +132,11 @@ class _NvidiaSampler:
             gpu_mean_utils = [sum(t[0] for t in samples) / len(samples)
                               for samples in per_gpu.values()]
             mean_util = sum(gpu_mean_utils) / len(gpu_mean_utils)
+            # Steady state: the second half of each GPU's samples, so a cold
+            # start (first-touch shard decode, kernel warmup) does not dominate.
+            steady = [sum(t[0] for t in samples[len(samples) // 2:]) / max(1, len(samples) - len(samples) // 2)
+                      for samples in per_gpu.values()]
+            steady_util = sum(steady) / len(steady)
             # Peak util = highest single sample across all GPUs
             peak_util = max(t[0] for samples in per_gpu.values() for t in samples)
             # Peak mem = highest single sample across all GPUs
@@ -143,6 +148,7 @@ class _NvidiaSampler:
             n_samples = sum(len(s) for s in per_gpu.values())
             return {
                 "mean_util_pct": round(mean_util, 1),
+                "mean_util_pct_steady": round(steady_util, 1),
                 "peak_util_pct": round(peak_util, 1),
                 "peak_mem_mib": round(peak_mem, 1),
                 "mean_power_w": round(mean_pwr, 1),

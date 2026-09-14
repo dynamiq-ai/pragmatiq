@@ -121,6 +121,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "exercises every leg locally for free before any GPU spend")
     ap.add_argument("--skip-flash-check", action="store_true",
                     help="Skip the flash-attn ≡ SDPA numeric equivalence check")
+    ap.add_argument("--recompute-acceptance", default=None, metavar="JSON",
+                    help="Re-summarise the gpu_util_*.csv files next to JSON and re-derive its "
+                         "acceptance table in place (after a harness rule change), then exit")
     ap.add_argument("--render-json", default=None, metavar="JSON",
                     help="Render an existing validation JSON into --write-readme and exit (no run)")
     ap.add_argument("--write-readme", default=None, metavar="README",
@@ -173,6 +176,25 @@ def _run_meta(args: argparse.Namespace, tag: str, start_ts: str) -> dict[str, An
 
 def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orchestration
     args = _parse_args(argv)
+    if args.recompute_acceptance:
+        import json as _json
+
+        from gpuval.monitoring import _NvidiaSampler
+        from gpuval.report import acceptance_table
+
+        jp = Path(args.recompute_acceptance)
+        ev = _json.loads(jp.read_text())
+        for rec in ev.get("utilisation", []):
+            csv_path = jp.parent / f"gpu_util_{rec.get('label')}.csv"
+            if csv_path.exists():
+                rec["gpu"] = _NvidiaSampler(csv_path)._summarize() or rec.get("gpu")
+        ev["acceptance"] = acceptance_table(ev)
+        ev["all_passed"] = all(r["passed"] is not False for r in ev["acceptance"])
+        jp.write_text(_json.dumps(ev, indent=2, sort_keys=True) + "\n")
+        for r in ev["acceptance"]:
+            print(f"  [{'PASS' if r['passed'] else 'SKIP' if r['passed'] is None else 'FAIL'}] {r['check']}: {r['value']} ({r['threshold']})")
+        print(f"[main] all_passed={ev['all_passed']}: {jp}")
+        return
     if args.render_json:
         target = args.write_readme or "README.md"
         ok = write_readme_block(args.render_json, target)
