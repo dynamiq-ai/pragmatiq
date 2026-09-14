@@ -489,7 +489,36 @@ where a number is missing below, it has not been measured on this build.
 
 <!-- GPU_VALIDATION_RESULTS -->
 
-_Not yet measured on this build; `python scripts/validate_gpu.py --render-json docs/benchmarks/gpu-validation-1.1.0.json --write-readme README.md` fills this table from the validation JSON._
+**Hardware:** NVIDIA A100-SXM4-80GB × 8, torch 2.8.0+cu128, flash-attn 2.8.3, CUDA 12.8. **Data:** 50000 synthetic users, 300 pretrain steps, model `small`. Run 1.1.0 on 2026-09-14T23:47:52.
+
+| preset | devices | tokens/s | peak VRAM (GB) | DDP efficiency |
+| --- | --- | --- | --- | --- |
+| small | 1 | 438,370 | 1.8 | 100% |
+| small | 2 | 828,442 | 1.9 | 94% |
+| small | 4 | 1,595,042 | 1.9 | 91% |
+| small | 8 | 2,416,437 | 1.9 | 69% |
+
+| fine-tune devices | epochs | wall time | best val ROC-AUC | epoch-1 → epoch-2 tok/s |
+| --- | --- | --- | --- | --- |
+| 1 | 3 | 181 s | 0.505 | 128,247 → 637,238 |
+| 8 | 3 | 543 s | 0.555 | n/a |
+
+| serving device | concurrency | req/s | p50 ms | p99 ms |
+| --- | --- | --- | --- | --- |
+| cpu | 1 | 103.7 | 9 | 12 |
+| cpu | 4 | 120.7 | 33 | 39 |
+| cpu | 16 | 68.1 | 210 | 340 |
+| cpu | 64 | 94.1 | 667 | 812 |
+| cuda | 1 | 129.0 | 7 | 14 |
+| cuda | 4 | 113.9 | 33 | 71 |
+| cuda | 16 | 102.5 | 140 | 213 |
+| cuda | 64 | 103.0 | 574 | 765 |
+
+- bf16 vs fp32: embed 127 vs 74 users/s; probe ROC-AUC 0.613 vs 0.572 (|Δ| = 0.0413); mean embedding cosine 0.999999.
+- flash-attn vs SDPA max abs diff: 0.00e+00 (tolerance 1e-02).
+- `pragmatiq quickstart --n-users 2000 --max-steps 80`: 311 s.
+
+Acceptance: 15/16 checks passed. Evidence: `docs/benchmarks/gpu-validation-1.1.0.json`.
 
 ## Running on GPU
 

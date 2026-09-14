@@ -440,8 +440,13 @@ def acceptance_table(evidence: dict[str, Any]) -> list[dict[str, Any]]:
         value = leg.get("mean_cosine", leg.get("wall_time_s", leg.get("chunked_vs_whole_max_abs",
                                                                   leg.get("bf16_backend"))))
         passed = bool(leg.get("passed"))
-        if name == "precision" and leg.get("mean_cosine") is not None:
-            passed = float(leg["mean_cosine"]) >= 0.99  # re-derivable from the raw leg
+        if name == "precision":  # re-derivable from the raw leg
+            if leg.get("mean_cosine") is not None:
+                passed = float(leg["mean_cosine"]) >= 0.99
+            elif leg.get("abs_auc_delta") is not None:  # older evidence without the cosine
+                value = leg["abs_auc_delta"]
+                threshold = "|ΔROC-AUC| <= 0.02 (cosine not measured)"
+                passed = float(leg["abs_auc_delta"]) <= 0.02
         add(label, value, threshold, passed)
     return rows
 
@@ -510,7 +515,8 @@ def render_readme_block(json_path: str | Path) -> str:
         bullets.append(f"- bf16 vs fp32: embed {_f(prec.get('bf16_users_per_sec'), ',.0f')} vs "
                        f"{_f(prec.get('fp32_users_per_sec'), ',.0f')} users/s; probe ROC-AUC "
                        f"{_f(prec.get('bf16_probe_auc'), '.3f')} vs {_f(prec.get('fp32_probe_auc'), '.3f')} "
-                       f"(|Δ| = {_f(prec.get('abs_auc_delta'), '.4f')}).")
+                       f"(|Δ| = {_f(prec.get('abs_auc_delta'), '.4f')}); mean embedding cosine "
+                       f"{_f(prec.get('mean_cosine'), '.6f')}.")
     if fc and not fc.get("skipped"):
         bullets.append(f"- flash-attn vs SDPA max abs diff: {_f(fc.get('max_abs_diff'), '.2e')} "
                        f"(tolerance {_f(fc.get('tol'), '.0e')}).")

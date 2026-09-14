@@ -900,8 +900,10 @@ def quickstart(
     synthesize({"n_users": n_users, "seed": seed}, out=raw, n_workers=n_workers, write_report=False)
     tokenize(raw, tok, config={"target_vocab": 28000, "n_buckets": 64})
     summary = pretrain(tok, "quickstart", model_size=model_size,
+                       # One device: a nano smoke run gains nothing from DDP, and on an
+                       # 8-GPU host the launch and all-reduce overhead made it ~2.5x slower.
                        config={"max_steps": max_steps, "token_budget": 8192,
-                               "warmup_steps": max(10, max_steps // 10)},
+                               "warmup_steps": max(10, max_steps // 10), "devices": 1},
                        runs_root=runs_root)
     res = probe(tok, summary["run_dir"], label)
     return {"run_dir": summary["run_dir"], "probe": res,
