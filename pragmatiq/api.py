@@ -191,7 +191,8 @@ def tokenize(
         tok.save(out / "tokenizer")
         tok_src = out / "tokenizer"
 
-        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard)
+        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard,
+                             max_events_per_user=tok.config.max_events_per_user)
         # Progress total is best-effort: manifest.json may be absent or foreign
         # (bring-your-own datasets only owe us the parquet contract).
         total: int | None = None
@@ -634,7 +635,7 @@ def export(
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
         model = PragmaModel.from_pretrained(run, device="cpu")
         ds = ShardDataset(shard_dir)
-        example = VarlenCollator()([ds.get(ds.user_ids[0])])
+        example = VarlenCollator(max_events=ds.max_events)([ds.get(ds.user_ids[0])])
         ds.close()
         result = export_onnx(model, example, out)
         if _out_staged:

@@ -155,8 +155,12 @@ class ShardWriter:
         bands: tuple[int, ...] = DEFAULT_BANDS,
         rows_per_shard: int = 4096,
         map_size: int = 1 << 34,
+        max_events_per_user: int | None = None,
     ) -> None:
         self.out = Path(out_dir)
+        # Recorded in the manifest so every consumer applies the same per-user
+        # event cap at collation time (see TokenizerConfig.max_events_per_user).
+        self.max_events_per_user = max_events_per_user
         (self.out / "shards").mkdir(parents=True, exist_ok=True)
         self.bands = bands
         self.rows_per_shard = rows_per_shard
@@ -253,6 +257,7 @@ class ShardWriter:
         manifest = {
             "tokenizer_hash": self.tokenizer_hash,
             "bands": list(self.bands),
+            "max_events_per_user": self.max_events_per_user,
             "n_users": len(self._index),
             "n_shards": sum(self._shard_counter.values()),
             "total_tokens": int(sum(m.n_tokens for m in self._index)),

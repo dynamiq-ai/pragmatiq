@@ -246,7 +246,7 @@ class LoRAFineTuner:
                                       shuffle=train, seed=self.config.seed, subset=subset)
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
-        collator = TruncatingCollator(cutoffs) if cutoffs else None
+        collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
         probs, ys = [], []
         # Long epochs still need a liveness signal at scale — heartbeat so
@@ -331,7 +331,7 @@ class LoRAFineTuner:
         sampler.set_replica_info(int(self.fabric.world_size), int(self.fabric.global_rank))
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
-        collator = TruncatingCollator(cutoffs) if cutoffs else None
+        collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
         loader = ShardDataLoader(dataset, sampler, collator=collator)
         local_probs: list[float] = []
         local_ys: list[int] = []

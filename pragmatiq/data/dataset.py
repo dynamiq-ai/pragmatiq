@@ -12,6 +12,7 @@ the parquet shards by ``(band, shard, row)`` with a small LRU shard cache.
 
 from __future__ import annotations
 
+import json
 from collections import OrderedDict
 from collections.abc import Iterator
 from pathlib import Path
@@ -31,6 +32,10 @@ class ShardDataset:
     def __init__(self, shard_dir: str | Path, cache_shards: int = 4) -> None:
         self.dir = Path(shard_dir)
         self.index = UserIndex(self.dir)
+        manifest_path = self.dir / "shard_manifest.json"
+        manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+        #: Per-user event cap recorded at tokenize time; collators apply it.
+        self.max_events: int | None = manifest.get("max_events_per_user")
         self._cache: OrderedDict[tuple[int, int], Any] = OrderedDict()
         self._cache_n = cache_shards
 
@@ -254,7 +259,7 @@ class ShardDataLoader:
     ) -> None:
         self.dataset = dataset
         self.sampler = sampler
-        self.collator = collator or VarlenCollator()
+        self.collator = collator or VarlenCollator(max_events=dataset.max_events)
         self.prefetch = max(0, int(prefetch))
         self.pin_memory = bool(pin_memory)
         self._order = dataset.user_ids

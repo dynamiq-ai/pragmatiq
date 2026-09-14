@@ -77,7 +77,8 @@ def embed_users(
     sampler = DynamicBatchSampler(dataset.index, token_budget=token_budget, shuffle=False,
                                   subset=subset)
     sampler.set_epoch(0)
-    collator = TruncatingCollator(cutoffs) if cutoffs else VarlenCollator()
+    collator = (TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs
+                else VarlenCollator(max_events=dataset.max_events))
     order = dataset.index.order
 
     def _embed_chunk(chunk: list[str]) -> np.ndarray:

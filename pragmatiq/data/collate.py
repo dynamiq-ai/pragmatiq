@@ -28,7 +28,7 @@ from typing import Any, TypeVar
 import numpy as np
 import torch
 
-from .tokenizer import TokenizedRecord, truncate_record
+from .tokenizer import TokenizedRecord, cap_events, truncate_record
 
 _T = TypeVar("_T")
 
@@ -183,13 +183,21 @@ class VarlenCollator:
     """Collates a list of :class:`TokenizedRecord` into a :class:`PackedBatch`.
 
     No padding anywhere: arrays are concatenated and ``cu_seqlens`` carry the
-    structure. The collator is pure/stateless, so it is safe across workers.
+    structure. ``max_events`` applies the per-user event cap (the most recent
+    events; :func:`cap_events`) to every record — after eval-point truncation in
+    :class:`TruncatingCollator`. The collator holds no other state, so it is safe
+    across workers.
     """
+
+    def __init__(self, max_events: int | None = None) -> None:
+        self.max_events = max_events
 
     def __call__(self, records: list[TokenizedRecord]) -> PackedBatch:
         """Pack ``records`` (one user each) into a single batch."""
         if not records:
             raise ValueError("cannot collate an empty record list")
+        if self.max_events is not None:
+            records = [cap_events(r, self.max_events) for r in records]
 
         key_ids, value_ids, positions, event_of_token = [], [], [], []
         is_text_parts: list[np.ndarray] = []
@@ -335,7 +343,8 @@ class TruncatingCollator(VarlenCollator):
     this collator can never contain an event at or past its user's eval point.
     """
 
-    def __init__(self, cutoffs: Mapping[str, int]) -> None:
+    def __init__(self, cutoffs: Mapping[str, int], max_events: int | None = None) -> None:
+        super().__init__(max_events)
         self.cutoffs = cutoffs
 
     def __call__(self, records: list[TokenizedRecord]) -> PackedBatch:

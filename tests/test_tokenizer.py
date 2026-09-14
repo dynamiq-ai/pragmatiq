@@ -255,11 +255,16 @@ class TestTruncationCaps:
                           lifelong=[(f"ll{i}", 1_500_000_000_000_000) for i in range(300)])
 
     def test_caps_truncate_oversized_record(self, tokenizer: PragmaTokenizer) -> None:
-        out = tokenizer.encode(self._oversized(tokenizer))  # default caps 24/200/6500
+        from pragmatiq.data.tokenizer import cap_events
+
+        out = tokenizer.encode(self._oversized(tokenizer))  # default caps 24/200 at encode time
         per_event = np.diff(out.event_offsets)
-        assert len(out.event_offsets) - 1 == 6500  # most-recent event subsample
+        assert len(out.event_offsets) - 1 == 7001  # the 6500-event cap applies at collate time
         assert int(per_event.max()) <= 24  # per-event token cap
         assert out.prof_key_ids.size <= 200  # profile-state token cap
+        capped = cap_events(out, tokenizer.config.max_events_per_user)
+        assert capped.n_events == 6500  # most-recent event subsample
+        assert np.array_equal(capped.event_ts, out.event_ts[-6500:])
 
     def test_caps_off_keeps_everything(self, tokenizer: PragmaTokenizer) -> None:
         import copy
@@ -407,3 +412,33 @@ class TestDataPathRefactors:
                  or _dt.timedelta()).total_seconds()) * 1_000_000
             for t in ts.tolist()], dtype=np.int64)
         assert np.array_equal(_utc_offsets_us(ts, tz), expected)
+
+
+class TestCounterSaturation:
+    """Bounded value tables for continuous numeric keys (TokenizerConfig.max_counter_distinct)."""
+
+    def test_numeric_key_saturates_without_changing_the_fit(self, dataset: Path) -> None:
+        cfg_a = TokenizerConfig(target_vocab=6000, n_buckets=32, categorical_threshold=200, seed=0,
+                                max_counter_distinct=None)
+        cfg_b = TokenizerConfig(target_vocab=6000, n_buckets=32, categorical_threshold=200, seed=0,
+                                max_counter_distinct=250)
+        a = PragmaTokenizer(cfg_a).fit(dataset)
+        b = PragmaTokenizer(cfg_b).fit(dataset)
+        assert a.field_kind == b.field_kind
+        assert a.field_kind["amount"] == "numeric"
+        assert np.array_equal(a.binners["amount"].edges, b.binners["amount"].edges)
+        assert a.key_vocab == b.key_vocab
+
+    def test_saturated_key_that_stops_looking_numeric_raises(self) -> None:
+        from pragmatiq.data.tokenizer import _FitAccum
+
+        acc = _FitAccum(max_counter_distinct=5)
+        acc.see("code", np.array([str(i) for i in range(20)], dtype=object))
+        assert not acc.saturated
+        acc.see("code", np.array([str(i) for i in range(20, 40)], dtype=object))
+        assert acc.saturated == {"code"}
+        assert len(acc.counters["code"]) == 20  # no new values admitted after saturation
+        acc.see("code", np.array(["north"] * 40, dtype=object))
+        tok = PragmaTokenizer(TokenizerConfig(max_counter_distinct=5))
+        with pytest.raises(ValueError, match="max_counter_distinct"):
+            tok._finalize(acc)

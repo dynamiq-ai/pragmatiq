@@ -120,3 +120,54 @@ class TestTruncateRecord:
         wrapped = TruncatingCollator({})(recs)
         assert plain.n_tokens == wrapped.n_tokens
         assert plain.n_events == wrapped.n_events
+
+
+class TestEventCapAtCollate:
+    """The per-user event cap is applied when a batch is collated, after the eval-point cut."""
+
+    @staticmethod
+    def _record(n: int) -> UserRecord:
+        hour = 3_600_000_000
+        return UserRecord(
+            user_id="heavy",
+            events=[(int((i + 1) * hour), "transaction", {"amount": f"{i + 1}.50", "mcc": "5411"})
+                    for i in range(n)],
+            attributes={"country": "GB"}, lifelong=[("kyc_passed", hour)], as_of=int((n + 1) * hour),
+        )
+
+    def test_encode_keeps_the_full_history(self, dataset: ShardDataset) -> None:
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        tok.config.max_events_per_user = 10
+        rec = tok.encode(self._record(40))
+        assert rec.n_events == 40  # shards carry everything; the cap is a batch-time decision
+
+    def test_cap_events_keeps_most_recent(self, dataset: ShardDataset) -> None:
+        from pragmatiq.data.tokenizer import cap_events
+
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        full = tok.encode(self._record(40))
+        capped = cap_events(full, 10)
+        assert capped.n_events == 10
+        assert np.array_equal(capped.event_ts, full.event_ts[30:])
+        assert capped.event_offsets[0] == 0 and capped.event_offsets[-1] == capped.key_ids.size
+        assert np.array_equal(capped.key_ids, full.key_ids[int(full.event_offsets[30]):])
+        assert np.array_equal(capped.time_log, full.time_log[30:])  # still referenced to the last event
+        assert np.array_equal(capped.prof_key_ids, full.prof_key_ids)  # profile untouched
+        assert cap_events(full, 40) is full and cap_events(full, None) is full
+
+    def test_truncating_collator_caps_after_the_cutoff(self, dataset: ShardDataset) -> None:
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        full = tok.encode(self._record(40))
+        cutoff = int(full.event_ts[20])  # events 0..19 are before the eval point
+        batch = TruncatingCollator({"heavy": cutoff}, max_events=10)([full])
+        assert batch.n_events == 10
+        assert np.array_equal(batch.event_ts.numpy(), full.event_ts[10:20])  # the 10 most recent BEFORE the cut
+        plain = VarlenCollator(max_events=10)([full])
+        assert np.array_equal(plain.event_ts.numpy(), full.event_ts[30:])
+
+    def test_manifest_carries_the_cap_and_loader_applies_it(self, dataset: ShardDataset) -> None:
+        assert dataset.max_events == 6500  # TokenizerConfig default, recorded at tokenize time
+        from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader
+
+        loader = ShardDataLoader(dataset, DynamicBatchSampler(dataset.index, token_budget=2048, seed=0))
+        assert loader.collator.max_events == 6500

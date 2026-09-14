@@ -358,6 +358,6 @@ class PragmaModel(nn.Module):
         if tok is None:
             raise RuntimeError("embed_records needs a tokenizer; load via from_pretrained()")
         recs = [tok.encode(r if isinstance(r, UserRecord) else UserRecord.from_dict(r)) for r in records]
-        batch = VarlenCollator()(recs)
+        batch = VarlenCollator(max_events=tok.config.max_events_per_user)(recs)
         device = next(self.parameters()).device
         return self.embed_users(batch.to(device)).float().cpu().numpy()

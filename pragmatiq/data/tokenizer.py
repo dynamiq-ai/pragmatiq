@@ -67,6 +67,13 @@ class TokenizerConfig:
     bpe_min_frequency: int = 2
     lowercase_text: bool = False
     max_numeric_sample: int = 100_000
+    # fit() keeps a value->count table per key to decide categorical vs text and
+    # to build categorical vocabs. A continuous numeric key (amounts, balances)
+    # would grow that table to one entry per distinct value; once a key that has
+    # only ever parsed as a number exceeds this many distinct values, new values
+    # are no longer inserted (its classification cannot change and the table is
+    # unused for numeric keys). None disables the bound.
+    max_counter_distinct: int | None = 1_000_000
     # GUESS: a float-parsing field is treated as a continuous numeric (percentile
     # binned) only above this distinct-value count; below it, low-cardinality
     # codes (MCC, version strings) stay categorical. None ⇒ 4 × n_buckets.
@@ -86,13 +93,15 @@ class TokenizerConfig:
     # day/night, weekend and payday structure is local. Folded into the content
     # hash, so from_pretrained refuses a tokenizer with a mismatched calendar tz.
     calendar_tz: str = "UTC"
-    # Pre-training sequence caps that keep training tractable and stable on real,
-    # heavy-tailed histories (paper defaults). Each event is capped to the first
-    # ``max_event_tokens`` tokens; the profile state to the first whole items
-    # fitting ``max_profile_tokens`` tokens; a user with more than
-    # ``max_events_per_user`` events keeps only the most recent ones. ``None``
-    # disables a cap. At synthetic scale none of these bind, so output is
-    # unchanged; they only act on large real-world records.
+    # Sequence caps that keep training tractable and stable on real, heavy-tailed
+    # histories (paper defaults). ``max_event_tokens`` and ``max_profile_tokens``
+    # apply at encode time (first N tokens of an event; first whole profile items
+    # fitting N tokens). ``max_events_per_user`` is NOT applied at encode time:
+    # shards keep the full history and the cap is applied when a batch is
+    # collated — after any eval-point truncation — so a probe or fine-tune on a
+    # heavy user sees the most recent events *before* its eval point rather than
+    # a prefix of the globally most recent ones. The value is recorded in the
+    # shard manifest and read by ShardDataset. ``None`` disables a cap.
     max_event_tokens: int | None = 24
     max_profile_tokens: int | None = 200
     max_events_per_user: int | None = 6500
@@ -295,6 +304,37 @@ def truncate_record(rec: TokenizedRecord, cutoff_us: int) -> TokenizedRecord:
     )
 
 
+def cap_events(rec: TokenizedRecord, max_events: int | None) -> TokenizedRecord:
+    """Keep only the most recent ``max_events`` events of ``rec`` (profile untouched).
+
+    The paper's per-user cap (6,500 events, most recent kept). Applied by the
+    collators AFTER any eval-point truncation, so a heavy user's batch holds the
+    most recent events before its eval point. Token arrays, offsets, calendar
+    fields and the Nemotron text markers are sliced consistently; ``time_log``
+    is unchanged because it is already referenced to the last (kept) event.
+    Returns ``rec`` itself when the cap does not bind.
+    """
+    if max_events is None or rec.n_events <= max_events:
+        return rec
+    n_start = rec.n_events - max_events
+    tok_start = int(rec.event_offsets[n_start])
+    is_text = rec.is_text[tok_start:]
+    n_drop = int(rec.is_text[:tok_start].sum()) if rec.text_values else 0
+    return TokenizedRecord(
+        user_id=rec.user_id,
+        key_ids=rec.key_ids[tok_start:], value_ids=rec.value_ids[tok_start:],
+        positions=rec.positions[tok_start:],
+        event_offsets=rec.event_offsets[n_start:] - tok_start,
+        event_ts=rec.event_ts[n_start:], time_log=rec.time_log[n_start:],
+        hour=rec.hour[n_start:], dow=rec.dow[n_start:], dom=rec.dom[n_start:],
+        source_ids=rec.source_ids[n_start:],
+        prof_key_ids=rec.prof_key_ids, prof_value_ids=rec.prof_value_ids,
+        prof_positions=rec.prof_positions, prof_offsets=rec.prof_offsets,
+        prof_time_log=rec.prof_time_log, prof_ts=rec.prof_ts,
+        is_text=is_text, text_values=rec.text_values[n_drop:] if rec.text_values else [],
+    )
+
+
 class PragmaTokenizer:
     """Fits and applies the key–value–time vocabulary (see module docstring)."""
 
@@ -330,7 +370,7 @@ class PragmaTokenizer:
 
             return parallel_fit(data_dir, self, n_workers)
 
-        acc = _FitAccum()
+        acc = _FitAccum(max_counter_distinct=self.config.max_counter_distinct)
         # events
         pf = pq.ParquetFile(data_dir / "events.parquet")
         n_ev_batches = -(-pf.metadata.num_rows // 65_536)
@@ -418,6 +458,14 @@ class PragmaTokenizer:
                 self.binners[k] = binner
                 self.binner_base[k] = nid
                 nid += binner.n_bins
+            elif k in acc.saturated:
+                raise ValueError(
+                    f"key {k!r} exceeded max_counter_distinct={self.config.max_counter_distinct} "
+                    "distinct values while parsing as a number, then stopped looking numeric "
+                    f"(finite-parse ratio {ratio:.3f}); its value table is incomplete, so it cannot "
+                    "be routed to a categorical/BPE vocab. Raise max_counter_distinct (or set it "
+                    "to None), or pin the key with force_numeric / force_categorical."
+                )
             elif distinct > thr:  # too many distinct values for one-token-per-value
                 self.field_kind[k] = "text"
                 text_keys.append(k)
@@ -487,11 +535,6 @@ class PragmaTokenizer:
                 log.warning("events were not ascending by ts and were sorted before encoding; "
                             "pass pre-sorted events to avoid the reorder")
             events = sorted(events, key=lambda e: e[0])
-        # Keep only the most recent events when a history is very long (preserves
-        # recency); no-op below the cap.
-        cap_n = self.config.max_events_per_user
-        if cap_n is not None and len(events) > cap_n:
-            events = events[-cap_n:]
         cap_tok = self.config.max_event_tokens
         for _ts, source, fields in events:
             start = len(k_l)
@@ -818,6 +861,11 @@ class _FitAccum:
     numeric_ok: Counter = dataclasses.field(default_factory=Counter)
     numeric_n: Counter = dataclasses.field(default_factory=Counter)
     numeric_sample: dict[str, list[np.ndarray]] = dataclasses.field(default_factory=dict)
+    # Distinct-value bound for keys that have only ever parsed as numbers (see
+    # TokenizerConfig.max_counter_distinct); ``saturated`` names the keys whose
+    # counter stopped admitting new values.
+    max_counter_distinct: int | None = None
+    saturated: set[str] = dataclasses.field(default_factory=set)
 
     def see(self, key: str, values: np.ndarray) -> None:
         """Fold one key's batch of raw (string) values into the accumulator."""
@@ -828,12 +876,22 @@ class _FitAccum:
         # which is order-independent, so no subsampling RNG is involved.
         parsed = np.array([_try_float(v) for v in vals], dtype=np.float64)
         ok = np.isfinite(parsed)
+        counter = self.counters.setdefault(key, Counter())
+        cap = self.max_counter_distinct
+        if (cap is not None and key not in self.saturated and len(counter) > cap
+                and self.numeric_ok[key] == self.numeric_n[key]):
+            self.saturated.add(key)
         self.numeric_ok[key] += int(ok.sum())
         self.numeric_n[key] += len(vals)
         finite = parsed[ok]
         if len(finite):
             self.numeric_sample.setdefault(key, []).append(finite)
-        self.counters.setdefault(key, Counter()).update(vals.tolist())
+        if key in self.saturated:
+            # Only values already in the table keep counting; a numeric key's
+            # classification no longer depends on the table (distinct > every gate).
+            counter.update(v for v in vals.tolist() if v in counter)
+        else:
+            counter.update(vals.tolist())
 
     def consume_events_batch(self, batch: pa.RecordBatch) -> None:
         """Fold one ``events.parquet`` batch (``source`` + ``fields`` map)."""
@@ -866,6 +924,7 @@ class _FitAccum:
         self.numeric_n.update(other.numeric_n)
         for k, vs in other.numeric_sample.items():
             self.numeric_sample.setdefault(k, []).extend(vs)
+        self.saturated |= other.saturated
 
 
 def _day_of_month(ts_us: np.ndarray) -> np.ndarray:
