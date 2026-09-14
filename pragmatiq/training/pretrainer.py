@@ -668,6 +668,7 @@ class PreTrainer:
         )
         last_ckpt = time.time()
         t0 = time.time()
+        win_t0, win_tokens0 = t0, self._tokens_seen  # for the per-log-window rate
         # Rates must count only THIS fit() call: after a resume, step and
         # _tokens_seen carry the checkpointed totals while t0 restarts.
         start_step = self.step
@@ -752,6 +753,13 @@ class PreTrainer:
                 # its local throughput scaled by world_size as the aggregate.
                 ws = int(getattr(self.fabric, "world_size", 1))
                 metrics["tokens_per_sec"] = (self._tokens_seen - tokens0) * ws / elapsed
+                # Rate over just this log window: the cumulative figure above carries
+                # warmup and any one-off stall for the rest of the run, so it cannot
+                # show steady-state throughput (or a mid-run regression).
+                now = time.time()
+                metrics["tokens_per_sec_window"] = (
+                    (self._tokens_seen - win_tokens0) * ws / max(now - win_t0, 1e-6))
+                win_t0, win_tokens0 = now, self._tokens_seen
                 if torch.cuda.is_available():
                     metrics["gpu_mem_gb"] = torch.cuda.max_memory_allocated() / 1e9
                 if self.logger is not None and is_zero:

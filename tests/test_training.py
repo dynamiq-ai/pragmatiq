@@ -967,3 +967,17 @@ class TestFineTune:
                            config={"max_epochs": 2, "lora_rank": 4, "token_budget": 4096})
         assert res["n_adapted"] > 0
         assert "best_val_auc" in res
+
+
+def test_metrics_log_a_windowed_throughput(shards: Path) -> None:
+    """Each logged step carries the rate over its own log window next to the cumulative rate."""
+    import json
+
+    tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+    run = Run.create("tpswin", {}, 0, tok.content_hash, shards / "runs",
+                     tokenizer_src=shards / "tok" / "tokenizer")
+    trainer, loader, ds = _nano(tok.content_hash, 4, run, tok.vocab_size, shards, log_every=2)
+    trainer.fit(loader)
+    ds.close()
+    rows = [json.loads(line) for line in run.metrics_path.read_text().splitlines() if line.strip()]
+    assert rows and all("tokens_per_sec_window" in r and r["tokens_per_sec_window"] > 0 for r in rows)

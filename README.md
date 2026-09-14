@@ -291,7 +291,9 @@ paths, not this user-embedding probe.
 
 <sub>provenance: n_users=50000, model=small, steps=2000, seed=0, commit=cc48149</sub>
 
-**Event staleness.** In production the event feed lags: the embedding you score
+### Event staleness
+
+In production the event feed lags: the embedding you score
 at 09:00 was built from events that stopped arriving some time earlier. The
 paper checks that task metrics barely move when the most recent window of
 history is missing (§3.4.2). `pragmatiq probe --staleness-window 6h` (or

@@ -409,7 +409,7 @@ def write_aml_report(
             readme_path = None
         if readme_path and marker in text:
             text = re.sub(
-                re.escape(marker) + r".*?(?=\n<!-- |\n\*\*|\n## |\Z)",
+                re.escape(marker) + r".*?(?=\n<!-- |\n##+ |\Z)",
                 marker + "\n\n" + md + "\n",
                 text, count=1, flags=re.S,
             )

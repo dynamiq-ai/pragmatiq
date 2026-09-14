@@ -100,7 +100,7 @@ def write_multitask_report(rows: list[MultiTaskRow], scale: dict[str, Any],
     if existing and int(existing.group(1)) > int(scale.get("n_users", 0)):
         print(f"existing multi-task table is from a larger run (n_users={existing.group(1)}); not overwriting")
         return
-    text = re.sub(re.escape(MARKER) + r".*?(?=\n<!-- |\n\*\*|\n## |\Z)", MARKER + "\n\n" + md + "\n", text,
+    text = re.sub(re.escape(MARKER) + r".*?(?=\n<!-- |\n##+ |\Z)", MARKER + "\n\n" + md + "\n", text,
                   count=1, flags=re.S)
     path.write_text(text)
 

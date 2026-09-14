@@ -29,13 +29,19 @@ def _parse_metrics_jsonl(metrics_path: Path) -> list[dict[str, Any]]:
 
 
 def _steady_state_metrics(rows: list[dict[str, Any]]) -> dict[str, float]:
-    """Compute steady-state tokens_per_sec and peak gpu_mem_gb from the last half of steps."""
+    """Steady-state tokens_per_sec and peak gpu_mem_gb from the last half of logged steps.
+
+    Uses the per-log-window rate (``tokens_per_sec_window``) when the trainer
+    logs it — the cumulative rate carries warmup and cold-cache stalls for the
+    rest of a short run — and falls back to the cumulative figure otherwise.
+    """
     if not rows:
         return {"tokens_per_sec": float("nan"), "gpu_mem_gb": float("nan")}
     # Keep only the last half (skip warmup); with ≤2 rows use all rows
     half = len(rows) // 2 if len(rows) > 2 else 0
     tail = rows[half:]
-    tps_vals = [r["tokens_per_sec"] for r in tail if "tokens_per_sec" in r]
+    tps_vals = [r.get("tokens_per_sec_window", r.get("tokens_per_sec")) for r in tail
+                if "tokens_per_sec" in r or "tokens_per_sec_window" in r]
     mem_vals = [r["gpu_mem_gb"] for r in tail if "gpu_mem_gb" in r]
     return {
         "tokens_per_sec": median(tps_vals) if tps_vals else float("nan"),
