@@ -138,6 +138,11 @@ states the pre-2.0 policy that allows this.
   fine-tune without flash-attn ran at 1% utilisation); `attention_backend()` /
   `flash_available()` report the active kernel; `PRAGMATIQ_DISABLE_FLASH=1`
   forces SDPA.
+- **Trainer metrics** log `tokens_per_sec_window` (the rate over the last log
+  interval) next to the cumulative `tokens_per_sec`; the GPU validation sweep
+  reports the steady-state median of the window rate.
+- **`quickstart`** pins `devices=1`: a nano smoke run gains nothing from DDP and
+  was 2.5× slower on an 8-GPU host.
 - **Shard cache** (`ShardDataset`): sized in bytes (a quarter of RAM, up to
   16 GiB) instead of four shards; `cache_shards=` still pins a count.
 - **Fine-tune `epoch_stats`** carry `data_wait_seconds` (time spent waiting on
