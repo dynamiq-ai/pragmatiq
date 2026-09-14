@@ -489,7 +489,7 @@ where a number is missing below, it has not been measured on this build.
 
 <!-- GPU_VALIDATION_RESULTS -->
 
-_Not yet measured on this build; `python scripts/gpuval/report.py --write` fills this table from the validation JSON._
+_Not yet measured on this build; `python scripts/validate_gpu.py --render-json docs/benchmarks/gpu-validation-1.1.0.json --write-readme README.md` fills this table from the validation JSON._
 
 ## Running on GPU
 

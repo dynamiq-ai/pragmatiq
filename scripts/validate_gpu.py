@@ -121,6 +121,8 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                          "exercises every leg locally for free before any GPU spend")
     ap.add_argument("--skip-flash-check", action="store_true",
                     help="Skip the flash-attn ≡ SDPA numeric equivalence check")
+    ap.add_argument("--render-json", default=None, metavar="JSON",
+                    help="Render an existing validation JSON into --write-readme and exit (no run)")
     ap.add_argument("--write-readme", default=None, metavar="README",
                     help="After the run, replace the <!-- GPU_VALIDATION_RESULTS --> block of this "
                          "README with the rendered results")
@@ -171,6 +173,11 @@ def _run_meta(args: argparse.Namespace, tag: str, start_ts: str) -> dict[str, An
 
 def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orchestration
     args = _parse_args(argv)
+    if args.render_json:
+        target = args.write_readme or "README.md"
+        ok = write_readme_block(args.render_json, target)
+        print(f"[main] README block {'written' if ok else 'marker missing; not written'}: {target}")
+        return
 
     # Leg modes first: Fabric re-launches this file per rank.
     if getattr(args, "_leg_pretrain", False):

@@ -116,3 +116,12 @@ reference:
 | New `api.*` function, new optional param, new return key, new extra | MINOR |
 | Change a `# GUESS` default value (for new runs only) | MINOR |
 | Bugfix / internal refactor / perf improvement | PATCH |
+
+### Refreshing the README result tables
+
+The multi-task, event-staleness and AML tables in the README (and notebook 04)
+are regenerated on one GPU pod by
+`python scripts/benchmarks/refresh_results.py` (run it on the pod via
+`scripts/runpod_launch.py --remote-script scripts/benchmarks/refresh_results.py`);
+each table carries its provenance stamp and a writer refuses to replace a
+larger-scale result.
