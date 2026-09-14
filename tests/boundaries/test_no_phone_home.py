@@ -91,7 +91,7 @@ assert np.isfinite(emb).all(), "embedding contains non-finite values"
 import tempfile as _tf, pathlib as _pl
 _log_dir = _pl.Path(_tf.mkdtemp())
 
-from pragmatiq.experiments.tracking import MetricLogger
+from pragmatiq.runs.tracking import MetricLogger
 _logger = MetricLogger(str(_log_dir), tensorboard=False, wandb=False)
 _logger.close()
 

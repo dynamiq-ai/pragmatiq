@@ -71,7 +71,7 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev,full]"
       - name: Full pytest
-        run: pytest tests/ -q --durations=15
+        run: pytest tests/ -q --durations=15 -m "not gpu"
 
   serve-slim:
     # Prove that `pip install pragmatiq[serve]` is genuinely slim: no lightning,
@@ -200,6 +200,10 @@ jobs:
         run: bash scripts/gates/gate_integrations.sh
       - name: BYOC hardening
         run: bash scripts/gates/gate_10_byoc.sh
+      - name: Slim serve install
+        run: bash scripts/gates/gate_serve_slim.sh
+      - name: Storage backends
+        run: bash scripts/gates/gate_storage.sh
 
   supply-chain:
     runs-on: ubuntu-latest

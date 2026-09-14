@@ -1,4 +1,4 @@
-"""Unit tests for pragmatiq.experiments.tracking.MetricLogger.
+"""Unit tests for pragmatiq.runs.tracking.MetricLogger.
 
 Covers JSONL logging (always on), optional TensorBoard/wandb backends,
 and the graceful-degradation contract: missing optional backends must warn,
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from pragmatiq.experiments.tracking import MetricLogger
+from pragmatiq.runs.tracking import MetricLogger
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -88,7 +88,7 @@ def test_wandb_missing_warning_message(tmp_path: Path, monkeypatch, caplog) -> N
     """The warning emitted when wandb is absent must mention wandb and installation."""
     monkeypatch.setitem(sys.modules, "wandb", None)
 
-    with caplog.at_level(logging.WARNING, logger="pragmatiq.experiments.tracking"):
+    with caplog.at_level(logging.WARNING, logger="pragmatiq.runs.tracking"):
         MetricLogger(run_dir=tmp_path, wandb=True).close()
 
     assert any(
@@ -99,7 +99,7 @@ def test_wandb_missing_warning_message(tmp_path: Path, monkeypatch, caplog) -> N
 
 def test_wandb_false_no_warning(tmp_path: Path, caplog) -> None:
     """No wandb warning when wandb=False (the default)."""
-    with caplog.at_level(logging.WARNING, logger="pragmatiq.experiments.tracking"):
+    with caplog.at_level(logging.WARNING, logger="pragmatiq.runs.tracking"):
         MetricLogger(run_dir=tmp_path, wandb=False).close()
 
     assert not any("wandb" in r.message.lower() for r in caplog.records)

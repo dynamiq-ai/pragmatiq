@@ -334,9 +334,12 @@ class PragmaModel(nn.Module):
                 f"format {CKPT_FORMAT}. Re-train with the current version."
             )
         if ckpt.get("tokenizer_hash") != tok.content_hash:
-            raise ValueError(
-                "tokenizer hash mismatch: this checkpoint was trained with a different "
-                "tokenizer; from_pretrained refuses to run."
+            from pragmatiq.core.errors import DataContractError
+
+            raise DataContractError(
+                f"tokenizer hash mismatch in run {str(run_dir)!r}: the checkpoint was trained "
+                "with a different tokenizer than the one in the run's tokenizer/ directory; "
+                "from_pretrained refuses to run. Restore the run's original tokenizer."
             )
         config = ModelConfig(**ckpt["model_config"])
         model = cls(config)

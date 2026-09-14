@@ -12,11 +12,17 @@ max_numeric_sample: 100000   # reservoir size per key for percentile fitting
 numeric_min_cardinality: null  # GUESS
 calendar_tz: UTC         # IANA zone for the hour/day-of-week/day-of-month features;
                          #   set a local zone (e.g. Europe/London) for local-time data
-# Pre-training sequence caps (paper defaults) — keep training tractable on long
-# real histories; null disables. At synthetic scale none of these bind.
-max_event_tokens: 24       # tokens kept per event
-max_profile_tokens: 200    # tokens kept for the profile state
-max_events_per_user: 6500  # keep the most recent N events per user
+# Sequence caps (paper defaults) — keep training tractable on long real
+# histories; null disables. At synthetic scale none of these bind.
+max_event_tokens: 24       # tokens kept per event (encode time)
+max_profile_tokens: 200    # tokens kept for the profile state (encode time)
+max_events_per_user: 6500  # most recent N events per user — recorded in the shard
+                           #   manifest and applied when a batch is collated, after
+                           #   any eval-point cut; shards keep the full history
+# GUESS: bound on the per-key value table fit() keeps for keys that only ever parse
+# as numbers (amounts, balances); null disables. Keeps fit() memory bounded on
+# continuous keys without changing how any key is classified.
+max_counter_distinct: 1000000
 # PRAGMA+Nemotron variant. "bpe" (default) tokenises text field values into sub-word
 # pieces. "embed" emits one sentinel token per event text field and carries the raw
 # string, which a frozen text encoder maps to a vector (reconstructed via MSE during

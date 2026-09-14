@@ -3,15 +3,18 @@
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
 
-pragmatiq uses a two-branch flow:
+pragmatiq releases from `main`:
 
-- **`develop`** — the integration branch and the default base for pull requests.
-  Feature and fix branches (`feat/...`, `fix/...`) are opened against `develop`.
-- **`main`** — the release branch. Every version-bumping merge to `main` publishes
-  a release to PyPI and GitHub.
+- **`main`** — the release branch and the base for pull requests. Feature,
+  fix and release branches (`feat/...`, `fix/...`, `release/x.y.z`) are opened
+  against `main` and squash-merged as one commit (a release PR's commit is
+  titled `pragmatiq x.y.z (#N)`). Every version-bumping merge to `main`
+  publishes a release to PyPI and GitHub.
+- **`develop`** — mirrors `main`; it is fast-forwarded after each merge and
+  exists for tooling that expects a `develop` branch.
 
 ```
-feature branch ──PR──▶ develop ──release PR──▶ main ──▶ tag + GitHub Release ──▶ PyPI
+feature / release branch ──PR (squash)──▶ main ──▶ tag + GitHub Release ──▶ PyPI ──▶ fast-forward develop
 ```
 
 ## Cutting a release
@@ -25,15 +28,23 @@ in **all three places** (they must agree):
 - `pragmatiq/__init__.py` — the `__version__` fallback string
 - `CITATION.cff` — `version:` field
 
-Add a `## [X.Y.Z]` entry to `CHANGELOG.md` (newest at top).
+Add a `## [X.Y.Z]` entry to `CHANGELOG.md` (newest at top) with *Breaking*
+(each break with a migration line — the pre-2.0 policy in `docs/STABILITY.md`),
+*Added*, *Changed*, *Removed*; update the "Breaks in x.y.z" table in
+`docs/STABILITY.md` and the contract goldens in `tests/contract/` for any
+signature or default that changed. The version bump is the **last** change in
+the release PR, because `release.yml` publishes on any push to `main` whose
+version has no tag yet.
 
-### 2. Regenerate the lock file
+### 2. Regenerate the lock file and the docs facts
 
 ```bash
 uv lock
+python scripts/docs_facts.py        # website/data/facts.json (drift-checked in CI)
+python scripts/docs_drift_check.py
 ```
 
-Commit the updated `uv.lock` alongside the version bump.
+Commit the updated `uv.lock` and `facts.json` alongside the version bump.
 
 ### 3. Regenerate the SBOM
 
@@ -51,10 +62,13 @@ generator works.
 bash scripts/gates/run_full_validation.sh
 ```
 
-All gates must be green before merging. Docker-dependent gates (gate_7 Triton)
-require a Docker daemon; run them locally or in CI with Docker enabled. The
-offline-capable gates (gate_1 through gate_6, gate_8, gate_9_contract,
-gate_storage, gate_integrations, gate_10_byoc) must all pass without Docker.
+All gates must be green before merging: `gate_1` … `gate_8`,
+`gate_9_contract`, `gate_serve_slim`, `gate_storage`, `gate_integrations`,
+`gate_10_byoc` (CI runs every one). Run the GPU validation on a rented pod
+(`python scripts/runpod_launch.py ...`, legs in `scripts/gpuval/`) and commit
+its JSON under `docs/benchmarks/` so the README `GPU_VALIDATION_RESULTS` block
+reflects the release; `bash scripts/deploy_serving.sh` on the pod must print
+`SERVING SMOKE GREEN`.
 
 ### 5. Merge and tag
 
@@ -87,18 +101,18 @@ publisher with:
 ## Hotfixes
 
 For an urgent fix to a published release, branch from `main`, open a PR back into
-`main` with a patch-version bump, merge it (which releases), then merge `main`
-back into `develop` so the branches stay in sync.
+`main` with a patch-version bump, merge it (which releases), then fast-forward
+`develop` so the branches stay in sync.
 
 ## What counts as BREAKING vs MINOR vs PATCH
 
-See [`docs/STABILITY.md`](docs/STABILITY.md) for the full SemVer policy. Quick
+See [`docs/STABILITY.md`](docs/STABILITY.md) for the pre-2.0 policy. Quick
 reference:
 
 | Change | Bump |
 | --- | --- |
-| Rename / remove an `api.*` function, CLI command, or serving input/output name | MAJOR |
-| Checkpoint format version increment | MAJOR |
+| Serving input/output name or dtype; checkpoint format version | MAJOR |
+| Rename / remove an `api.*` function, CLI command or param; change a default; shard/generator format | MINOR, listed under *Breaking* with a migration line |
 | New `api.*` function, new optional param, new return key, new extra | MINOR |
 | Change a `# GUESS` default value (for new runs only) | MINOR |
 | Bugfix / internal refactor / perf improvement | PATCH |

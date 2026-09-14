@@ -22,11 +22,21 @@ synth_app = typer.Typer(help="Synthetic data generation.", no_args_is_help=True)
 app.add_typer(synth_app, name="synth")
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from pragmatiq import __version__
+
+        typer.echo(f"pragmatiq {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
 def _setup(
     ctx: typer.Context,
     verbose: bool = typer.Option(True, "--verbose/--quiet",
                                  help="Show INFO-level progress logs on stderr."),
+    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True,
+                                 help="Print the pragmatiq version and exit."),
 ) -> None:
     ctx.obj = {"verbose": verbose}
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING,
@@ -83,6 +93,9 @@ def pretrain_cmd(
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
     wandb: bool = typer.Option(False, "--wandb",
                                help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."),
+    show_config: bool = typer.Option(False, "--show-config",
+                                     help="Print the resolved training + model config as JSON "
+                                          "and exit without training."),
 ) -> None:
     """Pretrain a pragmatiq model (MLM) on tokenized shards."""
     from pragmatiq import api
@@ -94,6 +107,11 @@ def pretrain_cmd(
         overrides["wandb"] = True
     if ctx.obj and not ctx.obj.get("verbose", True):
         overrides["verbose"] = False  # --quiet also silences the heartbeat
+    if show_config:
+        plan = api.pretrain_plan(shard_dir, model_size=model_size, config=config, run_name=run_name,
+                                 runs_root=runs_root, resume=resume, **overrides)
+        typer.echo(json.dumps(plan, indent=2, default=str))
+        return
     summary = api.pretrain(shard_dir, run_name, model_size=model_size, config=config,
                            runs_root=runs_root, resume=resume, **overrides)
     typer.echo(json.dumps(summary, indent=2))
@@ -175,6 +193,14 @@ def quickstart_cmd(
                          max_steps=max_steps, n_workers=n_workers)
     typer.echo(json.dumps(res, indent=2))
     typer.echo(res["message"])
+
+
+@app.command("info")
+def info_cmd() -> None:
+    """Describe this installation: versions, device, kernels, extras, env vars."""
+    from pragmatiq import api
+
+    typer.echo(json.dumps(api.info(), indent=2))
 
 
 @app.command("validate")

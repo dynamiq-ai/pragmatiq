@@ -40,7 +40,7 @@ import pyarrow.parquet as pq
 
 from pragmatiq.core.schema import UserRecord
 
-from ..progress import progress
+from ..core.progress import progress
 from ..registry import get_value_encoder, register_value_encoder
 
 log = logging.getLogger(__name__)

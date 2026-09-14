@@ -22,7 +22,7 @@ Beyond `api`, the model exposes two notebook-friendly methods:
 ```python
 from pragmatiq.models.pragmatiq import PragmaModel
 
-model = PragmaModel.from_pretrained("runs/demo")     # loads model + tokenizer
+model = PragmaModel.from_pretrained("runs/demo")     # loads model + tokenizer on cuda if visible, else cpu
 emb = model.embed_records([                           # plain dicts, no shards needed
     {"user_id": "u1", "events": [
         {"ts": 1_700_000_000_000_000, "source": "transaction",
@@ -32,4 +32,6 @@ emb = model.embed_records([                           # plain dicts, no shards n
 ```
 
 `from_pretrained` verifies the checkpoint's tokenizer hash against the run's tokenizer and
-refuses to run on a mismatch.
+refuses to run on a mismatch. `embed_records(records, precision="auto", token_budget=None)`
+runs under `torch.inference_mode` — bf16 on CUDA, fp32 on CPU — and `token_budget` splits a
+large request into bounded forward passes.

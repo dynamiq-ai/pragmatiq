@@ -25,11 +25,13 @@ from typing import Any
 REPO = Path(__file__).resolve().parent.parent
 OUT = REPO / "website" / "data" / "facts.json"
 
-# Public API surface documented on the site (mirrors pragmatiq/api.py's __all__ intent).
-API_FUNCTIONS = (
-    "synthesize", "tokenize", "pretrain", "finetune", "embed", "probe", "uplift",
-    "gnn", "quickstart",
-)
+
+def _api_function_names() -> tuple[str, ...]:
+    """The public API surface, read from ``pragmatiq.api.__all__`` (the single source)."""
+    from pragmatiq import api
+
+    return tuple(api.__all__)
+
 MODEL_SIZES = ("nano", "small", "medium", "large")
 
 
@@ -117,7 +119,7 @@ def _api() -> list[dict[str, str]]:
     from pragmatiq import api
 
     out = []
-    for fn_name in API_FUNCTIONS:
+    for fn_name in _api_function_names():
         fn = getattr(api, fn_name, None)
         if fn is None:
             continue

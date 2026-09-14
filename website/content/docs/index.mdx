@@ -10,8 +10,9 @@ single dense **user embedding** that downstream teams probe, fine-tune, graph, a
 
 It ships the whole stack: a deterministic synthetic data generator, a key–value–time
 tokenizer, a padding-free PyTorch encoder stack, training and evaluation pipelines,
-ONNX/Triton serving, and a graph-based AML extension. **Everything runs on CPU first**;
-CUDA and flash-attn are accelerations, not requirements.
+ONNX/Triton serving, and a graph-based AML extension. It is **GPU-first and
+CPU-complete**: every command picks a CUDA device when one is visible (bf16, flash-attn's
+varlen kernel when installed) and runs the same code in fp32 on a CPU when none is.
 
 ## Who this is for
 
@@ -31,7 +32,8 @@ is silent.
 ## A 30-second tour
 
 ```bash
-pip install "pragmatiq[train]"   # CPU-capable; Python 3.11+; train = Lightning for pretraining
+pip install "pragmatiq[train]"   # Python 3.11+, torch 2.6+; train = Lightning for pretraining
+pragmatiq info                   # the device, precision and extras this machine will use
 pragmatiq quickstart             # synth -> tokenize -> pretrain -> embed -> probe
 ```
 

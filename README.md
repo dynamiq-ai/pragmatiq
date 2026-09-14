@@ -17,12 +17,15 @@
 PRAGMA paper ([arXiv:2604.08649](https://arxiv.org/abs/2604.08649)) by
 Ostroukhov et al. It turns user histories made of timestamped key-value events
 into embeddings that downstream teams can use for probes, LoRA fine-tuning,
-graph-based AML experiments, explainability, and serving.
+graph-based AML experiments, and serving.
 
 The repository includes the full stack: a deterministic synthetic banking data
 generator, tokenizer, padding-free PyTorch model, training pipeline, batch
-embedding, ONNX/Triton serving, notebooks, and a Streamlit demo. It is built to
-run on CPU first; CUDA and flash-attn are accelerations, not requirements.
+embedding, ONNX/Triton serving, notebooks, and a Streamlit demo. It is
+**GPU-first and CPU-complete**: every command picks a CUDA device when one is
+visible (bf16 at inference, bf16-mixed in training, flash-attn's varlen kernel
+when installed) and runs the same code in fp32 on a CPU when none is — slower,
+never a different result contract.
 
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > (arXiv [2604.08649](https://arxiv.org/abs/2604.08649)).
@@ -37,9 +40,11 @@ run on CPU first; CUDA and flash-attn are accelerations, not requirements.
 - [Repository map](#repository-map)
 - [Workflows](#workflows)
 - [Using your own data](#using-your-own-data)
-- [Training on GPU](#training-on-gpu)
+- [Hardware](#hardware)
+- [Running on GPU](#running-on-gpu)
 - [Extending pragmatiq](#extending-pragmatiq)
 - [AML over the transfer graph](#aml-over-the-transfer-graph)
+- [Synthetic data realism](#synthetic-data-realism)
 - [Model sizes](#model-sizes)
 - [PRAGMA+Nemotron text-embedding variant](#pragmanemotron-text-embedding-variant)
 - [Defaults where the paper is silent](#defaults-where-the-paper-is-silent)
@@ -64,14 +69,28 @@ novelty over PRAGMA. The goal is to make the implementation path concrete.
 
 ## Quickstart
 
+### Requirements
+
+| | |
+| --- | --- |
+| Python | 3.11 or newer |
+| torch | 2.6 or newer (the ONNX exporter and `weights_only` checkpoint loading need it) |
+| GPU (recommended) | any CUDA device; `flash-attn >= 2.4.1` optional, enables the padding-free varlen attention kernel |
+| CPU (supported) | everything runs in fp32; the same commands, the same outputs contract, more wall-clock |
+
 ```bash
 pip install "pragmatiq[train]"
-pragmatiq quickstart
+pragmatiq quickstart --n-users 2000 --max-steps 80   # the fast path: a few minutes
+pragmatiq quickstart                                 # the reference run (50k users, 400 steps)
+pragmatiq info                                       # what device / precision / extras this machine will use
 ```
 
 The `train` extra brings in Lightning, which pretraining (and therefore
 `quickstart`) runs on; a plain `pip install pragmatiq` is the slim inference
-core for embedding with an already-trained run.
+core for embedding with an already-trained run. `pragmatiq info` prints the
+versions, the resolved device (`cuda` when visible, else `cpu`), whether
+flash-attn is importable, and which extras are installed; `pragmatiq --version`
+prints the package version.
 
 Or from a clone of the repo (for development):
 
@@ -80,7 +99,8 @@ git clone https://github.com/dynamiq-ai/pragmatiq.git && cd pragmatiq
 pip install -e ".[dev,full]"
 ```
 
-`quickstart` runs a CPU-capable synthetic pipeline end to end:
+`quickstart` runs the synthetic pipeline end to end on whatever device
+`pragmatiq info` reports:
 
 1. generate synthetic users and event histories,
 2. fit the key-value-time tokenizer,
@@ -88,11 +108,9 @@ pip install -e ".[dev,full]"
 4. embed users,
 5. run a gradient-boosting credit-risk probe against a raw-count baseline.
 
-For a smaller local smoke test:
-
-```bash
-pragmatiq quickstart --n-users 2000 --max-steps 80
-```
+The fast path (`--n-users 2000 --max-steps 80`) is the right first run on a
+laptop; the default is the reference run whose timings the
+[Hardware](#hardware) table records.
 
 The plain `pip install pragmatiq` is the slim inference core: validating,
 tokenizing, embedding with a trained run, the gradient-boosting probe, and LoRA
@@ -124,9 +142,9 @@ callers use the same library surface.
 | Synthetic data | Agent-based banking simulator with deterministic seeds, causal labels, fraud/default/AML scenarios, and realism checks. |
 | Tokenization | Key-value-time tokenizer for numeric bins, categorical values, descriptor text, profiles, and unseen `[UNK]` fallbacks. |
 | Model | PRAGMA-style profile, event, and history encoders with TimeRoPE, padding-free varlen attention, and tied MLM head. |
-| Training | CPU-safe pretraining, resume-safe checkpoints, probes, LoRA fine-tuning, and configurable heads/maskers/value encoders. |
+| Training | Pretraining on one GPU, many GPUs, or a CPU (same command), resume-safe checkpoints, probes, LoRA fine-tuning, and configurable heads/maskers/value encoders. |
 | AML graph | GraphSAGE ablation over transfer graphs using isolated embeddings, pragmatiq features, and hand-crafted graph features. |
-| Inference | Batch embedding, `PragmaModel.from_pretrained(run)`, notebook-friendly `embed_records`, ONNX, and Triton serving. |
+| Inference | Batch embedding (bf16 on CUDA, fp32 on CPU), `PragmaModel.from_pretrained(run)`, notebook-friendly `embed_records`, ONNX, and GPU-first Triton serving. |
 | Publication assets | Model card, contribution guide, citation metadata, security policy, Apache-2.0 license, and GitHub templates. |
 
 ## Architecture
@@ -164,31 +182,33 @@ What follows the PRAGMA paper, and what pragmatiq adds on top:
 | Profile / event / history encoders; 3d MLM head `[ẑ_e, z_h(EVT), z_h(USR)]` → tied logits + label smoothing | ✓ | faithful |
 | Masking 15% token / 10% event / 10% key, 10% `[UNK]`-as-dropout excluded from loss | ✓ | faithful |
 | Model sizes 10M / 100M / 1B | ✓ | faithful S/M/L (+ a CPU `nano` for CI) |
-| Pre-training caps (event ≤24 tokens, profile ≤200, ≤6500 events/user) | ✓ | faithful |
+| Pre-training caps (event ≤24 tokens, profile ≤200, ≤6500 most-recent events/user, applied when a batch is collated — after the eval-point cut) | ✓ | faithful |
 | PRAGMA+Nemotron frozen-text-embedding variant (MSE reconstruction) | ✓ | implemented, switchable, **off by default** |
 | Synthetic data generator | the paper uses real Revolut data | **our addition** — agent-based, deterministic |
 | AML over the transfer graph (GraphSAGE ablation) | not in the paper | **our addition**, presented standalone |
 | Downstream probe | LoRA + a probe across tasks | gradient boosting is **our default** probe head |
+| Robustness to event staleness (§3.4.2) | ✓ | `probe --staleness-window` + `scripts/benchmarks/staleness_probe.py` |
 
 ## Repository map
 
 ```
 pragmatiq/
 ├── pragmatiq/               # the library — all logic lives here
-│   ├── api.py               # public functions: synthesize / tokenize / pretrain / ...
+│   ├── api.py               # public functions: synthesize / tokenize / pretrain / ... (api.__all__)
 │   ├── cli.py               # Typer CLI (parses args, calls api.py, nothing else)
 │   ├── registry.py          # @register_head / @register_masker / @register_value_encoder
 │   ├── validate.py          # data-contract validation with actionable errors
-│   ├── data/                # schema, tokenizer, sharding, collation, synthetic generator
-│   ├── models/              # encoders, MLM head, LoRA, AML GNN (gnn.py)
-│   ├── training/            # pretrainer, masking, Muon+AdamW, probe, finetuner
-│   ├── inference/           # batch embedder, ONNX export, serving runtime, benchmarks
-│   └── experiments/         # run directories, metric logging, run comparison
-├── configs/                 # model / pretrain / tokenizer / synthetic / finetune YAMLs
+│   ├── core/                # device + precision resolution (env.py), errors, progress bars
+│   ├── data/                # schema, tokenizer, sharding, collation, synthetic generator (v2)
+│   ├── models/              # encoders, varlen attention (layers.py), MLM head, LoRA, AML GNN
+│   ├── training/            # pretrainer, masking, Muon+AdamW, autoconfig, probe, finetuner
+│   ├── inference/           # batch embedder, ONNX export, serving runtime + contract, benchmarks
+│   └── runs/                # run directories, metric logging, run comparison
+├── configs/                 # pretrain / tokenizer / synthetic / finetune YAMLs
 ├── notebooks/               # 01–04 guided walkthroughs (see Notebooks below)
 ├── apps/demo/app.py         # Streamlit demo
-├── deploy/                  # Triton model repo, docker-compose, Prometheus, demo Dockerfile
-├── scripts/                 # runpod_launch.py (GPU rental), gates/ (maintainer validation)
+├── deploy/                  # Triton model repo (+ config.cpu.pbtxt), docker-compose(.cpu).yaml, Prometheus
+├── scripts/                 # runpod_launch.py, gpuval/ (GPU validation legs), benchmarks/, baselines/, gates/
 └── tests/                   # the spec in executable form — useful usage examples
 ```
 
@@ -230,8 +250,11 @@ pragmatiq runs compare demo other-run
 
 ### 3. Evaluate task signal
 
-`probe` is the fastest CPU check. Use fine-tuning when you want supervised
-adapter training on a labeled task.
+`probe` is the fastest check (a gradient-boosting head on frozen embeddings).
+Use fine-tuning when you want supervised adapter training on a labeled task;
+on a GPU the fine-tuner sizes its token budget from the device memory and
+reports per-epoch `epoch_stats` (batches, tokens, seconds, tokens/s) so a slow
+epoch is visible, not silent.
 
 ```bash
 pragmatiq probe data/tokenized --run runs/demo --label data/synth/labels/default_12m.parquet
@@ -419,6 +442,24 @@ wall-clock calendar features are localized (DST included). `calendar_tz` is fold
 into the tokenizer content hash, so a checkpoint refuses to load against a
 tokenizer fitted with a different zone.
 
+### Tokenizer knobs for real books
+
+Two `TokenizerConfig` fields exist only for real-scale data and never bind on
+the synthetic book:
+
+- `max_counter_distinct` (default `1_000_000`) bounds the value table `fit()`
+  keeps per key. A continuous numeric key (amounts, balances) would otherwise
+  grow that table to one entry per distinct value; once a key that has only
+  ever parsed as a number exceeds the bound, new values stop being inserted
+  (its classification cannot change). A key that saturates and then stops
+  looking numeric raises with a pointer to `force_numeric` /
+  `force_categorical` — silently routing it to BPE would hide the problem.
+- `max_events_per_user` (default `6500`) is recorded in the shard manifest and
+  applied **when a batch is collated**, after any eval-point truncation, so a
+  heavy user's probe or fine-tune batch holds the most recent events *before*
+  its eval point rather than a prefix of the globally most recent ones. Shards
+  keep the full history.
+
 ### `[UNK]` and when to refit the tokenizer
 
 At inference time, keys and values not seen during tokenizer fitting map to
@@ -437,18 +478,64 @@ feature.
   drift that `[UNK]` warnings are frequent. A refit changes the vocabulary, so
   it always implies pretraining a new model with it.
 
-## Training on GPU
+## Hardware
 
-Everything runs on CPU (slow but correct); a GPU is an acceleration, not a
-requirement. The trainer is built on Lightning Fabric and auto-detects CUDA:
-on GPU it trains in **bf16-mixed** precision, on CPU in fp32 — no flags
-needed, `pragmatiq pretrain` is the same command on both.
+The table below is written by the GPU validation run
+(`scripts/gpuval/`, results in `docs/benchmarks/gpu-validation-1.1.0.json`)
+and lists, per model preset, the peak VRAM and pretraining throughput measured
+on the validation hardware, plus the quickstart timings and the serving
+request rate. It is the source for every performance number in this README;
+where a number is missing below, it has not been measured on this build.
 
-**flash-attn is optional.** When `flash-attn` is installed on CUDA, varlen
-attention uses `flash_attn_varlen_func` directly on the packed, padding-free
-token stream. Otherwise pragmatiq falls back to PyTorch SDPA over per-segment
-padded blocks built from `cu_seqlens` — the two paths agree to fp32 atol 1e-4
-(checked in CI as the padding-equivalence test).
+<!-- GPU_VALIDATION_RESULTS -->
+
+_Not yet measured on this build; `python scripts/gpuval/report.py --write` fills this table from the validation JSON._
+
+## Running on GPU
+
+pragmatiq is GPU-first: every entry point defaults to `device="auto"`, which
+resolves to CUDA when a device is visible and to CPU otherwise —
+`PragmaModel.from_pretrained(run)`, `api.embed`, `api.probe`, `api.finetune`,
+`BatchEmbedder`, `benchmark`, the Triton backend. Pin the choice with
+`PRAGMATIQ_DEVICE=cpu` (or `cuda:1`) instead of threading a flag through every
+call; an explicit `device="cpu"` argument is always honoured as given.
+
+| What | On CUDA | On CPU |
+| --- | --- | --- |
+| Inference (`embed`, `probe`, `embed_records`, serving) | `torch.inference_mode` + **bf16 autocast**; flash-attn varlen kernel when installed | fp32, byte-stable, SDPA fallback |
+| Pretraining | **bf16-mixed** (Lightning Fabric), DDP across all visible GPUs | fp32 |
+| LoRA fine-tuning | bf16 autocast forward, fp32 grads; token budget sized from device memory | fp32, `token_budget=16384` |
+| Determinism | opt-in `deterministic: true` (fp32, deterministic kernels) | byte-identical from a fixed seed |
+
+`PRAGMATIQ_INFERENCE_PRECISION=fp32` forces fp32 inference on CUDA (for an
+A/B against the bf16 path); `bf16` on a CPU device is downgraded to fp32.
+`PRAGMATIQ_DISABLE_FLASH=1` forces the SDPA path on CUDA — useful for the
+deterministic run and for measuring what the kernel buys.
+
+**flash-attn is optional but recommended.** When `flash-attn` is importable on
+CUDA and the forward runs in bf16/fp16 (the default at inference and in
+training), varlen attention calls `flash_attn_varlen_func` directly on the
+packed, padding-free token stream. Everywhere else — CPU, fp32 on CUDA,
+`PRAGMATIQ_DISABLE_FLASH=1` — pragmatiq falls back to PyTorch SDPA over
+per-segment padded blocks built from `cu_seqlens` with a deterministic
+scatter. The two paths agree to fp32 atol 1e-4 (the padding-equivalence test)
+and to bf16 precision (~1e-2) against each other on CUDA (checked on every GPU
+validation run). flash-attn ships CUDA-specific wheels, so install the wheel
+that matches your torch and CUDA build rather than `pip install flash-attn`
+from source; the RunPod image pragmatiq validates on pairs
+`runpod/pytorch` 2.8 with the `flash_attn-2.8.3` cu12 / torch 2.8 / cp311 wheel
+(the exact URL is the constant in
+[`scripts/runpod_launch.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/runpod_launch.py)).
+`pragmatiq info` reports whether the kernel is available.
+
+The trainer is built on Lightning Fabric and auto-detects CUDA: on GPU it
+trains in **bf16-mixed** precision, on CPU in fp32 — no flags needed,
+`pragmatiq pretrain` is the same command on both. `pragmatiq pretrain`
+defaults to `--config auto`, which sizes the batch and schedule from the data
+and the device (see [Scaling hands-off](#scaling-to-1m26m-records-hands-off));
+`pragmatiq pretrain ... --show-config` prints the resolved plan (`api.pretrain_plan`)
+without training. Batches are collated on a prefetch thread and pinned
+(`prefetch_batches`, default 2) so the GPU is not waiting on the host.
 
 ### Knobs that matter
 
@@ -461,7 +548,7 @@ key can be overridden via `--config` or programmatically through
 | Knob | Default | What it does |
 | --- | --- | --- |
 | `max_steps` | `20000` | Optimizer steps; also the cosine-schedule horizon. |
-| `token_budget` | `16384` | Tokens per packed forward (the per-device memory knob — raise it on big GPUs). |
+| `token_budget` | `16384` | Tokens per packed forward (the per-device memory knob — `config: auto` sizes it from the GPU). |
 | `grad_accum_steps` | `1` | Micro-batches per optimizer step. Effective batch = `token_budget × grad_accum × world_size`; raise it for a large, stable batch on a memory-bound GPU without raising `token_budget`. |
 | `devices` / `num_nodes` | `auto` / `1` | Fabric DDP: per-node device count and host count (multi-node). |
 | `lr_muon` / `lr_adamw` | `3e-3` / `3e-4` | Muon drives 2-D hidden weights; AdamW drives embeddings/norms/biases. |
@@ -474,6 +561,8 @@ key can be overridden via `--config` or programmatically through
 | `seed` / `nan_skip` | `0` / `true` | Reproducibility; NaN/inf losses dump the batch to `debug/` and skip the step. |
 | `max_consecutive_skips` | `50` | Abort if this many steps in a row are skipped for a non-finite loss/grad — a divergence guard so a broken run fails loud instead of burning compute. |
 | `deterministic` | `false` | Opt-in reproducible CUDA path (see [Determinism](#determinism)); forces fp32 on GPU, at a throughput cost. |
+| `accelerator` | `auto` | `auto` (CUDA when visible), `cpu`, or `cuda`; an explicit `cpu` on a GPU host trains on the CPU. |
+| `prefetch_batches` | `2` | Batches collated ahead on a background thread (0 = synchronous). |
 | `masker`, `p_token`, `p_event`, `p_key`, `p_unk` | `pragma`, `0.15`, `0.10`, `0.10`, `0.10` | Masking strategy (swappable via `@register_masker`) and its rates. |
 | `text_loss_weight` | `1.0` | Weight λ on the text MSE term in the [Nemotron variant](#pragmanemotron-text-embedding-variant) (`loss = CE + λ·MSE`); inert without a text encoder. |
 
@@ -502,9 +591,9 @@ The three levers it sets are also usable by hand:
   byte-identical to no accumulation.
 - **Multi-node DDP** is `devices` (per-node) × `num_nodes`. The rank sampler shards the data per
   global rank with a per-rank masking seed, so adding ranks trains disjoint slices in lockstep.
-- **Truncation caps** (set on the tokenizer: `max_event_tokens=24`, `max_profile_tokens=200`,
-  `max_events_per_user=6500`) keep heavy-tailed real histories tractable; they do not bind at
-  synthetic scale, so default output is unchanged.
+- **Truncation caps** (set on the tokenizer: `max_event_tokens=24`, `max_profile_tokens=200`
+  at encode time; `max_events_per_user=6500` at collate time, after the eval-point cut) keep
+  heavy-tailed real histories tractable; they do not bind at synthetic scale.
 
 ### Resume semantics
 
@@ -556,14 +645,18 @@ this with `grad_accum_steps` and `config: auto` (see
 [Scaling to 1M–26M records](#scaling-to-1m26m-records-hands-off)) for a large, stable
 effective batch without per-device OOM.
 
-As a reference point: the `small` model sustains roughly **79k tokens/s on a
-single A100** at `token_budget: 8192` (measured on a full-scale run; throughput is
-logged per run in `runs/<name>/metrics.jsonl`, so measure on your own data).
+Measured pretraining throughput per preset, single-GPU and DDP scaling, is in
+the [Hardware](#hardware) table; every run also logs its own tokens/s in
+`runs/<name>/metrics.jsonl`, so measure on your own data.
 
 [`scripts/runpod_launch.py`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/runpod_launch.py) is a turnkey path for
 validating on a rented A100/H100: it creates a RunPod pod via the REST API,
-syncs the repo over SSH (no GitHub required), installs, and runs the GPU
-end-to-end pipeline:
+syncs the repo over SSH (no GitHub required), installs the matching flash-attn
+wheel, and runs the GPU validation legs in `scripts/gpuval/` (pretrain
+throughput and memory per preset, a full fine-tune with per-epoch stats,
+flash-vs-SDPA equivalence, bf16-vs-fp32 embeddings, resume, export on the GPU
+image, serving request rates, an optional multi-GPU sweep), writing the JSON
+the [Hardware](#hardware) table renders:
 
 ```bash
 export RUNPOD_API_KEY=...
@@ -717,6 +810,30 @@ CI-scale run can never masquerade as a full-scale result.
 
 <sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2], epochs=150, commit=a263737</sub>
 
+## Synthetic data realism
+
+The generator (`pragmatiq/data/synthetic/`) is an agent-based simulator, and
+its output is what every gate and result table in this README is measured on,
+so its realism is a first-class concern. Beyond the persona / lifecycle /
+episode machinery described in [`MODEL_CARD.md`](MODEL_CARD.md), the book has
+these properties; the constants are `# GUESS` values, held in
+`pragmatiq/data/synthetic/config.py` and `simulator.py`:
+
+| Property | How it is modelled | `# GUESS` constants |
+| --- | --- | --- |
+| Amounts in the transaction currency | Internal accounting (income, budgets, balances, the LTV profit model) is in GBP; emitted `amount` strings are converted with fixed mid-rates, so a PLN user's grocery amounts are ~5× a GB user's and an FX purchase abroad is in the merchant's currency | `FX_PER_GBP = {GBP 1.0, EUR 1.17, PLN 5.05, USD 1.27}` (mid-2023 spot, held flat) |
+| Card-only interchange | The `ltv_positive` profit model earns interchange on card payments and crypto top-ups only — rent (standing order), subscriptions (direct debit) and ATM withdrawals earn none | `0.7 %` of card spend |
+| Bank holidays | England & Wales bank holidays computed per year: Good Friday / Easter Monday from the Gregorian Easter algorithm, the May and August Mondays, substitute weekdays when Christmas or New Year fall on a weekend; paydays and holiday spend follow them | one calendar for the whole book |
+| Payday schedules | Each monthly-paid user draws a rule: last business day, the 25th, the 28th (rolled back to a business day), or a four-weekly cycle (13 credits a year, some months with two); payday spend bumps follow the user's own dates | mix `0.55 / 0.20 / 0.15 / 0.10` |
+| Market hours | Equity orders only on trading days, concentrated in the LSE session and the US overlap (UK time); crypto trades around the clock with an evening tilt and on weekends | the two 24-hour intensity curves in `simulator.py` |
+| Overdraft feedback | Overdraft fees are debited from the balance (one pass over the pre-fee trajectory), so a long overdraft compounds toward the insolvency that drives `default_12m` | `5.00` GBP per overdrawn day, ≤ 60 fee days |
+| Merchant geography | Everyday spend lands on home-country merchants (Zipf popularity kept per country); a trip draws a destination country and its merchants; a slice of online orders is cross-border | `p = 0.10` of online orders go to the global pool |
+| Mule windows | Ring windows are clamped to the simulated horizon, so laundering behaviour never lands past the last day | — |
+
+Every seed still produces byte-identical output for any worker count
+(CI-enforced); the fingerprint differs from 1.0.x for the same seed, so result
+tables regenerated on this generator are not comparable to earlier ones.
+
 ## Model sizes
 
 | Size | d | Heads | Depths (profile / event / history) | Nominal | Actual params at ~28k vocab |
@@ -779,13 +896,18 @@ masker call-site).
 | --- | --- | --- | --- | --- | --- |
 | 1 | `lr_muon` — Muon LR for 2-D hidden weights | `training/pretrainer.py`, `training/optim.py` | `3e-3` | `configs/pretrain.yaml · lr_muon` | Paper-silent; matches Keller Jordan's Muon reference, known to work for MLM at this scale |
 | 2 | `lr_adamw` — AdamW LR for embeddings/norms/biases | `training/pretrainer.py`, `training/optim.py` | `3e-4` | `configs/pretrain.yaml · lr_adamw` | Paper-silent; standard AdamW default one decade below Muon LR; stable for embedding tables |
-| 3 | `warmup_steps` — cosine-schedule warmup length | `training/pretrainer.py` | `100` (dataclass); `500` (pretrain.yaml) | `configs/pretrain.yaml · warmup_steps` | Paper-silent; ~2–5% of default max_steps; short warm-up avoids early instability on CPU-first runs |
-| 4 | `token_budget` — per-forward token cap | `training/pretrainer.py` | `16384` | `configs/pretrain.yaml · token_budget` | Paper-silent; fits a `small` model on a single 16 GiB GPU with headroom for optimizer state |
+| 3 | `warmup_steps` — cosine-schedule warmup length | `training/pretrainer.py` | `100` (dataclass); `500` (pretrain.yaml) | `configs/pretrain.yaml · warmup_steps` | Paper-silent; ~2–5% of default max_steps; short warm-up avoids early instability on small runs |
+| 4 | `token_budget` — per-forward token cap | `training/pretrainer.py` | `16384` | `configs/pretrain.yaml · token_budget` | Paper-silent; a conservative fixed default — `config: auto` replaces it with a budget sized from the device memory (see the Hardware table for what each preset needs) |
 | 5 | `p_unk` — `[UNK]` fraction of selected masked positions | `training/masking.py`, `training/pretrainer.py` | `0.10` (10 %) | `TrainConfig.p_unk` / `configs/pretrain.yaml` | Paper-silent; keeps the model robust to unseen tokens; excluded from CE loss like the BERT sentinel |
 | 6 | `n_buckets` — percentile buckets per numeric key | `data/tokenizer.py` | `64` | `configs/data/tokenizer.yaml · n_buckets` | Paper-silent; 64 uniform-mass bins give ~1.5% resolution per bucket, balancing vocab size vs precision |
 | 7 | `target_vocab` — target total vocabulary size | `data/tokenizer.py` | `28000` | `configs/data/tokenizer.yaml · target_vocab` | Paper-silent; in the range of standard NLP sub-word vocabs; BPE fills the remainder after categoricals |
 | 8 | `numeric_min_cardinality` — distinct-value floor for numeric routing | `data/tokenizer.py` | `None` (= `4 × n_buckets`) | `configs/data/tokenizer.yaml · numeric_min_cardinality` | Paper-silent; separates low-cardinality identifier codes (MCC, ZIP) from continuous magnitudes |
 | 9 | `rope_base` — geometric frequency ladder base for TimeRoPE | `models/pragmatiq.py` | `10000.0` | pretrain `config` override `rope_base` | Paper-silent; inherited from LLaMA/GPT-NeoX RoPE; appropriate for log-seconds positions |
+| 10 | `max_counter_distinct` — value-table bound for numeric keys | `data/tokenizer.py` | `1_000_000` | `configs/data/tokenizer.yaml · max_counter_distinct` | Paper-silent; keeps `fit()` memory bounded on continuous keys without touching classification |
+
+The synthetic generator carries its own `# GUESS` constants (FX rates, payday
+mix, market-hours curves); they are listed in
+[Synthetic data realism](#synthetic-data-realism).
 
 ## Serving with Triton
 
@@ -802,9 +924,11 @@ loads `PragmaModel.from_pretrained(run_dir)` once at startup and serves
 ### One-command deploy + smoke
 
 [`scripts/deploy_serving.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/deploy_serving.sh) is the turnkey path: it
-builds the serving image, boots tritonserver with your run mounted (the host GPU is
-used automatically when present), waits for readiness, then sends a real embedding
-request and verifies the `[n_users, dim]` response.
+builds the serving image, boots tritonserver with your run mounted, waits for
+readiness, then sends a real embedding request and verifies the `[n_users, dim]`
+response. With `nvidia-smi` on the host it serves on CUDA in bf16; without it,
+the script overlays [`deploy/triton/config.cpu.pbtxt`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/triton/config.cpu.pbtxt)
+(`KIND_CPU`) and sets `PRAGMATIQ_SERVE_CPU=1` so the same image boots CPU-only.
 
 ```bash
 pragmatiq pretrain data/tokenized --name demo            # any trained run works
@@ -828,8 +952,27 @@ docker compose -f deploy/docker-compose.yaml up -d --build
 # Nemotron variant serving: PRAGMATIQ_TRITON_EXTRAS=nemotron docker compose ... up -d --build
 ```
 
-The Triton service has a readiness healthcheck (`/v2/health/ready`); CPU-first by
-default, add a GPU reservation (commented in the compose file) for GPU serving.
+The Triton service has a readiness healthcheck (`/v2/health/ready`) and
+reserves the host's GPUs (NVIDIA container toolkit). On a CPU-only host use
+[`deploy/docker-compose.cpu.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/docker-compose.cpu.yaml)
+instead — same services, the `KIND_CPU` config mounted over the default and
+`PRAGMATIQ_SERVE_CPU=1`:
+
+```bash
+docker compose -f deploy/docker-compose.cpu.yaml up -d --build
+```
+
+The serving image installs pragmatiq into the NGC Triton 25.06 image (torch 2.8)
+with every runtime dependency read from `pyproject.toml`, so the image cannot
+drift from the package.
+
+Device policy inside the backend (`pragmatiq.inference.serve.resolve_serve_device`):
+`PRAGMATIQ_SERVE_CPU=1` wins, else a Triton `KIND_GPU` instance pins its assigned
+GPU, else CUDA when visible, else CPU. Requests are validated (each record needs a
+string `user_id` and an `events` list) and capped: `PRAGMATIQ_SERVE_MAX_RECORDS`
+(default 1024 users per request) rejects oversized payloads with a clear error, and
+`PRAGMATIQ_SERVE_TOKEN_BUDGET` (default 16384) splits a request into forward passes
+of at most that many tokens. `PRAGMATIQ_INFERENCE_PRECISION=fp32` pins fp32 serving.
 
 | Service | Port | What it is |
 | --- | --- | --- |
@@ -875,8 +1018,10 @@ serving never raises `KeyError` on vocabulary drift.
 pragmatiq benchmark data/tokenized --run runs/demo --device cuda
 ```
 
-`benchmark` measures local batch-embedding throughput (users/s, tokens/s, and
-a USD-per-million-users estimate) and writes `deploy/benchmarks/RESULTS.md`,
+`benchmark` measures local batch-embedding throughput (users/s, tokens/s, the
+precision used, and a USD-per-million-users estimate) and writes
+`benchmark_results.md` in the current directory (`--out` to move it;
+`--precision fp32` for the fp32 A/B),
 which also includes the ready-to-run `perf_analyzer` command for sweeping
 p50/p95/p99 latency vs concurrency against the live Triton endpoint (latency
 percentiles need a real endpoint, so that half is emitted as a command rather
@@ -903,14 +1048,14 @@ transfer graph** (all transfers in and out of the selected user).
 
 ```bash
 pip install -e ".[demo]"
-pragmatiq quickstart          # or point the env vars at existing artifacts
-PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run apps/demo/app.py
+pragmatiq quickstart          # writes runs/quickstart/{raw,tok,runs/quickstart}
+PRAGMATIQ_OUT=runs/quickstart streamlit run apps/demo/app.py
 ```
 
-`PRAGMATIQ_RUN` (default `runs/quickstart`) is the trained run directory,
-`PRAGMATIQ_RAW` (default `data/synth`) the generated dataset, and
-`PRAGMATIQ_SHARDS` (default `data/tokenized`) the tokenized shards. The demo
-also runs as the `demo` service in
+`PRAGMATIQ_OUT` (default `runs/quickstart`) is a `quickstart` output directory;
+the demo derives the raw data (`<out>/raw`), the tokenized shards (`<out>/tok`)
+and the trained run (`<out>/runs/quickstart`) from it. The demo also runs as
+the `demo` service in
 [`deploy/docker-compose.yaml`](https://github.com/dynamiq-ai/pragmatiq/blob/main/deploy/docker-compose.yaml) on port 8501.
 
 ## Observability
@@ -939,7 +1084,8 @@ of the tokenizer. On top of that:
 
 ## Notebooks
 
-The notebooks are the guided tour; each one runs top to bottom on CPU.
+The notebooks are the guided tour; each one runs top to bottom on a laptop CPU
+and picks up a GPU automatically when one is visible.
 
 | Notebook | One line |
 | --- | --- |
@@ -965,11 +1111,30 @@ mypy pragmatiq
 pytest tests/ -x -q
 ```
 
-Every change is gated by tests in CI (lint, types, full suite on Python 3.11
-and 3.12, plus an end-to-end CPU run). Maintainers can run the heavier
-full-validation orchestrator —
-[`scripts/gates/run_full_validation.sh`](https://github.com/dynamiq-ai/pragmatiq/blob/main/scripts/gates/run_full_validation.sh)
-— before releases; set `PRAGMATIQ_GATE_FULL=1` for full-scale runs. See
+Every change is gated in CI: lint, types, the full suite on Python 3.11 and
+3.12, a slim-install serving boundary, packaging smoke, the supply-chain scan,
+and every acceptance gate in `scripts/gates/`:
+
+| Gate | Checks |
+| --- | --- |
+| `gate_1` | synthetic data: determinism, realism metrics, credit GBDT baseline in the realistic band |
+| `gate_2` | tokenizer: golden hash, `[UNK]` handling, caps |
+| `gate_3` | sharding, collation, padding-equivalence, prefetch loader |
+| `gate_4` | model: parameter counts, varlen attention backends |
+| `gate_5` | training: resume bit-exact, probe > baseline, fine-tune |
+| `gate_6` | AML GNN four-arm ablation (relational recovery) |
+| `gate_7` | inference / serving request path / deploy manifests / demo |
+| `gate_8` | nano end-to-end, `validate`, packaging + attribution |
+| `gate_9_contract` | public-API / CLI / serving contract tests |
+| `gate_serve_slim` | the `[serve]` install imports without training extras |
+| `gate_storage` | fsspec staging in/out, remote roots |
+| `gate_integrations` | SageMaker / Databricks adapters offline |
+| `gate_10_byoc` | no-phone-home, offline hardening |
+
+`bash scripts/gates/run_full_validation.sh` runs them all; set
+`PRAGMATIQ_GATE_FULL=1` for full-scale runs. GPU validation
+(`scripts/gpuval/`, launched through `scripts/runpod_launch.py`) is run before
+each release and its JSON is committed under `docs/benchmarks/`. See
 [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow.
 
 ## Citation

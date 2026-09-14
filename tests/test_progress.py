@@ -1,10 +1,10 @@
-"""Tests for pragmatiq.progress — display-only iteration wrappers."""
+"""Tests for pragmatiq.core.progress — display-only iteration wrappers."""
 
 from __future__ import annotations
 
 import logging
 
-import pragmatiq.progress as P
+import pragmatiq.core.progress as P
 
 
 class TestProgress:
@@ -33,13 +33,13 @@ class TestProgress:
     def test_non_tty_fallback_logs(self, monkeypatch, caplog) -> None:
         monkeypatch.setattr(P, "LOG_INTERVAL_S", 0.0)
         monkeypatch.setattr(P, "_interactive", lambda: False)
-        with caplog.at_level(logging.INFO, logger="pragmatiq.progress"):
+        with caplog.at_level(logging.INFO, logger="pragmatiq.core.progress"):
             list(P.progress(range(5), total=5, desc="phase", unit="user"))
         assert any("phase" in r.message for r in caplog.records)
 
     def test_quiet_when_fast(self, monkeypatch, caplog) -> None:
         monkeypatch.setattr(P, "_interactive", lambda: False)
-        with caplog.at_level(logging.INFO, logger="pragmatiq.progress"):
+        with caplog.at_level(logging.INFO, logger="pragmatiq.core.progress"):
             list(P.progress(range(5), total=5, desc="phase"))
         assert not caplog.records, "short phases must stay silent in CI logs"
 

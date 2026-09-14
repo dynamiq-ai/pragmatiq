@@ -64,7 +64,7 @@ class WorldConfig:
 
     archetype_mix: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ARCHETYPE_MIX))
 
-    # Realism / difficulty knobs (see tests/baselines).
+    # Realism / difficulty knobs (see scripts/baselines).
     trait_noise: float = 0.55  # 0 = labels fully determined by traits; 1 = mostly noise
     label_noise: float = 0.005  # random flip prob on binary user-level labels
     activity_scale: float = 1.0  # global multiplier on event volume

@@ -10,7 +10,7 @@ generator carries no causal signal, higher means leakage / separability is
 unrealistic.
 
 Usage:
-    python tests/baselines/credit_gbdt.py --data /path/to/synth [--seed 0]
+    python scripts/baselines/credit_gbdt.py --data /path/to/synth [--seed 0]
 """
 
 from __future__ import annotations

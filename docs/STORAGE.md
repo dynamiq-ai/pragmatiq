@@ -1,5 +1,8 @@
 # Storage — URL schemes and object-store support
 
+> pragmatiq is an independent implementation inspired by the PRAGMA paper
+> (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
+
 pragmatiq uses [fsspec](https://filesystem-spec.readthedocs.io/) for all I/O,
 so the same API functions that work on local paths also accept remote URLs.
 Object-store inputs are staged to a local temp directory before the local pipeline

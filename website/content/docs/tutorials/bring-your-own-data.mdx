@@ -61,10 +61,14 @@ keep heavy-tailed histories tractable (see [Pretrain](/docs/tutorials/pretrain))
   Refit the tokenizer when your value distribution shifts materially.
 - **Forecast labels** need an `eval_ts` per user so histories are truncated before embedding
   (forecast, not hindcast). AML membership labels use `user_id`, `observed_through`,
-  and `label`.
+  and `label`. `pragmatiq probe --staleness-window 6h` additionally drops the last hours
+  before each eval point — the check that a lagging event feed is safe to serve from.
+- **Long histories**: per-event and profile token caps apply at encode time; the
+  6500-most-recent-events cap is applied when a batch is collated, after the eval-point
+  cut, so shards keep the full history. Re-tokenize shards produced by 1.0.x.
 
 <Callout title="Data never leaves your environment">
-Everything runs on CPU first and locally. The synthetic generator and
+Everything runs locally, on your GPU or CPU. The synthetic generator and
 `synth calibrate` exist so you can develop and benchmark against a realistic book without
 moving raw records.
 </Callout>

@@ -1,6 +1,8 @@
-# Pretraining defaults. All values overridable on the CLI.
+# Pretraining defaults. All values overridable on the CLI. `pragmatiq pretrain` defaults
+# to `--config auto` (batch + schedule sized from the data and device); pass this file
+# for the fixed values below.
 max_steps: 20000
-token_budget: 16384      # GUESS: tokens per batch
+token_budget: 16384      # GUESS: tokens per forward (auto-config sizes it from the GPU)
 lr_muon: 0.003           # GUESS: Muon LR
 lr_adamw: 0.0003         # GUESS: AdamW LR
 weight_decay: 0.01
@@ -19,3 +21,5 @@ nan_skip: true
 verbose: true            # one-line stderr heartbeat every log_every steps
 wandb: false             # mirror metrics to Weights & Biases (pip install -e ".[tracking]")
 wandb_project: pragmatiq
+accelerator: auto        # auto (CUDA when visible) | cpu | cuda
+prefetch_batches: 2      # batches collated ahead on a background thread (0 = synchronous)

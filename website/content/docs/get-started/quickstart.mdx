@@ -1,18 +1,20 @@
 ---
 title: Quickstart
-description: Install pragmatiq and run the full pipeline — generate data, tokenize, pretrain, embed, and probe — in a few minutes on CPU.
+description: Install pragmatiq and run the full pipeline — generate data, tokenize, pretrain, embed, and probe — on a GPU or a laptop CPU.
 ---
 
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
 
-This runs the entire pragmatiq pipeline end to end on synthetic data, on CPU, in a few
-minutes. By the end you will have a trained model and a credit-risk probe score measured
-against a raw-count baseline — proof the embedding carries signal beyond trivial counts.
+This runs the entire pragmatiq pipeline end to end on synthetic data. By the end you will
+have a trained model and a credit-risk probe score measured against a raw-count baseline —
+proof the embedding carries signal beyond trivial counts.
 
 <Callout title="Requirements">
-Python **3.11+**. A GPU is optional — everything runs on CPU (slower but correct). The
-commands below use a virtual environment so the install is isolated.
+Python **3.11+**, torch **2.6+**. A GPU is picked up automatically when visible (see
+[Running on GPU](https://github.com/dynamiq-ai/pragmatiq#running-on-gpu)); on a CPU the
+fast path below takes a few minutes in fp32. The commands use a virtual environment so the
+install is isolated.
 </Callout>
 
 <Steps>
@@ -46,9 +48,8 @@ experiment tracking, `.[demo]` for the Streamlit app, `.[full]` for all of them 
 <Tab value="CLI">
 
 ```bash
-pragmatiq quickstart
-# smaller/faster local smoke:
-pragmatiq quickstart --n-users 2000 --max-steps 80
+pragmatiq quickstart --n-users 2000 --max-steps 80   # the fast path: a few minutes
+pragmatiq quickstart                                 # the reference run (50k users, 400 steps)
 ```
 
 </Tab>

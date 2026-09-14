@@ -34,6 +34,12 @@
   resolved training config; `PragmaModel.from_pretrained()` refuses to load a
   checkpoint against a mismatched tokenizer. Unseen keys/values at inference
   map to `[UNK]` with a logged warning, never an exception.
+- **Compute.** GPU-first, CPU-complete: `from_pretrained(run)` and every
+  inference entry point default to `device="auto"` (CUDA when visible, else
+  CPU; `PRAGMATIQ_DEVICE` pins it). Inference on CUDA runs in bf16 autocast
+  under `torch.inference_mode` with flash-attn's varlen kernel when installed;
+  CPU inference is fp32 and byte-stable. Training is bf16-mixed on CUDA, fp32
+  on CPU.
 
 ## Intended use
 
@@ -68,18 +74,24 @@ for governed downstream models — it is not a standalone decisioning system.
 corpus comes from pragmatiq's agent-based causal simulator
 (`pragmatiq/data/synthetic/`):
 
-- A **world** with a calendar (paydays, weekends, holidays, seasonality,
-  inflation drift), a 50k-merchant universe (Zipf popularity, MCCs, noisy
-  display names), and a transfer graph with injected mule rings.
+- A **world** with a calendar (computed England & Wales bank holidays,
+  weekends, seasonality, inflation drift), a 50k-merchant universe (Zipf
+  popularity per MCC and per country, MCCs, noisy display names), and a
+  transfer graph with injected mule rings whose windows fit the horizon.
 - **Personas** drawn from a configurable archetype mixture (student, salaried,
   freelancer, family, pensioner, high-net-worth, trader, dormant, mule,
   fraud victim), each with latent traits (income level, spend propensity,
   financial stress, tech savviness, risk appetite, sociability, churn hazard,
   fraud vulnerability) sampled from per-archetype priors.
 - **Per-user simulation**: a lifecycle Markov chain, recurring
-  salary/rent/subscription series, a non-homogeneous Poisson spending process,
-  Hawkes-burst app sessions, trading and communications processes, P2P
-  transfers, and balance tracking with overdraft events.
+  salary/rent/subscription series on a per-user payday rule (last business
+  day, a fixed date, or four-weekly), a non-homogeneous Poisson spending
+  process over home-country merchants (trip-country merchants while abroad,
+  amounts emitted in the transaction currency at fixed `# GUESS` FX rates),
+  Hawkes-burst app sessions, equity trading in market hours and crypto around
+  the clock, communications, P2P transfers, and balance tracking whose
+  overdraft fees are debited from the balance. The README section "Synthetic
+  data realism" lists every constant.
 - **Episode injection**: account-takeover fraud episodes, multi-month financial
   stress arcs, and mule episodes — recorded in a latent log that the label
   oracle reads.
@@ -167,13 +179,20 @@ With it on:
   exported graph reproduces the native embeddings (validated against onnxruntime
   on export, shape-dynamic in the user/event/token axes). The **Triton python
   backend** (`deploy/triton/`) remains the high-throughput path because it runs
-  the native varlen model and skips the padding the dense graph materializes — a
-  deployment choice, not a fidelity gap. Pick Triton for throughput, ONNX for
-  portability.
-- Long histories are capped by default (per-event ≤24 tokens, profile ≤200
-  tokens, ≤6500 most-recent events per user); set those caps to `None` to encode
-  histories in full. Cost grows with token count under the token-budget batching,
-  and very long users dominate batches.
+  the native varlen model on the GPU in bf16 and skips the padding the dense
+  graph materializes — a deployment choice, not a fidelity gap. Pick Triton for
+  throughput, ONNX for portability.
+- **Event staleness.** The paper reports task metrics moving by well under one
+  point when the most recent events are missing at scoring time; pragmatiq
+  measures the same with `pragmatiq probe --staleness-window` and the README
+  staleness table. Until that table is filled on a given build, treat serving
+  from a lagging feed as unvalidated for that build.
+- Long histories are capped by default: per-event ≤24 tokens and profile ≤200
+  tokens at encode time, and the ≤6500 most-recent events per user applied
+  when a batch is collated, after any eval-point truncation (shards keep the
+  full history). Set those caps to `None` to encode histories in full. Cost
+  grows with token count under the token-budget batching, and very long users
+  dominate batches.
 - Hyperparameters the paper does not specify (learning rates, token budget,
   vocab size, RoPE base, etc.) are documented guesses — see the README GUESS
   table.

@@ -26,11 +26,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
+from ..core.progress import progress
 from ..data.collate import TruncatingCollator, VarlenCollator, run_with_oom_retry
 from ..data.dataset import DynamicBatchSampler, ShardDataset
 from ..data.tokenizer import truncate_record
 from ..models.pragmatiq import PragmaModel
-from ..progress import progress
 
 
 @contextlib.contextmanager

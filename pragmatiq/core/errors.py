@@ -38,3 +38,22 @@ class MissingExtraError(PragmatiqError, ImportError):
             f"pip install 'pragmatiq[{extra}]' (missing: {missing})"
         )
         return cls(msg)
+
+
+class ConfigError(PragmatiqError, ValueError):
+    """A configuration value is unknown, malformed, or inconsistent.
+
+    Raised for unknown config keys, unknown model sizes, bad option values and
+    an invalid ``resume`` request. Subclasses ``ValueError`` so callers that
+    catch ``ValueError`` keep working.
+    """
+
+
+class DataContractError(PragmatiqError, ValueError):
+    """Data on disk does not satisfy the contract pragmatiq expects.
+
+    Raised for a missing shard / run / checkpoint directory, a label table
+    without the required columns, and a tokenizer-hash mismatch between shards
+    and a trained run. Subclasses ``ValueError`` so callers that catch
+    ``ValueError`` keep working.
+    """

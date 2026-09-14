@@ -1,8 +1,10 @@
 # pragmatiq cloud integrations
 
 pragmatiq ships thin cloud adapter classes in `integrations/` that package a
-trained run directory into cloud-native deployable artifacts.  This document
-describes the status of each adapter and provides runbooks for operators.
+trained run directory into cloud-native deployable artifacts (SageMaker and
+Databricks; earlier stub adapters were removed in 1.1.0 — the generic Triton
+image covers every other platform, see below). This document describes the
+status of each adapter and provides runbooks for operators.
 
 > **Attribution:** pragmatiq is an independent implementation inspired by the
 > PRAGMA paper (arXiv 2604.08649) and is not affiliated with or endorsed by
@@ -32,7 +34,7 @@ All adapters speak the same wire format defined in
 
 The contract is tested in `tests/contract/` and is independent of the cloud
 adapter.  Every adapter's `healthcheck()` builds its request via
-`encode_request` so the format is consistent across all four adapters.
+`encode_request` so the format is consistent across adapters.
 
 ---
 
@@ -50,7 +52,9 @@ adapter.  Every adapter's `healthcheck()` builds its request via
 - `push(artifact_path, role_arn, s3_bucket, ...)` — uploads the tarball to S3
   (requires `boto3`).
 - `healthcheck(endpoint)` — invokes the SageMaker endpoint with a contract
-  payload (requires `boto3`).
+  payload (requires `boto3`). The manifest's container env carries
+  `PRAGMATIQ_RUN`; serving picks the instance's GPU automatically, set
+  `PRAGMATIQ_SERVE_CPU=1` for a CPU instance type.
 
 **Runbook:**
 ```bash
@@ -111,14 +115,18 @@ print('Registered:', version_uri)
 
 ---
 
-### Other platforms (AKS, GKE, Nebius, bare Kubernetes)
+### Other platforms (AKS, GKE, bare Kubernetes, any GPU cloud)
 
 No adapter code is needed for platforms without a managed model-serving
 product: the serving image built by `scripts/deploy_serving.sh` exposes the
 shared serving contract above, so deploy it like any Triton container —
 mount or stage the run directory at the path `PRAGMATIQ_RUN` points to, expose
-port 8000, and use `/v2/health/ready` as the readiness probe. Set
-`PRAGMATIQ_SERVE_CPU=1` only for CPU-only nodes.
+port 8000, and use `/v2/health/ready` as the readiness probe. The image is
+GPU-first (the python backend serves in bf16 on the node's GPU); for CPU-only
+nodes mount `deploy/triton/config.cpu.pbtxt` over the model's `config.pbtxt`
+and set `PRAGMATIQ_SERVE_CPU=1`, exactly as `deploy/docker-compose.cpu.yaml`
+does. `PRAGMATIQ_SERVE_MAX_RECORDS` / `PRAGMATIQ_SERVE_TOKEN_BUDGET` cap one
+request (defaults 1024 users / 16384 tokens per forward).
 
 ---
 
@@ -133,4 +141,5 @@ For new cloud adapters:
    `CloudAdapter` Protocol in `integrations/_base.py`.
 3. Add offline tests in `tests/test_integrations_<provider>.py`.
 4. Add the test file to `gate_integrations.sh`.
-5. Update this document with the status row and runbook.
+5. Update this document with the status row and runbook. Raise
+   `MissingExtraError` (from `pragmatiq.core.errors`) for optional SDKs.

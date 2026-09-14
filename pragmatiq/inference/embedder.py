@@ -17,9 +17,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from ..core.env import inference_context, resolve_device
+from ..core.progress import progress
 from ..data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
 from ..models.pragmatiq import PragmaModel
-from ..progress import progress
 
 
 class BatchEmbedder:

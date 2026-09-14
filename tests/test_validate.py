@@ -239,7 +239,10 @@ def test_vectorised_events_scan_matches_reference(good_data: Path, tmp_path: Pat
     if seed % 3 == 2 and len(users) > 2:
         ev = ev.iloc[list(range(len(ev))) + list(range(0, min(7, len(ev))))]
     tmp_path.mkdir(exist_ok=True)
-    pq.write_table(pa.Table.from_pandas(ev, schema=EVENTS_SCHEMA, preserve_index=False),
+    # The corrupted frame carries null ts on purpose; write it with a nullable copy of
+    # the contract schema so the writer does not reject what the validator must catch.
+    nullable = pa.schema([f.with_nullable(True) for f in EVENTS_SCHEMA])
+    pq.write_table(pa.Table.from_pandas(ev, schema=nullable, preserve_index=False),
                    tmp_path / "events.parquet", row_group_size=int(rng.integers(3, 40)))
     import shutil
 

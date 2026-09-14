@@ -19,8 +19,8 @@ have had a chance to triage it.
 
 ## Supported versions
 
-Security fixes target the latest release on PyPI and the default branch; older
-releases are not patched.
+Security fixes target the latest release on PyPI and `main`; older releases
+are not patched.
 
 ## Data handling
 
@@ -40,6 +40,12 @@ requests.
   It is generated in CI on every push (`supply-chain` job) and attached to each
   GitHub Release; feed it to Dependency-Track, Grype, or Trivy for your own
   review.
+- **Serving surface.** The Triton backend validates every request record and
+  caps a request at `PRAGMATIQ_SERVE_MAX_RECORDS` users (default 1024), so one
+  payload cannot exhaust the device; checkpoints load with
+  `torch.load(weights_only=True)` and only fall back to a full unpickle, with a
+  warning, for files you trust. Set `PRAGMATIQ_SERVE_CPU=1` to keep a shared
+  GPU host's devices away from the serving container.
 - **Vulnerability and license scans.** The CI `supply-chain` job runs
   `pip-audit --strict` and `pip-licenses` on the resolved dependency set; a
   failing audit blocks the build until the dependency is patched or the

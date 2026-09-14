@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pragmatiq.experiments.run as run_mod
-from pragmatiq.experiments.run import compare_runs
+import pragmatiq.runs.run as run_mod
+from pragmatiq.runs.run import compare_runs
 
 
 def test_compare_runs_preserves_input_order_and_flags_missing(monkeypatch) -> None:

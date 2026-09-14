@@ -64,5 +64,8 @@ one task; the probe is the cheap representation check.
 </Steps>
 
 The multi-task probe benchmark (`scripts/benchmarks/multitask_probe.py`) probes every
-user-level task at once and writes a provenance-stamped results table. Next:
+user-level task at once and writes a provenance-stamped results table;
+`scripts/benchmarks/staleness_probe.py` (and `pragmatiq probe --staleness-window`) measures
+how much the metrics move when the most recent hours of history are missing at scoring
+time. Next:
 [Serve](/docs/tutorials/serve).

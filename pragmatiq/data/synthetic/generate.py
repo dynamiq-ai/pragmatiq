@@ -37,7 +37,7 @@ from pragmatiq.core.schema import (
 )
 
 from ... import __version__
-from ...progress import progress
+from ...core.progress import progress
 from .config import WorldConfig
 from .labels import LabelOracle, LabelRows
 from .simulator import UserSimulator, UserTrace
