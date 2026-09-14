@@ -13,12 +13,14 @@ changing it — documentation and reviews focus on what the code actually does.
 Python 3.11+ required.
 
 ```bash
-pip install -e ".[dev]"        # editable install + test/lint/type deps
+pip install -e ".[dev,full]"   # editable install + all extras + test/lint/type deps
 ```
 
-The full pipeline — including the gradient-boosting probe and the AML transfer-graph
-GraphSAGE work — installs with the line above; the optional extras (`serve`, `demo`,
-`extras`, `full`) add focused tooling.
+CI installs `.[dev,full]`, and the full test suite exercises the optional
+extras (Lightning for pretraining, torch-geometric for the AML GNN,
+transformers, matplotlib, …) — install the same combination for a green local
+run. The individual extras (`train`, `serve`, `aml`, `text`, `tracking`,
+`data`, `gbdt`, `demo`) exist so production installs can stay slim.
 
 ## Tests, lint, types
 

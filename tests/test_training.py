@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import random
+import time
 from pathlib import Path
 
 import numpy as np
@@ -155,8 +156,9 @@ class TestPretrainer:
         trainer.fit(loader)
         ckpt = torch.load(run.checkpoints / "last.pt", map_location="cpu", weights_only=False)
         for key in ("model", "head", "optimizers", "scheduler", "sampler", "rng",
-                    "tokenizer_hash", "model_config", "train_config"):
+                    "tokenizer_hash", "model_config", "train_config", "world_size"):
             assert key in ckpt, f"checkpoint missing {key}"
+        assert ckpt["world_size"] == 1  # the RESOLVED world size, not the "auto" string
         assert ckpt["tokenizer_hash"] == tok.content_hash
         assert "masking_gen" in ckpt["rng"] and "torch" in ckpt["rng"] and "numpy" in ckpt["rng"]
         ds.close()
@@ -392,6 +394,154 @@ class TestPretrainer:
         tr2.load_checkpoint(ckpt_path, ld2)  # must not raise (re-seeds instead)
         ds2.close()
 
+    def test_nan_dump_filename_rank_suffix(self, shards: Path) -> None:
+        # Single-process keeps the historical un-suffixed dump name (path contract
+        # unchanged); under DDP each rank writes its own rank-suffixed file so
+        # concurrently flagged ranks never race on one shared path.
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create("nansuffix", {}, 0, tok.content_hash, shards / "runs",
+                         tokenizer_src=shards / "tok" / "tokenizer")
+        trainer, loader, ds = _nano(tok.content_hash, 1, run, tok.vocab_size, shards)
+        loader.sampler.set_epoch(0)
+        batch = next(iter(loader))
+        trainer._dump_debug(batch, None)
+        assert (run.dir / "debug" / "nan_step0.pt").exists()
+
+        class _DDP:
+            world_size = 2
+            global_rank = 1
+
+        trainer.fabric = _DDP()
+        trainer._dump_debug(batch, None)
+        assert (run.dir / "debug" / "nan_step0_rank1.pt").exists()
+        ds.close()
+
+    def test_checkpoint_cadence_decision_is_broadcast_from_rank_zero(self, shards: Path) -> None:
+        # Under DDP the periodic-checkpoint decision must be COLLECTIVE: rank-0's
+        # clock decides and the boolean is broadcast, else clock skew sends one rank
+        # into save_checkpoint's barrier while a peer issues the next gradient
+        # all-reduce (mismatched collectives -> hang).
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create("ckptcad", {}, 0, tok.content_hash, shards / "runs",
+                         tokenizer_src=shards / "tok" / "tokenizer")
+        trainer, loader, ds = _nano(tok.content_hash, 1, run, tok.vocab_size, shards)
+        ds.close()
+
+        class _DDPFabric:
+            world_size = 2
+            global_rank = 1
+            device = torch.device("cpu")
+
+            def __init__(self, rank0_due: float) -> None:
+                self._rank0_due = rank0_due
+                self.broadcast_srcs: list[int] = []
+
+            def broadcast(self, obj, src=0):  # noqa: ANN001
+                self.broadcast_srcs.append(src)
+                return torch.tensor([self._rank0_due])
+
+        # Local clock says LONG overdue, but rank 0 (via the broadcast) says not due:
+        # the collective decision must win over the local one.
+        trainer.fabric = _DDPFabric(rank0_due=0.0)
+        assert trainer._should_checkpoint(time.time() - 10**9) is False
+        assert trainer.fabric.broadcast_srcs == [0], "decision must come from global rank 0"
+        # Inverse skew: local clock fresh, rank 0 says due -> checkpoint anyway.
+        trainer.fabric = _DDPFabric(rank0_due=1.0)
+        assert trainer._should_checkpoint(time.time()) is True
+
+        class _Solo:  # world_size == 1: local clock decides, no broadcast attempted
+            world_size = 1
+
+        trainer.fabric = _Solo()
+        assert trainer._should_checkpoint(time.time() - 10**9) is True
+        assert trainer._should_checkpoint(time.time()) is False
+
+    def test_resume_world_size_mismatch_refused(self, shards: Path) -> None:
+        # TrainConfig.devices="auto" passes the config check on any host, so the
+        # resume guard must compare the RESOLVED world size stored in the payload;
+        # resuming across a different device count corrupts the sampler position.
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create("wsguard", {}, 0, tok.content_hash, shards / "runs",
+                         tokenizer_src=shards / "tok" / "tokenizer")
+        tr, ld, ds = _nano(tok.content_hash, 2, run, tok.vocab_size, shards)
+        tr.fit(ld)
+        ds.close()
+        ckpt_path = run.last_checkpoint()
+        ck = torch.load(ckpt_path, weights_only=False)
+        ck["world_size"] = 2  # fabricate a 2-rank origin; this run resolves to 1
+        torch.save(ck, ckpt_path)
+        tr2, ld2, ds2 = _nano(tok.content_hash, 4, run, tok.vocab_size, shards)
+        with pytest.raises(ValueError, match="world_size=2"):
+            tr2.load_checkpoint(ckpt_path, ld2)
+        ds2.close()
+        # The key is additive: an older checkpoint without it must still resume.
+        del ck["world_size"]
+        torch.save(ck, ckpt_path)
+        tr3, ld3, ds3 = _nano(tok.content_hash, 4, run, tok.vocab_size, shards)
+        tr3.load_checkpoint(ckpt_path, ld3)  # must not raise
+        ds3.close()
+
+    def test_multigpu_resume_rederives_nonzero_rank_rng(self, shards: Path, caplog) -> None:
+        # The checkpoint carries only rank-0's RNG states (fabric.save). On a
+        # multi-rank resume, restoring them everywhere would collapse the
+        # deliberately independent per-rank masking streams (seed + rank) onto
+        # rank-0's and rewind non-zero ranks' dropout RNG — so ranks > 0 must
+        # re-derive their streams deterministically from (seed, rank, step).
+        import logging as _logging
+
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create("mgpurng", {}, 0, tok.content_hash, shards / "runs",
+                         tokenizer_src=shards / "tok" / "tokenizer")
+        tr, ld, ds = _nano(tok.content_hash, 3, run, tok.vocab_size, shards)
+        tr.fit(ld)
+        ds.close()
+        ckpt_path = run.last_checkpoint()
+        ck = torch.load(ckpt_path, weights_only=False)
+        ck["world_size"] = 2  # pretend a 2-rank run wrote it (world-size guard passes)
+        torch.save(ck, ckpt_path)
+
+        class _RankFabric:
+            world_size = 2
+            device = torch.device("cpu")
+
+            def __init__(self, rank: int) -> None:
+                self.global_rank = rank
+                self.is_global_zero = rank == 0
+
+            @staticmethod
+            def load(path):  # noqa: ANN001
+                return torch.load(path, weights_only=False)
+
+        # Rank 1: masking gen and torch stream re-seeded from seed + rank + step,
+        # NOT restored to rank-0's checkpointed states.
+        tr1, ld1, ds1 = _nano(tok.content_hash, 6, run, tok.vocab_size, shards)
+        tr1.fabric = _RankFabric(1)
+        with caplog.at_level(_logging.WARNING, logger="pragmatiq.training.pretrainer"):
+            tr1.load_checkpoint(ckpt_path, ld1)
+        ds1.close()
+        assert "re-derives" in caplog.text, "multi-GPU resume must warn about RNG re-derivation"
+        assert not torch.equal(tr1.gen.get_state(), ck["rng"]["masking_gen"]), \
+            "rank 1 restored rank-0's masking stream (streams collapsed)"
+        reseed = tr1.config.seed + 1 + ck["step"]
+        expected = torch.Generator(device="cpu")
+        expected.manual_seed(reseed)
+        assert torch.equal(tr1.gen.get_state(), expected.get_state()), \
+            "rank 1's masking stream must be deterministically re-derived from seed+rank+step"
+        state_after = torch.get_rng_state()
+        assert not torch.equal(state_after, ck["rng"]["torch"]), \
+            "rank 1's dropout RNG was rewound to rank-0's stream"
+        torch.manual_seed(reseed)
+        assert torch.equal(state_after, torch.get_rng_state()), \
+            "rank 1's torch stream must be deterministically re-derived, not arbitrary"
+
+        # Rank 0 of the same 2-rank resume restores its own (checkpointed) states.
+        tr0, ld0, ds0 = _nano(tok.content_hash, 6, run, tok.vocab_size, shards)
+        tr0.fabric = _RankFabric(0)
+        tr0.load_checkpoint(ckpt_path, ld0)
+        ds0.close()
+        assert torch.equal(tr0.gen.get_state(), ck["rng"]["masking_gen"]), \
+            "rank 0 must restore its checkpointed masking stream bit-exactly"
+
     def test_list_runs(self, shards: Path) -> None:
         runs = list_runs(shards / "runs")
         assert len(runs) >= 1
@@ -413,6 +563,7 @@ class TestDeterminism:
         torch.use_deterministic_algorithms(False)
         torch.backends.cudnn.deterministic = False
         torch.backends.cudnn.benchmark = True
+        torch.set_float32_matmul_precision("highest")  # global; reset like the det flags
         os.environ.pop("PRAGMATIQ_DETERMINISTIC", None)
 
     def test_default_leaves_deterministic_off(self) -> None:
@@ -482,6 +633,33 @@ class TestDeterminism:
         a = random.random()
         seed_everything(123)
         assert random.random() == a
+
+    def test_deterministic_resets_tf32_matmul_precision(self) -> None:
+        # Bug fix: the non-deterministic path enables TF32 ("high") fp32 matmuls; a
+        # later deterministic call in the SAME process must reset precision to
+        # "highest" or the bit-exact-in-fp32 determinism guarantee silently leaks TF32.
+        # The reset must hold regardless of CUDA (the global flag is hardware-agnostic),
+        # so simulate the prior non-det state directly rather than depend on a GPU.
+        try:
+            torch.set_float32_matmul_precision("high")  # as a prior non-det run leaves it
+            seed_everything(0, deterministic=True)
+            assert torch.get_float32_matmul_precision() == "highest", (
+                "deterministic mode leaked TF32 matmul precision"
+            )
+        finally:
+            self._restore()
+
+    def test_non_deterministic_sets_tf32_under_cuda(self) -> None:
+        # On a CUDA host the non-deterministic path opts into TF32 ("high") for the
+        # free Tensor-Core speedup. On CPU-only CI there is no Tensor Core, so the flag
+        # is left at its default — assert the CUDA behavior only where it applies.
+        try:
+            torch.set_float32_matmul_precision("highest")
+            seed_everything(0, deterministic=False)
+            if torch.cuda.is_available():
+                assert torch.get_float32_matmul_precision() == "high"
+        finally:
+            self._restore()
 
 
 # ---------------------------------------------------------------- gradient accumulation

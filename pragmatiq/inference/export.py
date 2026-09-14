@@ -320,10 +320,8 @@ def export_onnx(model: PragmaModel, example_batch: Any, out_path: str | Path,
     try:
         import onnxscript  # noqa: F401  (torch dynamo ONNX exporter dependency)
     except ImportError as e:  # pragma: no cover - exercised only without the extra
-        raise ImportError(
-            "ONNX export needs the 'serve' extra: pip install 'pragmatiq[serve]' "
-            "(installs onnx + onnxscript)."
-        ) from e
+        from pragmatiq.core.errors import MissingExtraError
+        raise MissingExtraError.for_extra("serve", "onnxscript") from e
 
     dense = pack_to_dense(example_batch)
     args = tuple(_expand_example(dense)[name] for name in DENSE_INPUT_NAMES)
@@ -352,7 +350,11 @@ def export_onnx(model: PragmaModel, example_batch: Any, out_path: str | Path,
     )
 
     import numpy as np
-    import onnxruntime as ort
+    try:
+        import onnxruntime as ort
+    except ImportError as e:  # pragma: no cover - exercised only without the extra
+        from pragmatiq.core.errors import MissingExtraError
+        raise MissingExtraError.for_extra("serve", "onnxruntime") from e
 
     session = ort.InferenceSession(str(out_path), providers=["CPUExecutionProvider"])
     feeds = {name: dense[name].numpy() for name in DENSE_INPUT_NAMES}

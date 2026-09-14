@@ -41,7 +41,7 @@ def test_out_of_order_events_flagged(good_data: Path, tmp_path: Path) -> None:
 
     bad = pd.concat([one, rest])
     (tmp_path).mkdir(exist_ok=True)
-    from pragmatiq.data.schema import EVENTS_SCHEMA
+    from pragmatiq.core.schema import EVENTS_SCHEMA
 
     pq.write_table(pa.Table.from_pandas(bad, schema=EVENTS_SCHEMA, preserve_index=False),
                    tmp_path / "events.parquet")
@@ -65,7 +65,7 @@ def test_null_ts_flagged_not_crashed(good_data: Path, tmp_path: Path) -> None:
 
     import pandas as pd
 
-    from pragmatiq.data.schema import EVENTS_SCHEMA
+    from pragmatiq.core.schema import EVENTS_SCHEMA
 
     ev = pq.read_table(good_data / "events.parquet").to_pandas()
     ev.loc[ev.index[0], "ts"] = pd.NaT  # a null timestamp (Spark/pandas default-nullable)
@@ -100,7 +100,7 @@ def test_nonadjacent_user_is_error(good_data: Path, tmp_path: Path) -> None:
 
     import pandas as pd
 
-    from pragmatiq.data.schema import EVENTS_SCHEMA
+    from pragmatiq.core.schema import EVENTS_SCHEMA
 
     ev = pq.read_table(good_data / "events.parquet").to_pandas().sort_values(["user_id", "ts"])
     a, b = list(dict.fromkeys(ev["user_id"]))[:2]
@@ -139,7 +139,7 @@ def test_pathological_cardinality_warns(good_data: Path, tmp_path: Path) -> None
 def test_transfers_self_loops_flagged(good_data: Path, tmp_path: Path) -> None:
     import shutil
 
-    from pragmatiq.data.schema import TRANSFERS_SCHEMA
+    from pragmatiq.core.schema import TRANSFERS_SCHEMA
 
     shutil.copy(good_data / "events.parquet", tmp_path / "events.parquet")
     shutil.copy(good_data / "profiles.parquet", tmp_path / "profiles.parquet")

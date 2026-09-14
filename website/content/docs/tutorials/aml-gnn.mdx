@@ -16,7 +16,7 @@ This is the hands-on runbook for pragmatiq's [AML graph extension](/docs/concept
 ### Build a run with transfers + AML labels
 
 ```bash
-pip install -e .
+pip install -e ".[train,aml]"   # train: pretraining (Lightning); aml: torch-geometric
 pragmatiq synth generate --out data/aml --n-users 12000 --n-workers 8 \
   --config configs/data/synthetic.yaml         # produces transfers.parquet + labels/aml.parquet
 pragmatiq tokenize data/aml --out data/aml/tok

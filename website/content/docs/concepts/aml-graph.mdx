@@ -42,7 +42,7 @@ structure an isolated embedding misses, and message passing adds over the same f
 a graph (`(c) > (d)`).
 
 ```bash
-pip install -e .
+pip install -e ".[aml]"   # torch-geometric for the GraphSAGE arms
 pragmatiq gnn data/tok --run runs/aml \
   --transfers data/synth/transfers.parquet \
   --aml-label data/synth/labels/aml.parquet

@@ -10,7 +10,7 @@
   <a href="https://github.com/dynamiq-ai/pragmatiq/actions/workflows/ci.yml"><img alt="CI: GitHub Actions" src="https://img.shields.io/badge/ci-GitHub%20Actions-2088ff.svg"></a>
   <a href="https://github.com/dynamiq-ai/pragmatiq/blob/main/LICENSE"><img alt="License: Apache-2.0" src="https://img.shields.io/badge/license-Apache--2.0-blue.svg"></a>
   <img alt="Python 3.11+" src="https://img.shields.io/badge/python-3.11%2B-3776AB.svg">
-  <img alt="Status: beta" src="https://img.shields.io/badge/status-beta-f59e0b.svg">
+  <img alt="Status: stable" src="https://img.shields.io/badge/status-stable-10b981.svg">
 </p>
 
 **pragmatiq** is a developer-friendly implementation of ideas described in the
@@ -65,16 +65,19 @@ novelty over PRAGMA. The goal is to make the implementation path concrete.
 ## Quickstart
 
 ```bash
-# pragmatiq is in public beta on PyPI (a pre-release, so --pre is required):
-pip install --pre pragmatiq
+pip install "pragmatiq[train]"
 pragmatiq quickstart
 ```
+
+The `train` extra brings in Lightning, which pretraining (and therefore
+`quickstart`) runs on; a plain `pip install pragmatiq` is the slim inference
+core for embedding with an already-trained run.
 
 Or from a clone of the repo (for development):
 
 ```bash
 git clone https://github.com/dynamiq-ai/pragmatiq.git && cd pragmatiq
-pip install -e ".[dev]"
+pip install -e ".[dev,full]"
 ```
 
 `quickstart` runs a CPU-capable synthetic pipeline end to end:
@@ -91,17 +94,15 @@ For a smaller local smoke test:
 pragmatiq quickstart --n-users 2000 --max-steps 80
 ```
 
-For development from a source checkout:
-
-```bash
-pip install -e ".[dev]"
-```
-
-The full pipeline — including the gradient-boosting probe and the AML transfer-graph
-GraphSAGE ablation — works with the plain install. Optional extras add focused
-tooling: `.[serve]` for ONNX/Triton export and serving, `.[demo]` for the Streamlit
-demo, `.[extras]` for the frozen text embedder plus experiment tracking (Weights &
-Biases, TensorBoard), and `.[full]` for all of them.
+The plain `pip install pragmatiq` is the slim inference core: validating,
+tokenizing, embedding with a trained run, the gradient-boosting probe, and LoRA
+fine-tuning all work without any extra. Training needs `.[train]` — pretraining
+runs on Lightning. The other extras add focused tooling: `.[serve]` for slim
+ONNX/Triton export and serving (no Lightning / torch-geometric / transformers),
+`.[aml]` for the GraphSAGE transfer-graph ablation (torch-geometric),
+`.[text]` for the frozen Nemotron text encoder, `.[tracking]` for Weights &
+Biases and TensorBoard mirrors, `.[data]` for the synthetic realism report
+(matplotlib), `.[demo]` for the Streamlit demo, and `.[full]` for all of them.
 
 The same workflow is available from Python:
 
@@ -185,7 +186,7 @@ pragmatiq/
 │   └── experiments/         # run directories, metric logging, run comparison
 ├── configs/                 # model / pretrain / tokenizer / synthetic / finetune YAMLs
 ├── notebooks/               # 01–04 guided walkthroughs (see Notebooks below)
-├── demo/app.py              # Streamlit demo
+├── apps/demo/app.py         # Streamlit demo
 ├── deploy/                  # Triton model repo, docker-compose, Prometheus, demo Dockerfile
 ├── scripts/                 # runpod_launch.py (GPU rental), gates/ (maintainer validation)
 └── tests/                   # the spec in executable form — useful usage examples
@@ -451,7 +452,7 @@ key can be overridden via `--config` or programmatically through
 | `grad_accum_steps` | `1` | Micro-batches per optimizer step. Effective batch = `token_budget × grad_accum × world_size`; raise it for a large, stable batch on a memory-bound GPU without raising `token_budget`. |
 | `devices` / `num_nodes` | `auto` / `1` | Fabric DDP: per-node device count and host count (multi-node). |
 | `lr_muon` / `lr_adamw` | `3e-3` / `3e-4` | Muon drives 2-D hidden weights; AdamW drives embeddings/norms/biases. |
-| `warmup_steps` | `500` | Linear warmup before the cosine decay. |
+| `warmup_steps` | `100` (dataclass) / `500` (pretrain.yaml) | Linear warmup before the cosine decay. The YAML value wins when using the CLI or `api.pretrain()` without an override; the dataclass default applies only in unit tests and direct Python use. |
 | `weight_decay` / `grad_clip` | `0.01` / `1.0` | Applied to both optimizers. |
 | `checkpoint_every_min` | `15.0` | Wall-clock minutes between full checkpoints. |
 | `log_every` | `20` | Steps between metric logs and the stderr heartbeat. |
@@ -605,7 +606,8 @@ Money laundering through mule rings is a **relational** problem: a mule is
 defined by who they transact with (fan-in of small credits, layering inside
 the ring, shared cash-out), not only by their own behavior. pragmatiq ships a
 transfer-graph extension that tests exactly how much of that signal a graph
-recovers. The AML GNN path is part of the core install.
+recovers. The AML GNN path needs the `aml` extra
+(`pip install "pragmatiq[aml]"`), which brings in torch-geometric.
 
 ### The pieces
 
@@ -666,7 +668,7 @@ extension that probes that gap, not a "the learned embedding wins" result. See
 ### Running it
 
 ```bash
-pip install -e .
+pip install -e ".[aml]"
 pragmatiq gnn data/tokenized --run runs/demo \
   --transfers data/synth/transfers.parquet \
   --aml-label data/synth/labels/aml.parquet \
@@ -730,7 +732,7 @@ It is switchable from the data step alone. Tokenize in embed mode and `pretrain`
 auto-builds the matching frozen encoder and MSE reconstruction head — no model flags:
 
 ```bash
-pip install -e ".[extras]"   # adds transformers (the frozen embedder)
+pip install -e ".[text]"     # adds transformers (the frozen embedder)
 pragmatiq tokenize data/synth --out data/tokenized --config configs/data/tokenizer_nemotron.yaml
 pragmatiq pretrain data/tokenized --name nemo --model-size medium   # text branch auto-wired
 ```
@@ -746,22 +748,32 @@ pragmatiq pretrain data/tokenized --name nemo --model-size medium   # text branc
 - **Serving** handles both variants — build the Triton image with
   `PRAGMATIQ_TRITON_EXTRAS=nemotron` (see [Serving with Triton](#serving-with-triton)).
 
-## Defaults where the paper is silent
+## Paper-silent (`# GUESS`) hyperparameters
 
 The paper leaves some engineering details unspecified. pragmatiq treats these
-as defaults, exposes them in config, and marks source-level guesses with
-`# GUESS`.
+as documented defaults, exposes every one in config, and marks source-level
+choices with `# GUESS`. Defaults are written into each run's `run.yaml` /
+`meta.json` at training time, so shipped checkpoints embed their values
+reproducibly regardless of future default changes. Changing a default is a
+**MINOR** (not breaking) change per the [stability policy](docs/STABILITY.md);
+the checkpoint-format and tokenizer-hash guards ensure already-shipped
+checkpoints always load identically.
 
-| Knob | Default | Where |
-| --- | --- | --- |
-| Muon LR for 2-D hidden weights | `3e-3` | `configs/pretrain.yaml` |
-| AdamW LR for embeddings/norms/biases | `3e-4` | `configs/pretrain.yaml` |
-| Token budget per batch | `16384` | `configs/pretrain.yaml` |
-| Warmup steps | `500` | `configs/pretrain.yaml` |
-| Numeric percentile buckets plus zero bucket | `64` | `configs/data/tokenizer.yaml` |
-| Target total vocabulary | `28000` | `configs/data/tokenizer.yaml` |
-| RoPE base | `10000.0` | `ModelConfig` size preset; override via the pretrain `config` (e.g. `rope_base:`) |
-| `[UNK]` fraction of masked positions | `10%` | `MaskingStrategy(p_unk=0.10)` |
+The table below lists all 13 `# GUESS` source markers, resolved to 9 unique
+hyperparameters (some values appear in both the dataclass and the optimizer or
+masker call-site).
+
+| # | Parameter | File(s) | Default | Config key | Rationale |
+| --- | --- | --- | --- | --- | --- |
+| 1 | `lr_muon` — Muon LR for 2-D hidden weights | `training/pretrainer.py`, `training/optim.py` | `3e-3` | `configs/pretrain.yaml · lr_muon` | Paper-silent; matches Keller Jordan's Muon reference, known to work for MLM at this scale |
+| 2 | `lr_adamw` — AdamW LR for embeddings/norms/biases | `training/pretrainer.py`, `training/optim.py` | `3e-4` | `configs/pretrain.yaml · lr_adamw` | Paper-silent; standard AdamW default one decade below Muon LR; stable for embedding tables |
+| 3 | `warmup_steps` — cosine-schedule warmup length | `training/pretrainer.py` | `100` (dataclass); `500` (pretrain.yaml) | `configs/pretrain.yaml · warmup_steps` | Paper-silent; ~2–5% of default max_steps; short warm-up avoids early instability on CPU-first runs |
+| 4 | `token_budget` — per-forward token cap | `training/pretrainer.py` | `16384` | `configs/pretrain.yaml · token_budget` | Paper-silent; fits a `small` model on a single 16 GiB GPU with headroom for optimizer state |
+| 5 | `p_unk` — `[UNK]` fraction of selected masked positions | `training/masking.py`, `training/pretrainer.py` | `0.10` (10 %) | `TrainConfig.p_unk` / `configs/pretrain.yaml` | Paper-silent; keeps the model robust to unseen tokens; excluded from CE loss like the BERT sentinel |
+| 6 | `n_buckets` — percentile buckets per numeric key | `data/tokenizer.py` | `64` | `configs/data/tokenizer.yaml · n_buckets` | Paper-silent; 64 uniform-mass bins give ~1.5% resolution per bucket, balancing vocab size vs precision |
+| 7 | `target_vocab` — target total vocabulary size | `data/tokenizer.py` | `28000` | `configs/data/tokenizer.yaml · target_vocab` | Paper-silent; in the range of standard NLP sub-word vocabs; BPE fills the remainder after categoricals |
+| 8 | `numeric_min_cardinality` — distinct-value floor for numeric routing | `data/tokenizer.py` | `None` (= `4 × n_buckets`) | `configs/data/tokenizer.yaml · numeric_min_cardinality` | Paper-silent; separates low-cardinality identifier codes (MCC, ZIP) from continuous magnitudes |
+| 9 | `rope_base` — geometric frequency ladder base for TimeRoPE | `models/pragmatiq.py` | `10000.0` | `configs/model/{small,medium,large}.yaml · rope_base` | Paper-silent; inherited from LLaMA/GPT-NeoX RoPE; appropriate for log-seconds positions |
 
 ## Serving with Triton
 
@@ -870,7 +882,7 @@ Pick Triton for throughput, ONNX for portability.
 
 ## Streamlit demo
 
-[`demo/app.py`](demo/app.py) is a small Streamlit app over a trained run and a
+[`apps/demo/app.py`](apps/demo/app.py) is a small Streamlit app over a trained run and a
 generated dataset: pick a synthetic user in the sidebar and see their **event
 timeline** (recent transactions with amount/merchant), their **embedding
 computed live** via `embed_records` (the raw embedding and its norm — attach
@@ -883,7 +895,7 @@ per-event explanations, the library ships integrated-gradients attribution in
 ```bash
 pip install -e ".[demo]"
 pragmatiq quickstart          # or point the env vars at existing artifacts
-PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run demo/app.py
+PRAGMATIQ_RUN=runs/demo PRAGMATIQ_RAW=data/synth streamlit run apps/demo/app.py
 ```
 
 `PRAGMATIQ_RUN` (default `runs/quickstart`) is the trained run directory,
@@ -909,10 +921,10 @@ of the tokenizer. On top of that:
   `tokenize --n-workers` fan out across processes but produce byte-identical
   output for any worker count (CI-enforced), so you can scale CPU phases
   freely without losing reproducibility.
-- **TensorBoard**: `pip install -e ".[extras]"`, then
+- **TensorBoard**: `pip install -e ".[tracking]"`, then
   `tensorboard --logdir runs/<name>/tb`. The mirror is on whenever the
   `tensorboard` package is installed; otherwise it is a silent no-op.
-- **Weights & Biases**: `pip install -e ".[extras]"`, then set `wandb: true`
+- **Weights & Biases**: `pip install -e ".[tracking]"`, then set `wandb: true`
   (and optionally `wandb_project`) in the pretrain config, or pass `--wandb`
   to `pragmatiq pretrain`.
 
@@ -930,10 +942,13 @@ The notebooks are the guided tour; each one runs top to bottom on CPU.
 ## Development
 
 ```bash
-pip install -e ".[dev]"
+pip install -e ".[dev,full]"
 ```
 
-Run the fast local checks before opening a PR:
+CI installs `.[dev,full]`, and the full test suite exercises the optional
+extras (Lightning, torch-geometric, transformers, matplotlib, …) — install the
+same combination for a green local run. Run the fast local checks before
+opening a PR:
 
 ```bash
 ruff check .

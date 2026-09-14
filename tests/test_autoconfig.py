@@ -40,6 +40,18 @@ class TestTokenBudget:
         # No real device on CI: an unreadable CUDA target floors to the safe minimum.
         assert token_budget_for("cuda", "small", mem_gib=None) == 2048
 
+    def test_ddp_world_size_reduces_budget(self) -> None:
+        # DDP gradient buckets add per-rank overhead; world_size > 1 must yield a
+        # strictly smaller per-device budget than world_size == 1 (H100 fix GF1).
+        single = token_budget_for("cuda", "large", mem_gib=80.0, world_size=1)
+        ddp = token_budget_for("cuda", "large", mem_gib=80.0, world_size=8)
+        assert ddp < single, f"DDP budget ({ddp}) not smaller than single-GPU ({single})"
+        # Property must hold for medium and small too
+        for size in ("medium", "small"):
+            s = token_budget_for("cuda", size, mem_gib=80.0, world_size=1)
+            d = token_budget_for("cuda", size, mem_gib=80.0, world_size=4)
+            assert d < s, f"{size}: DDP budget ({d}) not < single-GPU ({s})"
+
 
 class TestAutoconfigure:
     def test_plan_is_sane_and_valid(self, work: Path) -> None:

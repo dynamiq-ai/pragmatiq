@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pragmatiq.data.schema import UserRecord
+from pragmatiq.core.schema import UserRecord
 from pragmatiq.data.synthetic import WorldConfig, generate
 from pragmatiq.data.tokenizer import (
     SPECIAL_TOKENS,

@@ -66,7 +66,7 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    command: streamlit run demo/app.py --server.port 8501 --server.address 0.0.0.0
+    command: streamlit run apps/demo/app.py --server.port 8501 --server.address 0.0.0.0
     environment:
       # The demo derives raw data, tokenized shards and the trained run from this base.
       - PRAGMATIQ_OUT=/models/quickstart

@@ -25,7 +25,7 @@ import pytest
 
 import pragmatiq.data.parallel_tokenize as pt
 from pragmatiq import api
-from pragmatiq.data.schema import EVENTS_SCHEMA, PROFILES_SCHEMA
+from pragmatiq.core.schema import EVENTS_SCHEMA, PROFILES_SCHEMA
 
 # ---------------------------------------------------------------------------
 # helpers

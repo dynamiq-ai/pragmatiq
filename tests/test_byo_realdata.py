@@ -14,7 +14,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from pragmatiq.data.schema import UserRecord
+from pragmatiq.core.schema import UserRecord
 from pragmatiq.data.synthetic import WorldConfig, generate
 from pragmatiq.data.tokenizer import (
     UNK,

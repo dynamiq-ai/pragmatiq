@@ -9,7 +9,7 @@ import numpy as np
 import pyarrow.parquet as pq
 import pytest
 
-from pragmatiq.data.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, TRANSFERS_SCHEMA, label_schema
+from pragmatiq.core.schema import EVENTS_SCHEMA, LABEL_TASKS, PROFILES_SCHEMA, TRANSFERS_SCHEMA, label_schema
 from pragmatiq.data.synthetic import WorldConfig, generate
 
 CFG_KW = dict(

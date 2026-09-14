@@ -5,7 +5,114 @@
 
 All notable changes to pragmatiq are documented in this file. This project
 follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
-the public API may change.
+the public API may change. From **1.0.0** onward the public API is frozen and
+SemVer applies (see [`docs/STABILITY.md`](docs/STABILITY.md)).
+
+## [1.0.0] — 1.0 production release
+
+First stable release. The public API, CLI, serving contract, and checkpoint
+format are now **frozen** under the SemVer policy in `docs/STABILITY.md`.
+
+### BREAKING (install behavior)
+
+`torch-geometric`, `lightning`, and `matplotlib` are no longer installed by
+default. They moved to optional extras so that a plain `pip install pragmatiq`
+gives a slim inference-capable install:
+
+- **training** now requires `pip install 'pragmatiq[train]'`
+- **AML GraphSAGE** requires `pip install 'pragmatiq[aml]'`
+- **serving / ONNX export** requires `pip install 'pragmatiq[serve]'`
+
+**Migration:** `pip install 'pragmatiq[full]'` reproduces the old all-in
+install with every optional dependency. No change to the Python API, CLI
+command names, `from_pretrained` / `embed_records`, the serving contract, or
+the checkpoint format.
+
+### Added
+
+- **Public-API stability contract** — `docs/STABILITY.md` (frozen at 1.0.0)
+  enumerates the 15 `pragmatiq.api.*` functions, `PragmaModel.from_pretrained`
+  / `embed_records`, the full CLI command tree, the serving wire format, and
+  the checkpoint-format version. `tests/contract/` enforces the contract on
+  every CI run and gate 9.
+- **`# GUESS` hyperparameter catalog** — README section "Paper-silent (`#
+  GUESS`) hyperparameters" documents all 9 unique paper-silent defaults (13
+  source markers), their config keys, and one-line rationale. These defaults
+  are embedded in every run's `run.yaml` / `meta.json` so shipped checkpoints
+  reproduce regardless of future default changes.
+- **Pluggable object-store storage** (`fsspec`) — `pragmatiq.storage`
+  abstracts run/checkpoint/shard I/O over any fsspec-compatible backend (local
+  file, S3, GCS, Azure Blob). Use `[s3]`, `[gcs]`, or `[azure]` extras.
+- **Serving glue extracted** — `pragmatiq.inference.serve` owns the single
+  serving contract (`records_json → embeddings [n_users, dim]`); the Triton
+  `model.py` and REST/gRPC adapters delegate to it.
+- **Cloud-adapter seams** — `integrations/` holds real SageMaker and
+  Databricks adapters plus documented stubs for Azure ML and Nebius; see
+  `docs/INTEGRATIONS.md`.
+- **`apps/` UI seam** — the Streamlit demo relocated to `apps/demo`; a thin
+  `apps/` namespace provides a stable hook for future UIs.
+- **BYOC hardening** — verified no-phone-home behavior, offline / air-gapped
+  install path, locked dependencies (`uv.lock`), SBOM generation
+  (`scripts/supply_chain/gen_sbom.sh`), and license + vulnerability scan in CI.
+- **RELEASING.md** updated with the 1.0 release procedure (uv.lock
+  regeneration, SBOM, full validation, tag + build + publish steps).
+
+### Fixed
+
+- **Fine-tune epochs batch only the labeled split** — the single-process
+  fine-tune path now uses the same subset sampler as the DDP path instead of
+  iterating the entire shard set and discarding unlabeled users. Epoch cost is
+  now proportional to the label table, not the dataset (a 3-epoch fine-tune of
+  a 100k-user shard set with partial labels dropped from ~21 h to well under
+  an hour per epoch on one GPU).
+- **GPU LoRA fine-tuning runs bf16 autocast** — the single-process CUDA path
+  now matches the DDP path's mixed precision, routing attention through the
+  flash varlen kernel. The previous fp32/SDPA path retained O(L^2) attention
+  scores through the frozen backbone's backward and could exhaust an 80 GB GPU
+  on the `large` preset for a single long-history user. CPU fine-tuning is
+  unchanged (fp32, byte-identical).
+
+- **Slim install can synthesize out of the box** — `api.synthesize` /
+  `pragmatiq synth generate` now default `write_report` to *auto*: the realism
+  report is written when matplotlib (the `[data]` extra) is installed and
+  skipped with a logged warning otherwise. An explicit `write_report=True`
+  still raises `MissingExtraError` when matplotlib is absent.
+- **Remote `runs_root` pretrain returns a durable path** — `api.pretrain`
+  with a remote (e.g. `s3://`) `runs_root` now returns the remote run URL
+  instead of the staged local temp directory that staging deletes on exit.
+- **Remote `tokenizer_dir` is staged** — `api.tokenize(tokenizer_dir="s3://…")`
+  materializes the tokenizer locally before loading instead of failing.
+- **Databricks `register()` reports the real model version** — the returned
+  Unity Catalog URI uses the version the registry assigned (previously
+  hardcoded `/1`).
+- **Staging preserves computed results when an upload fails** — a remote-output
+  upload error no longer deletes the freshly computed local results; the error
+  names the preserved directory. Remote backends are also validated eagerly, so
+  a missing cloud extra or unknown scheme fails before compute, not after.
+- **`tokenize(tokenizer_dir=...)` produces a self-contained shard dir** — the
+  loaded tokenizer is saved into `out/tokenizer`, so downstream commands accept
+  the output (previously they rejected it with a missing-tokenizer error).
+- **CLI accepts remote URLs** — path-like CLI options no longer mangle
+  `s3://...` to `s3:/...`; `pragmatiq quickstart`, `runs list/compare`, and
+  `export` handle remote roots end to end, and `pretrain` rejects invalid
+  `--resume` values instead of silently starting a fresh run.
+- **SageMaker `package()` builds a bootable Triton bundle** — the model.tar.gz
+  now contains the Triton model repository (config + backend) wired to
+  `PRAGMATIQ_RUN`, and adapter healthchecks speak the KServe v2 envelope
+  (`encode_v2_request`/`decode_v2_response` added to the serving contract).
+- **Databricks pyfunc is loadable outside the repo** — the wrapper moved into
+  the shipped package (`pragmatiq.inference.serve.pyfunc`), `register()` pins
+  `pip_requirements`, and `predict()` accepts the DataFrame input Databricks
+  Model Serving actually delivers.
+
+### One default change (otherwise no API changes)
+
+The Python API (`pragmatiq.api.*`), CLI command names, `from_pretrained` /
+`embed_records`, the serving wire contract, and the checkpoint format are
+unchanged from 0.1.0b4, with one deliberate default change recorded above:
+`synthesize(write_report=…)` defaults to ``None`` (auto) instead of ``True``.
+All existing code and shipped checkpoints continue to work without
+modification.
 
 ## [0.1.0b4] — Hardening and the SageMaker guide
 

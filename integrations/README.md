@@ -1,0 +1,1 @@
+Thin cloud-deployment adapters, repo-only, NOT shipped in the pragmatiq wheel; populated in W6.

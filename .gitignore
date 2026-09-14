@@ -36,6 +36,12 @@ realism_report.html
 *.key
 secrets/
 
+# RunPod pod-info sidecar (written by runpod_launch.py for external monitoring)
+.runpod_last.json
+
+# RunPod artifact pull-back tarball (written by runpod_launch.py --pull)
+pulled.tar.gz
+
 # OS / editors
 .DS_Store
 .idea/
@@ -46,3 +52,7 @@ docs/SPEC.md
 
 # Local-only copy of the inspiration paper (not redistributable)
 /paper/
+
+# agent working scratch (never commit)
+.superpowers/
+docs/audit/AUDIT-VERDICT-*.md
