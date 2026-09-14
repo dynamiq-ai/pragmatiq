@@ -35,9 +35,12 @@ def test_image_and_flash_wheel_are_paired(rl) -> None:
     assert "cuda12.8" in rl.IMAGE
 
 
-def test_install_block_keeps_the_image_torch(rl) -> None:
+def test_install_block_pins_the_release_torch(rl) -> None:
+    # The image may ship a nightly of the same major.minor; the flash wheel is
+    # built against the release ABI, so the install pins the release first.
     assert "--no-deps -e ." in rl.INSTALL
-    assert 'torch==$TORCH_VER' in rl.INSTALL
+    assert f'torch=={rl.TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{rl.CUDA_TAG}' in rl.INSTALL
+    assert f'"torch=={rl.TORCH_RELEASE}"' in rl.INSTALL.split("[dev,full]")[1][:40]
     assert rl.FLASH_WHEEL in rl.INSTALL
 
 
@@ -79,3 +82,10 @@ def test_pod_body_uses_the_paired_image(rl, monkeypatch) -> None:
     monkeypatch.setattr(rl, "_req", lambda m, p, k, body=None: captured.update(body or {}) or {"id": "x"})
     rl.create_pod("k", "NVIDIA A100 80GB PCIe", "n", gpu_count=2)
     assert captured["imageName"] == rl.IMAGE and captured["gpuCount"] == 2
+
+
+def test_install_pins_the_release_torch_the_wheel_expects(rl) -> None:
+    assert rl.TORCH_RELEASE == rl.image_torch_version()
+    assert f"torch{rl.TORCH_RELEASE.rsplit('.', 1)[0]}" in rl.FLASH_WHEEL
+    assert f"cuda{rl.CUDA_TAG[2:4]}.{rl.CUDA_TAG[4:]}" in rl.IMAGE  # cu128 ↔ cuda12.8
+    assert f'torch=={rl.TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{rl.CUDA_TAG}' in rl.INSTALL

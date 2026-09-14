@@ -48,6 +48,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # ---------------------------------------------------------------------------
 IMAGE = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
 FLASH_ATTN_VERSION = "2.8.3"
+# Release torch build the flash-attn wheel is compiled against, and the PyTorch
+# wheel index for the image's CUDA (the image tag carries both).
+TORCH_RELEASE = "2.8.0"
+CUDA_TAG = "cu128"
 FLASH_WHEEL = (
     f"https://github.com/Dao-AILab/flash-attention/releases/download/v{FLASH_ATTN_VERSION}/"
     f"flash_attn-{FLASH_ATTN_VERSION}+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
@@ -74,9 +78,12 @@ def image_python_tag(image: str = IMAGE) -> str:
 INSTALL = f"""
 set -uo pipefail
 cd /workspace/pragmatiq
-TORCH_VER=$(python -c "import torch; print(torch.__version__.split('+')[0])")
+# The image may ship a torch *nightly* of the same major.minor (observed:
+# 2.8.0.dev20250319+cu128); the flash-attn wheel is built against the release
+# ABI, so pin the release build the wheel expects before anything else.
+pip install -q "torch=={TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{CUDA_TAG}
 pip install -q --no-deps -e .
-pip install -q -e ".[dev,full]" "torch==$TORCH_VER"
+pip install -q -e ".[dev,full]" "torch=={TORCH_RELEASE}"
 echo "=== installing flash-attn ==="
 pip install -q "{FLASH_WHEEL}" || {{
     echo "Prebuilt wheel not found; trying source build (slow)..."
