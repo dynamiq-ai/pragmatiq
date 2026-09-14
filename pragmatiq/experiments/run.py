@@ -157,3 +157,13 @@ def list_runs(runs_root: str | Path = "runs") -> list[dict[str, Any]]:
             "last_step": (last or {}).get("step"), "last_loss": (last or {}).get("loss"),
         })
     return out
+
+
+def compare_runs(names: list[str], runs_root: str | Path = "runs") -> list[dict[str, Any]]:
+    """Return each named run's summary (last step/loss/metrics), in input order.
+
+    Missing runs are returned as ``{"name": name, "missing": True}`` rather than
+    omitted, so callers can see which requested runs were not found.
+    """
+    by_name = {r["name"]: r for r in list_runs(runs_root)}
+    return [by_name.get(n, {"name": n, "missing": True}) for n in names]

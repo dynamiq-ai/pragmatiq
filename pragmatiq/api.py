@@ -348,7 +348,7 @@ def _pretrain_inner(
         base = merged
     # Reject unknown config keys so a mistyped option surfaces immediately as a
     # clear error. Recognized keys are TrainConfig or ModelConfig fields; `size`
-    # (the model-size selector in configs/model/*.yaml) and the derived
+    # (the model-size selector) and the derived
     # `vocab_size` are also accepted.
     unknown = set(base) - known - {"vocab_size", "size"}
     if unknown:
@@ -801,7 +801,7 @@ def runs_compare(names: list[str], runs_root: str | Path = "runs") -> list[dict[
         return [{"name": n, "missing": True} for n in names]
     with _staging() as stage:
         runs_root = stage.input(runs_root)  # type: ignore[assignment]
-        from pragmatiq.experiments.compare import compare_runs
+        from pragmatiq.experiments.run import compare_runs
 
         return compare_runs(names, runs_root)
 

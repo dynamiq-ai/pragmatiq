@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Acceptance check — cloud adapter integrations (W6a + W6b).
 #
-# Runs all three integration test files (SageMaker, Databricks, Azure+Nebius
-# stubs) to verify:
+# Runs the integration test files (SageMaker, Databricks) to verify:
 #   1. All adapters satisfy the CloudAdapter protocol shape.
 #   2. Offline-testable methods (manifest, package) work without cloud SDKs.
 #   3. Live-op guards (push/register/deploy_live) raise the correct errors.
@@ -18,7 +17,6 @@ echo "=== integration adapter tests (offline — no cloud calls) ==="
 "$PY" -m pytest \
     tests/test_integrations_sagemaker.py \
     tests/test_integrations_databricks.py \
-    tests/test_integrations_stubs.py \
     -q
 
 echo ""

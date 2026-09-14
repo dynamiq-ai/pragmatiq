@@ -53,7 +53,7 @@ jobs:
 
   tests:
     # The full test suite — the `quality` job above runs only a fast smoke subset,
-    # so unit tests for finetuner / uplift / multitask / inference would otherwise
+    # so unit tests for finetuner / uplift / inference would otherwise
     # never run in CI. This job closes that coverage gap.
     # Install .[dev,full] so lightning/torch-geometric/matplotlib/transformers/etc.
     # are present and the 385-test suite (which exercises those paths) stays green.

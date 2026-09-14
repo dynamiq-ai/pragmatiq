@@ -55,8 +55,7 @@ classifiers rather than acting as a decision system themselves:
 
 Target tasks demonstrated on the synthetic benchmark: fraud (account takeover),
 credit default (12 months), churn (6 months), AML (mule-ring membership), and
-LTV. Per-event attribution for any of these is available via integrated
-gradients (`pragmatiq/inference/explain.py`).
+LTV.
 
 **Out of scope.** Shipped checkpoints and the quickstart model are trained on
 synthetic data only and must not be used for real credit, fraud, or AML
@@ -194,9 +193,6 @@ With it on:
   population before any deployment, and comply with applicable credit and
   consumer-protection regulation (e.g. adverse-action explanation
   requirements).
-- **Explainability is a tool, not a defense.** Integrated-gradients event
-  attribution highlights which events drove a score; it does not by itself
-  satisfy model-governance or recourse obligations.
 - **Misuse.** Embeddings that summarize a person's financial behavior are
   sensitive by construction. Apply your institution's data-protection controls
   to embedding stores exactly as you would to the raw event data.

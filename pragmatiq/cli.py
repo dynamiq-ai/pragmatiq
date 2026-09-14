@@ -132,7 +132,7 @@ def finetune_cmd(
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     run: str = typer.Option(..., help="Run directory of a trained model."),
     label: str = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
-    config: str | None = typer.Option(None, help="Finetune YAML (configs/finetune/*.yaml)."),
+    config: str | None = typer.Option(None, help="Finetune YAML (see configs/finetune/credit.yaml)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
     """LoRA fine-tune a trained model's adapters + head on a label table."""

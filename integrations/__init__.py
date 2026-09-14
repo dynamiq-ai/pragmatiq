@@ -13,5 +13,5 @@ Common types
 ------------
 * :class:`integrations._base.Artifact` — artifact descriptor returned by ``package()``.
 * :class:`integrations._base.CloudAdapter` — Protocol that all adapters implement.
-* :class:`integrations._base.MissingExtraError` — raised by live ops if SDK absent.
+* :class:`pragmatiq.core.errors.MissingExtraError` — raised by live ops if an SDK is absent.
 """

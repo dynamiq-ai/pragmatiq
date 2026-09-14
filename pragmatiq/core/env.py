@@ -1,14 +1,10 @@
-"""Environment and device helpers for pragmatiq.
+"""Device resolution helpers for pragmatiq.
 
-Provides device resolution (:func:`resolve_device`) and opt-in feature
-flags that read environment variables (:func:`telemetry_enabled`,
-:func:`offline_mode`).  All functions are pure (no side effects) and
-importable without touching torch or any optional dependency.
+:func:`resolve_device` is the single place where ``"auto"`` becomes a concrete
+device.  Importable without touching torch or any optional dependency.
 """
 
 from __future__ import annotations
-
-import os
 
 
 def resolve_device(device: str) -> str:
@@ -31,22 +27,3 @@ def resolve_device(device: str) -> str:
     return device
 
 
-def telemetry_enabled() -> bool:
-    """Return ``True`` only if the ``PRAGMATIQ_TELEMETRY`` env var is set truthy.
-
-    Default is ``False`` (opt-in).  W7 will wire the actual telemetry calls;
-    this function is the canonical gate check so all callers agree on the
-    env-var name and truthy test.
-    """
-    val = os.environ.get("PRAGMATIQ_TELEMETRY", "").strip().lower()
-    return val in ("1", "true", "yes", "on")
-
-
-def offline_mode() -> bool:
-    """Return ``True`` if the ``PRAGMATIQ_OFFLINE`` env var is set truthy.
-
-    When offline mode is active, components that would fetch remote resources
-    should skip those requests or raise a clear error.
-    """
-    val = os.environ.get("PRAGMATIQ_OFFLINE", "").strip().lower()
-    return val in ("1", "true", "yes", "on")

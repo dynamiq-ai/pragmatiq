@@ -41,9 +41,9 @@ Commit the updated `uv.lock` alongside the version bump.
 bash scripts/supply_chain/gen_sbom.sh
 ```
 
-Commit the updated `sbom/` output. The CI supply-chain job regenerates an SBOM
-on every push (proving generation works) but does not compare it against the
-committed copy, so this release step is what keeps `sbom/` current.
+The SBOM lands in `dist/sbom/` (not committed); attach it to the GitHub Release
+assets. The CI supply-chain job regenerates it on every push to prove the
+generator works.
 
 ### 4. Run the full validation suite
 

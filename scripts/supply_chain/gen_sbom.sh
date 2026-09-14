@@ -5,7 +5,7 @@
 #   bash scripts/supply_chain/gen_sbom.sh
 #
 # Output:
-#   sbom/pragmatiq-<version>.cdx.json
+#   dist/sbom/pragmatiq-<version>.cdx.json
 #
 # In CI the cyclonedx-bom package is installed as part of the supply-chain job.
 # For local runs it is installed on demand (into the active environment).
@@ -35,9 +35,9 @@ VERSION=$("$PY" -c "import pragmatiq; print(pragmatiq.__version__)")
 echo "pragmatiq version: $VERSION"
 
 # ── Create output directory ──────────────────────────────────────────────────
-mkdir -p sbom
+mkdir -p dist/sbom
 
-OUTFILE="sbom/pragmatiq-${VERSION}.cdx.json"
+OUTFILE="dist/sbom/pragmatiq-${VERSION}.cdx.json"
 
 # ── Generate SBOM ────────────────────────────────────────────────────────────
 echo "Generating SBOM → $OUTFILE"

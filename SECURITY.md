@@ -19,8 +19,8 @@ have had a chance to triage it.
 
 ## Supported versions
 
-pragmatiq is currently pre-1.0. Security fixes target the latest commit on the
-default branch unless a tagged release states otherwise.
+Security fixes target the latest release on PyPI and the default branch; older
+releases are not patched.
 
 ## Data handling
 
@@ -28,3 +28,19 @@ This repository includes a synthetic data generator and examples. Do not attach
 real customer data, banking records, credentials, model checkpoints containing
 sensitive data, or private aggregate statistics to public issues or pull
 requests.
+
+## Supply chain
+
+- **No phone-home.** The library never contacts the network unless you pass a
+  remote URL (object storage) or install and configure a tracking extra;
+  `scripts/supply_chain/no_phone_home.py` and
+  `tests/boundaries/test_no_phone_home.py` prove it (gate 10).
+- **SBOM.** `bash scripts/supply_chain/gen_sbom.sh` writes a CycloneDX JSON
+  SBOM of the active environment to `dist/sbom/pragmatiq-<version>.cdx.json`.
+  It is generated in CI on every push (`supply-chain` job) and attached to each
+  GitHub Release; feed it to Dependency-Track, Grype, or Trivy for your own
+  review.
+- **Vulnerability and license scans.** The CI `supply-chain` job runs
+  `pip-audit --strict` and `pip-licenses` on the resolved dependency set; a
+  failing audit blocks the build until the dependency is patched or the
+  advisory is exempted with a documented reason in `.github/workflows/ci.yml`.

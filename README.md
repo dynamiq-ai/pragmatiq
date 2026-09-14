@@ -126,7 +126,7 @@ callers use the same library surface.
 | Model | PRAGMA-style profile, event, and history encoders with TimeRoPE, padding-free varlen attention, and tied MLM head. |
 | Training | CPU-safe pretraining, resume-safe checkpoints, probes, LoRA fine-tuning, and configurable heads/maskers/value encoders. |
 | AML graph | GraphSAGE ablation over transfer graphs using isolated embeddings, pragmatiq features, and hand-crafted graph features. |
-| Inference | Batch embedding, `PragmaModel.from_pretrained(run)`, notebook-friendly `embed_records`, integrated-gradients attribution, ONNX, and Triton serving. |
+| Inference | Batch embedding, `PragmaModel.from_pretrained(run)`, notebook-friendly `embed_records`, ONNX, and Triton serving. |
 | Publication assets | Model card, contribution guide, citation metadata, security policy, Apache-2.0 license, and GitHub templates. |
 
 ## Architecture
@@ -182,7 +182,7 @@ pragmatiq/
 │   ├── data/                # schema, tokenizer, sharding, collation, synthetic generator
 │   ├── models/              # encoders, MLM head, LoRA, AML GNN (gnn.py)
 │   ├── training/            # pretrainer, masking, Muon+AdamW, probe, finetuner
-│   ├── inference/           # batch embedder, attribution (explain.py), ONNX export, benchmarks
+│   ├── inference/           # batch embedder, ONNX export, serving runtime, benchmarks
 │   └── experiments/         # run directories, metric logging, run comparison
 ├── configs/                 # model / pretrain / tokenizer / synthetic / finetune YAMLs
 ├── notebooks/               # 01–04 guided walkthroughs (see Notebooks below)
@@ -251,9 +251,9 @@ metrics are forecasts, never hindcasts.
 
 The embedding's value is not specific to credit. The multi-task probe benchmark
 (`scripts/benchmarks/multitask_probe.py`) probes every user-level task against
-the same raw-count baseline. The table below is auto-written by
-`write_multitask_report` on an opt-in run (`PRAGMATIQ_WRITE_RESULTS=1`), carries
-a provenance stamp, and is refused if it would replace a larger-scale result.
+the same raw-count baseline. The table below is written by that script's
+`--write` flag, carries a provenance stamp, and is refused if it would replace a
+larger-scale result.
 Event-level `fraud`/`recurring` (transaction/series-level) and `comm_uplift`
 (a treatment-effect task — see `pragmatiq uplift`) are evaluated by their own
 paths, not this user-embedding probe.
@@ -713,8 +713,7 @@ CI-scale run can never masquerade as a full-scale result.
 | `large` | 1024 | 16 | 9 / 45 / 18 | 1B | ~940M |
 
 These sizes are the presets in `ModelConfig.preset`
-(`pragmatiq/models/pragmatiq.py`); `configs/model/{small,medium,large}.yaml`
-document them. Any architecture field (e.g. `rope_base`, `dropout`) can be
+(`pragmatiq/models/pragmatiq.py`), selected with `--model-size`. Any architecture field (e.g. `rope_base`, `dropout`) can be
 overridden by passing it in the pretrain `config`. The test suite checks the
 model and MLM head parameter counts against the nominal sizes.
 
@@ -773,7 +772,7 @@ masker call-site).
 | 6 | `n_buckets` — percentile buckets per numeric key | `data/tokenizer.py` | `64` | `configs/data/tokenizer.yaml · n_buckets` | Paper-silent; 64 uniform-mass bins give ~1.5% resolution per bucket, balancing vocab size vs precision |
 | 7 | `target_vocab` — target total vocabulary size | `data/tokenizer.py` | `28000` | `configs/data/tokenizer.yaml · target_vocab` | Paper-silent; in the range of standard NLP sub-word vocabs; BPE fills the remainder after categoricals |
 | 8 | `numeric_min_cardinality` — distinct-value floor for numeric routing | `data/tokenizer.py` | `None` (= `4 × n_buckets`) | `configs/data/tokenizer.yaml · numeric_min_cardinality` | Paper-silent; separates low-cardinality identifier codes (MCC, ZIP) from continuous magnitudes |
-| 9 | `rope_base` — geometric frequency ladder base for TimeRoPE | `models/pragmatiq.py` | `10000.0` | `configs/model/{small,medium,large}.yaml · rope_base` | Paper-silent; inherited from LLaMA/GPT-NeoX RoPE; appropriate for log-seconds positions |
+| 9 | `rope_base` — geometric frequency ladder base for TimeRoPE | `models/pragmatiq.py` | `10000.0` | pretrain `config` override `rope_base` | Paper-silent; inherited from LLaMA/GPT-NeoX RoPE; appropriate for log-seconds positions |
 
 ## Serving with Triton
 
@@ -887,10 +886,7 @@ generated dataset: pick a synthetic user in the sidebar and see their **event
 timeline** (recent transactions with amount/merchant), their **embedding
 computed live** via `embed_records` (the raw embedding and its norm — attach
 fine-tuned heads for calibrated fraud/credit/churn scores), and their **ego
-transfer graph** (all transfers in and out of the selected user). For
-per-event explanations, the library ships integrated-gradients attribution in
-[`pragmatiq/inference/explain.py`](pragmatiq/inference/explain.py)
-(`EventAttributor` returns the top-k events behind a prediction).
+transfer graph** (all transfers in and out of the selected user).
 
 ```bash
 pip install -e ".[demo]"

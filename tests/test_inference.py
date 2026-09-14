@@ -15,7 +15,6 @@ from pragmatiq.data.collate import VarlenCollator
 from pragmatiq.data.dataset import ShardDataset
 from pragmatiq.inference.benchmark import benchmark_batch_embed, perf_analyzer_command
 from pragmatiq.inference.embedder import BatchEmbedder
-from pragmatiq.inference.explain import EventAttributor
 from pragmatiq.models.pragmatiq import PragmaModel
 
 
@@ -208,20 +207,6 @@ class TestApiTokenizerCompatibility:
                 seeds=(0,),
                 epochs=1,
             )
-
-
-class TestEventAttributor:
-    def test_topk_events(self, trained) -> None:
-        work, run_dir = trained
-        model = PragmaModel.from_pretrained(run_dir)
-        ds = ShardDataset(work / "tok")
-        batch = VarlenCollator()([ds.get(u) for u in ds.user_ids[:3]])
-        ds.close()
-        attrs = EventAttributor(model, steps=8).attribute(batch, top_k=5)
-        assert len(attrs) == 3
-        for a in attrs:
-            assert len(a.event_indices) <= 5
-            assert len(a.scores) == len(a.event_indices)
 
 
 class TestExport:

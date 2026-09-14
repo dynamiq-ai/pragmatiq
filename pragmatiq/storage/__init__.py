@@ -22,40 +22,23 @@ Filesystem resolution:
     :func:`get_fs`, :func:`is_remote`, :func:`is_local`
 
 Thin ops:
-    :func:`exists`, :func:`makedirs`, :func:`ls`, :func:`remove`,
-    :func:`read_bytes`, :func:`write_bytes`, :func:`read_text`,
-    :func:`write_text`, :func:`open_file`
+    :func:`exists`, :func:`ls`, :func:`remove`, :func:`read_bytes`,
+    :func:`write_bytes`, :func:`read_text`, :func:`write_text`
 
-Cache / local materialisation:
-    :func:`local_path`, :func:`materialize_dir`, :func:`put_dir`
+Local materialisation:
+    :func:`materialize_dir`, :func:`put_dir`
 
 Stage-in / stage-out:
     :func:`staging`, :class:`Stage`
-
-Artifact helpers:
-    :func:`read_json`, :func:`write_json`, :func:`atomic_write`,
-    :func:`pyarrow_filesystem`
 """
 
-from pragmatiq.storage.artifacts import (
-    atomic_write,
-    pyarrow_filesystem,
-    read_json,
-    write_json,
-)
-from pragmatiq.storage.cache import (
-    local_path,
-    materialize_dir,
-    put_dir,
-)
+from pragmatiq.storage.cache import materialize_dir, put_dir
 from pragmatiq.storage.fs import (
     exists,
     get_fs,
     is_local,
     is_remote,
     ls,
-    makedirs,
-    open_file,
     read_bytes,
     read_text,
     remove,
@@ -70,24 +53,16 @@ __all__: list[str] = [
     "is_remote",
     "is_local",
     "exists",
-    "makedirs",
     "ls",
     "remove",
     "read_bytes",
     "write_bytes",
     "read_text",
     "write_text",
-    "open_file",
     # cache.py
-    "local_path",
     "materialize_dir",
     "put_dir",
     # staging.py
     "staging",
     "Stage",
-    # artifacts.py
-    "read_json",
-    "write_json",
-    "atomic_write",
-    "pyarrow_filesystem",
 ]
