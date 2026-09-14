@@ -99,7 +99,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--leg-timeout-min", type=int, default=10,
                     help="Per-leg subprocess timeout in minutes (default: 10)")
     ap.add_argument("--finetune-timeout-min", type=int, default=None,
-                    help="Per-leg timeout in minutes for fine-tune legs (default: 2x --leg-timeout-min)")
+                    help="Per-leg timeout in minutes for fine-tune legs (default: 45)")
     ap.add_argument("--nccl-safe", default="on", choices=["on", "off"],
                     help="'on' (default): NCCL_P2P_DISABLE=1 NCCL_SHM_DISABLE=1 NCCL_IB_DISABLE=1 for "
                          "DDP legs (socket transport; reliable on RunPod, a conservative lower bound "
@@ -209,7 +209,7 @@ def main(argv: list[str] | None = None) -> None:  # noqa: C901 — linear orches
     serving_concurrency = [int(c) for c in args.serving_concurrency.split(",") if c.strip()]
     leg_timeout_sec = args.leg_timeout_min * 60
     finetune_timeout_min = (args.finetune_timeout_min if args.finetune_timeout_min is not None
-                            else args.leg_timeout_min * 2)
+                            else 45)
     run_start = time.time()
     max_runtime_sec = args.max_runtime_min * 60
 

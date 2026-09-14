@@ -78,19 +78,44 @@ class VarlenLayout:
     n_tokens: int
     cos: torch.Tensor | None = None  # RoPE angles [T, head_dim]
     sin: torch.Tensor | None = None
-    flat_idx: torch.Tensor | None = None  # [T] row in the flattened padded block
-    key_pad: torch.Tensor | None = None  # bool [n_seg, max_seqlen], True on real keys
+    # Segments grouped into length buckets for the SDPA fallback (built lazily):
+    # (token_idx, flat_idx, key_pad) per bucket — see ``padded_buckets``.
+    buckets: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] | None = None
 
-    def padded_indices(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(flat_idx, key_pad)`` for the SDPA fallback, computed once per forward."""
-        if self.flat_idx is None or self.key_pad is None:
+    def padded_buckets(self) -> list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+        """Length-bucketed padding plan for the SDPA fallback, computed once per forward.
+
+        Segments are grouped by ``ceil(log2(len))`` so each bucket pads only to its
+        own longest segment: one 6,500-event history no longer forces every other
+        segment in the batch to a 6,500-wide score matrix (that is what made the
+        padded path O(n_seg × max_len²) on heavy books). Each bucket is
+        ``(token_idx, flat_idx, key_pad)``: the flat token rows that belong to the
+        bucket, their destination rows in the bucket's ``[n_seg_b * L_b]`` block,
+        and the ``[n_seg_b, L_b]`` key mask. A batch whose segments all fall in one
+        bucket is the plain padded block.
+        """
+        if self.buckets is None:
             device = self.lengths.device
             n_seg = self.lengths.numel()
             seg_of = torch.repeat_interleave(torch.arange(n_seg, device=device), self.lengths)
             pos_in_seg = torch.arange(self.n_tokens, device=device) - self.cu_seqlens[:-1].long()[seg_of]
-            self.flat_idx = seg_of * self.max_seqlen + pos_in_seg
-            self.key_pad = torch.arange(self.max_seqlen, device=device)[None, :] < self.lengths[:, None]
-        return self.flat_idx, self.key_pad
+            # Bucket id: ceil(log2(len)) (lengths 1..2 → 1, 3..4 → 2, 5..8 → 3, ...).
+            bucket_of_seg = torch.ceil(torch.log2(self.lengths.clamp(min=1).double())).long()
+            buckets: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+            for b in torch.unique(bucket_of_seg).tolist():
+                segs = torch.nonzero(bucket_of_seg == b).flatten()
+                lens_b = self.lengths[segs]
+                L_b = int(lens_b.max())
+                # Dense row within the bucket for each of its segments.
+                row_of_seg = torch.full((n_seg,), -1, dtype=torch.long, device=device)
+                row_of_seg[segs] = torch.arange(segs.numel(), device=device)
+                tok_mask = row_of_seg[seg_of] >= 0
+                token_idx = torch.nonzero(tok_mask).flatten()
+                flat_idx = row_of_seg[seg_of[token_idx]] * L_b + pos_in_seg[token_idx]
+                key_pad = torch.arange(L_b, device=device)[None, :] < lens_b[:, None]
+                buckets.append((token_idx, flat_idx, key_pad))
+            self.buckets = buckets
+        return self.buckets
 
 
 def build_layout(
@@ -167,19 +192,30 @@ def varlen_self_attention(
             stacklevel=2,
         )
 
-    # SDPA fallback: gather segments into a padded [n_seg, H, max_len, hd] block.
-    # index_copy_/index_select (not advanced-index assignment) so the scatter has a
-    # deterministic CUDA implementation; the indices never overlap.
-    flat_idx, key_pad = layout.padded_indices()
-    n_seg, L = layout.lengths.numel(), layout.max_seqlen
-    rows = n_seg * L
-    qb = q.new_zeros(rows, H, hd).index_copy_(0, flat_idx, q).view(n_seg, L, H, hd).permute(0, 2, 1, 3)
-    kb = k.new_zeros(rows, H, hd).index_copy_(0, flat_idx, k).view(n_seg, L, H, hd).permute(0, 2, 1, 3)
-    vb = v.new_zeros(rows, H, hd).index_copy_(0, flat_idx, v).view(n_seg, L, H, hd).permute(0, 2, 1, 3)
-    attn_mask = key_pad[:, None, None, :]  # broadcast over heads, queries
-    out = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=attn_mask, dropout_p=dropout_p)
-    out = out.permute(0, 2, 1, 3).reshape(rows, H, hd)  # [n_seg*max_len, H, hd]
-    return out.index_select(0, flat_idx)
+    # SDPA fallback: gather each length bucket of segments into its own padded
+    # [n_seg_b, H, L_b, hd] block. index_copy_/index_select (not advanced-index
+    # assignment) so the scatter has a deterministic CUDA implementation; the
+    # indices never overlap. Padded keys are masked, so the per-segment result is
+    # independent of which bucket a segment lands in.
+    buckets = layout.padded_buckets()
+    out = q.new_empty(T, H, hd)
+    for token_idx, flat_idx, key_pad in buckets:
+        n_b, L_b = key_pad.shape
+        rows = n_b * L_b
+        if len(buckets) == 1:
+            q_b, k_b, v_b = q, k, v
+        else:
+            q_b, k_b, v_b = (t.index_select(0, token_idx) for t in (q, k, v))
+        qb = q.new_zeros(rows, H, hd).index_copy_(0, flat_idx, q_b).view(n_b, L_b, H, hd).permute(0, 2, 1, 3)
+        kb = k.new_zeros(rows, H, hd).index_copy_(0, flat_idx, k_b).view(n_b, L_b, H, hd).permute(0, 2, 1, 3)
+        vb = v.new_zeros(rows, H, hd).index_copy_(0, flat_idx, v_b).view(n_b, L_b, H, hd).permute(0, 2, 1, 3)
+        attn_mask = key_pad[:, None, None, :]  # broadcast over heads, queries
+        o = F.scaled_dot_product_attention(qb, kb, vb, attn_mask=attn_mask, dropout_p=dropout_p)
+        o = o.permute(0, 2, 1, 3).reshape(rows, H, hd).index_select(0, flat_idx)  # [T_b, H, hd]
+        if len(buckets) == 1:
+            return o
+        out.index_copy_(0, token_idx, o)
+    return out
 
 
 class VarlenAttention(nn.Module):

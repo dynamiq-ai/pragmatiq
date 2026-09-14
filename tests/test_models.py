@@ -401,6 +401,30 @@ class TestAttentionKernel:
         finally:
             torch.use_deterministic_algorithms(prev)
 
+    def test_sdpa_length_buckets_match_single_padded_block(self) -> None:
+        """Mixed segment lengths land in several buckets; the per-segment result must equal
+        a naive per-segment softmax attention (padding is masked, so bucketing is invisible)."""
+        from pragmatiq.models.layers import build_layout, varlen_self_attention
+
+        torch.manual_seed(1)
+        lens = [1, 2, 3, 5, 9, 17, 40, 2, 64, 7]
+        T = sum(lens)
+        q, k, v = (torch.randn(T, 3, 8) for _ in range(3))
+        cu = torch.tensor([0, *torch.cumsum(torch.tensor(lens), 0).tolist()], dtype=torch.int32)
+        layout = build_layout(cu, max(lens), T)
+        buckets = layout.padded_buckets()
+        assert len(buckets) > 1 and sum(b[0].numel() for b in buckets) == T
+        out = varlen_self_attention(q, k, v, cu, max_seqlen=max(lens), layout=layout)
+        ref = torch.empty_like(out)
+        for i in range(len(lens)):
+            s, e = int(cu[i]), int(cu[i + 1])
+            qi, ki, vi = (t[s:e].transpose(0, 1) for t in (q, k, v))  # [H, L, hd]
+            ref[s:e] = torch.nn.functional.scaled_dot_product_attention(qi, ki, vi).transpose(0, 1)
+        assert torch.allclose(out, ref, atol=1e-6)
+        # A batch of equal-ish lengths is one bucket, i.e. the plain padded block.
+        cu1 = torch.tensor([0, 5, 12, 20], dtype=torch.int32)
+        assert len(build_layout(cu1, 8, 20).padded_buckets()) == 1
+
     def test_encoder_layout_hoist_is_bit_exact(self) -> None:
         """One shared VarlenLayout per encoder forward == rebuilding it in every block."""
         from pragmatiq.models.layers import Encoder
