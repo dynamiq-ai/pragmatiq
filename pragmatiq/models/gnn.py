@@ -367,8 +367,12 @@ def aml_results_markdown(res: dict[str, Any]) -> str:
 
 
 def _git_commit() -> str:
+    import os
     import subprocess
 
+    pinned = os.environ.get("PRAGMATIQ_COMMIT", "").strip()
+    if pinned:
+        return pinned  # a git archive on a pod carries no .git; the launcher exports the sha
     try:
         return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True,
                               text=True, timeout=5, check=True).stdout.strip()
@@ -405,7 +409,7 @@ def write_aml_report(
             readme_path = None
         if readme_path and marker in text:
             text = re.sub(
-                re.escape(marker) + r".*?(?=\n## |\Z)",
+                re.escape(marker) + r".*?(?=\n<!-- |\n\*\*|\n## |\Z)",
                 marker + "\n\n" + md + "\n",
                 text, count=1, flags=re.S,
             )

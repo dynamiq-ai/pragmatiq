@@ -543,6 +543,6 @@ def write_readme_block(json_path: str | Path, readme_path: str | Path) -> bool:
     if README_MARKER not in text:
         return False
     block = README_MARKER + "\n\n" + render_readme_block(json_path)
-    new = re.sub(re.escape(README_MARKER) + r".*?(?=\n## |\Z)", lambda _m: block, text, count=1, flags=re.S)
+    new = re.sub(re.escape(README_MARKER) + r".*?(?=\n<!-- |\n\*\*|\n## |\Z)", lambda _m: block, text, count=1, flags=re.S)
     readme.write_text(new)
     return True

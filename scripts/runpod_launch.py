@@ -111,6 +111,9 @@ PIPELINE = (
     # probe, embedding pass) don't oversubscribe a many-core host.
     "export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 NUMEXPR_NUM_THREADS=8\n"
     "export TOKENIZERS_PARALLELISM=false\n"
+    # The synced tree is a git archive (no .git): hand the result writers the sha
+    # for their provenance stamps.
+    "export PRAGMATIQ_COMMIT={commit}\n"
     f"python -X faulthandler -u {PIPELINE_SCRIPT} {{args}}\n"
 )
 
@@ -125,7 +128,15 @@ def pipeline_command(remote_args: str = "", devices_sweep: str | None = None,
         parts += ["--devices-sweep", devices_sweep]
     if remote_args.strip():
         parts.append(remote_args.strip())
-    return PIPELINE.format(args=" ".join(parts))
+    return PIPELINE.format(args=" ".join(parts), commit=_head_sha())
+
+
+def _head_sha() -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT,
+                              capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+    except Exception:
+        return "unknown"
 
 
 def _api_key() -> str:
@@ -548,7 +559,9 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     if args.remote_script:
         remote_path = f"/workspace/pragmatiq/{args.remote_script}"
         extra = f" {args.remote_args}" if args.remote_args.strip() else ""
-        run_command = f"python -X faulthandler -u {remote_path}{extra}"
+        run_command = (f"cd /workspace/pragmatiq && export PRAGMATIQ_COMMIT={_head_sha()} "
+                       f"OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false && "
+                       f"python -X faulthandler -u {remote_path}{extra}")
     else:
         run_command = pipeline_command(args.remote_args, args.devices_sweep, args.remote_out)
 
@@ -716,7 +729,9 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         if args.remote_script:
             remote_path = f"/workspace/pragmatiq/{args.remote_script}"
             extra = f" {args.remote_args}" if args.remote_args.strip() else ""
-            run_cmd = f"python -X faulthandler -u {remote_path}{extra}"
+            run_cmd = (f"cd /workspace/pragmatiq && export PRAGMATIQ_COMMIT={_head_sha()} "
+                       f"OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false && "
+                       f"python -X faulthandler -u {remote_path}{extra}")
         else:
             run_cmd = pipeline_command(args.remote_args, args.devices_sweep, args.remote_out)
 

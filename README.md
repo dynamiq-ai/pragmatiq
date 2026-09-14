@@ -283,15 +283,13 @@ paths, not this user-embedding probe.
 
 <!-- MULTITASK_PROBE_RESULTS -->
 
-| task | probe AUC | raw-count baseline | probe - baseline | prevalence |
-| --- | --- | --- | --- | --- |
-| default_12m | 0.770 | 0.543 | +0.228 | 0.03 |
-| churn_6m | 0.744 | 0.609 | +0.135 | 0.12 |
-| ltv_positive | 0.828 | 0.667 | +0.161 | 0.80 |
+| task | probe ROC-AUC | baseline ROC-AUC | probe PR-AUC | baseline PR-AUC | prevalence |
+| --- | --- | --- | --- | --- | --- |
+| default_12m | 0.719 | 0.487 | 0.141 | 0.028 | 0.03 |
+| churn_6m | 0.692 | 0.598 | 0.302 | 0.165 | 0.12 |
+| ltv_positive | 0.795 | 0.693 | 0.900 | 0.851 | 0.73 |
 
-<sub>Illustrative synthetic-benchmark run (reproducible config): n_users=50000,
-model=small, steps=2000, seed=0. Treat these as a pipeline check, not a
-performance claim.</sub>
+<sub>provenance: n_users=50000, model=small, steps=2000, seed=0, commit=cc48149</sub>
 
 **Event staleness.** In production the event feed lags: the embedding you score
 at 09:00 was built from events that stopped arriving some time earlier. The
