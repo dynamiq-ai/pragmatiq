@@ -294,13 +294,14 @@ class RawCountBaseline:
         """
         if cutoffs:
             feats = []
-            for uid in progress(user_ids, total=len(user_ids),
-                                desc="baseline features (truncated)", unit="user"):
-                rec = dataset.get(uid)
-                if uid in cutoffs:
-                    rec = truncate_record(rec, cutoffs[uid])
-                feats.append([rec.n_events, rec.n_tokens, int(rec.prof_key_ids.size),
-                              np.log1p(rec.n_events)])
+            chunk = 512  # get_many decodes each shard once per chunk instead of once per user
+            for start in progress(range(0, len(user_ids), chunk), total=(len(user_ids) + chunk - 1) // chunk,
+                                  desc="baseline features (truncated)", unit="chunk"):
+                for rec in dataset.get_many(user_ids[start:start + chunk]):
+                    if rec.user_id in cutoffs:
+                        rec = truncate_record(rec, cutoffs[rec.user_id])
+                    feats.append([rec.n_events, rec.n_tokens, int(rec.prof_key_ids.size),
+                                  np.log1p(rec.n_events)])
             return np.asarray(feats, dtype=np.float64)
         idx = dataset.index
         pos = {u: i for i, u in enumerate(idx.order)}
