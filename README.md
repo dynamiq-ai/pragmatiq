@@ -783,14 +783,16 @@ discriminative signal is the multi-hop layering chain in that ledger.
 
 **The gated claim — relational recovery.** A GraphSAGE over the
 transfer graph recovers money-mule rings that a probe on the isolated per-user
-embedding cannot: `(c) 0.670 ≫ (a) 0.498`, so the AML signal lives in the
-multi-hop transfer structure an isolated embedding misses. Message passing adds
-over the same features without a graph (`(c) 0.670 > (d) 0.604`). This is what
-`gate_6` gates, at both CI and full scale.
+embedding cannot: `(c) 0.622 ≫ (a) 0.480` on the current book (five seeds, full
+scale), so the AML signal lives in the multi-hop transfer structure an isolated
+embedding misses. This is what `gate_6` gates, at both CI and full scale, by more
+than the cross-seed noise.
 
-**Reported, not gated — the honest limitation.** The learned per-user embedding
-adds only a little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does
-**not** beat hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated
+**Reported, not gated.** Message passing adds over the same hand-crafted features
+without a graph (`(c) 0.622 > (d) 0.597`), but by less than the per-seed spread
+(`± 0.043`), so the claim is reported rather than gated. The learned per-user
+embedding adds a little over the isolated probe (`(b) 0.572 > (a) 0.480`) and does
+**not** beat hand-crafted features (`(b) 0.572 < (c) 0.622`). The isolated
 embedding sits near chance, so the model does not capture the multi-hop laundering
 signal in the per-user representation; recovering it in a learned representation
 is the **open challenge**. This is consistent with the PRAGMA paper's own
@@ -828,16 +830,16 @@ CI-scale run can never masquerade as a full-scale result.
 
 | setup | ROC-AUC (mean ± std over seeds) |
 | --- | --- |
-| (a) probe on isolated pragmatiq embeddings | 0.498 ± 0.010 |
-| (b) GraphSAGE over transfers + pragmatiq features | 0.554 ± 0.026 |
-| (c) GraphSAGE + hand-crafted node features | 0.670 ± 0.014 |
-| (d) control: logistic regression on the same hand-crafted features, no graph | 0.604 ± 0.028 |
+| (a) probe on isolated pragmatiq embeddings | 0.480 ± 0.021 |
+| (b) GraphSAGE over transfers + pragmatiq features | 0.572 ± 0.020 |
+| (c) GraphSAGE + hand-crafted node features | 0.622 ± 0.043 |
+| (d) control: logistic regression on the same hand-crafted features, no graph | 0.597 ± 0.011 |
 
-**Relational recovery (gated): True** — a GraphSAGE over the transfer graph recovers money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = True), so the AML signal lives in the multi-hop transfer structure an isolated per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, so the signal is the multi-hop layering chain, not 1-hop degree, and message passing adds over the same features without a graph ((c) > (d) = True). The gate requires both.
+**Relational recovery (gated): True** — a GraphSAGE over the transfer graph recovers money-mule rings that a probe on isolated pragmatiq embeddings cannot ((c) > (a) = True, by more than the cross-seed noise), so the AML signal lives in the multi-hop transfer structure an isolated per-user embedding misses. Money mules are degree- and volume-matched to ordinary accounts, so the signal is the multi-hop layering chain, not 1-hop degree.
 
-**Reported, not gated:** the learned per-user embedding adds a little over the isolated probe ((b) > (a) = True) but does not beat hand-crafted features ((b) > (c) = False). The isolated embedding sits near chance, so on this synthetic book the model does not capture the multi-hop laundering signal on its own — recovering it in a learned per-user representation is the open challenge (see MODEL_CARD.md).
+**Reported, not gated:** message passing over the same hand-crafted features beats the no-graph control by more than the cross-seed noise ((c) > (d) = False); the learned per-user embedding adds a little over the isolated probe ((b) > (a) = True) but does not beat hand-crafted features ((b) > (c) = False). The isolated embedding sits near chance, so on this synthetic book the model does not capture the multi-hop laundering signal on its own — recovering it in a learned per-user representation is the open challenge (see MODEL_CARD.md).
 
-<sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2], epochs=150, commit=a263737</sub>
+<sub>provenance: n_nodes=12000, n_edges=344388, n_mules=607, seeds=[0, 1, 2, 3, 4], epochs=150, commit=cbe83c6</sub>
 
 ## Synthetic data realism
 

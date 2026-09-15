@@ -138,6 +138,11 @@ states the pre-2.0 policy that allows this.
   fine-tune without flash-attn ran at 1% utilisation); `attention_backend()` /
   `flash_available()` report the active kernel; `PRAGMATIQ_DISABLE_FLASH=1`
   forces SDPA.
+- **AML gate (gate 6)** gates relational recovery only — GraphSAGE + hand-crafted
+  features (c) beating the isolated probe (a) beyond the cross-seed noise. Whether
+  message passing adds over the no-graph control (c > d) is reported, not gated:
+  on generator v2 at full scale the margin is 0.025 with a per-seed spread of 0.043
+  (five seeds). The README/notebook AML table is regenerated on generator v2.
 - **Trainer metrics** log `tokens_per_sec_window` (the rate over the last log
   interval) next to the cumulative `tokens_per_sec`; the GPU validation sweep
   reports the steady-state median of the window rate.

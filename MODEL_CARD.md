@@ -159,15 +159,16 @@ With it on:
   hand-crafted features, no graph, `0.604`. The synthetic mules are multi-hop
   layered laundering chains: their amounts and counterparty degree are drawn to
   *match ordinary accounts*, so 1-hop degree is not a trivial oracle ((d) is only
-  moderate at `0.604`), and the discriminative signal is the multi-hop layering
+  moderate at `0.597`), and the discriminative signal is the multi-hop layering
   chain. The **gated claim** is *relational recovery*: a GraphSAGE over the
   transfer graph recovers money-mule rings a probe on the isolated per-user
-  embedding cannot — `(c) 0.670 ≫ (a) 0.498` — so the AML signal lives in the
-  multi-hop transfer structure an isolated embedding misses, and message passing
-  adds over the same features without a graph (`(c) > (d)`). The **honest
-  limitation, reported not gated:** the learned per-user embedding adds only a
-  little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does **not** beat
-  hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated embedding sits
+  embedding cannot — `(c) 0.622 ≫ (a) 0.480` (five seeds, full scale) — so the AML
+  signal lives in the multi-hop transfer structure an isolated embedding misses.
+  Message passing adds over the same features without a graph (`(c) 0.622 >
+  (d) 0.597`) by less than the per-seed spread, so that is reported, not gated.
+  The **honest limitation, reported not gated:** the learned per-user embedding
+  adds only a little over the isolated probe (`(b) 0.572 > (a) 0.480`) and does
+  **not** beat hand-crafted features (`(b) 0.572 < (c) 0.622`). The isolated embedding sits
   near chance, so the model does not capture the multi-hop laundering signal in
   the per-user representation; recovering it in a learned representation is the
   **open challenge**. This is consistent with the PRAGMA paper's own observation

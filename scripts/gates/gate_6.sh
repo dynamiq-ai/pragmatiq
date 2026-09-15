@@ -76,7 +76,7 @@ print(json.dumps(v))
 # structure recovers AML signal an isolated per-user embedding misses (c > a) —
 # and message passing adds over the same features without a graph (c > d). The
 # verdict's `pass` is exactly this mechanism.
-assert v["pass"], "expected relational recovery (c > a) and message passing to add (c > d)"
+assert v["pass"], "expected relational recovery: GraphSAGE + hand-crafted (c) > isolated probe (a) beyond the cross-seed noise"
 # Reported, NOT gated: the learned per-user embedding adds a little over the
 # isolated probe (b > a) but does not beat hand-crafted features (b < c) on this
 # synthetic book — the isolated embedding is near chance, so it does not capture
