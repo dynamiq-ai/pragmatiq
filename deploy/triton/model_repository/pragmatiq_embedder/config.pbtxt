@@ -32,14 +32,13 @@ output [
 
 instance_group [
   {
-    # CPU-first (global rule 5): the stack must boot on a CPU-only host, so the
-    # committed default is KIND_CPU. The python backend selects its compute
-    # device in 1/model.py: it runs on CUDA when PRAGMATIQ_SERVE_GPU=1 is set in
-    # the container environment and a GPU is visible (the path the deploy script
-    # takes when nvidia-smi is present), and on CPU otherwise. Setting kind to
-    # KIND_GPU here is also honored and pins each instance to its assigned GPU.
+    # GPU-first: each instance is pinned to its assigned GPU and the python
+    # backend runs the forward in bf16 on it (flash varlen attention). For a
+    # CPU-only host use deploy/triton/config.cpu.pbtxt (KIND_CPU) — the deploy
+    # script and deploy/docker-compose.cpu.yaml mount it over this file — or
+    # set PRAGMATIQ_SERVE_CPU=1 in the container environment.
     count: 2
-    kind: KIND_CPU
+    kind: KIND_GPU
   }
 ]
 

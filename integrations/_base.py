@@ -51,14 +51,10 @@ class Artifact:
 # ---------------------------------------------------------------------------
 
 
-class MissingExtraError(RuntimeError):
-    """Raised when a live cloud operation is attempted without the required SDK.
-
-    Example message::
-
-        boto3 is required for SageMaker live operations.
-        Install it with: pip install boto3
-    """
+# One error class for "an optional package is missing" across the library and
+# the adapters: pragmatiq.core.errors.MissingExtraError also subclasses
+# ImportError, so ``except ImportError`` handlers keep working.
+from pragmatiq.core.errors import MissingExtraError  # noqa: E402
 
 
 def _require(package: str, install_hint: str) -> None:

@@ -27,17 +27,17 @@ def _param_info(fn: Any) -> dict[str, inspect.Parameter]:
 #
 #   @classmethod
 #   def from_pretrained(
-#       cls, run: str | Path, device: str = "cpu", checkpoint: str = "last.pt"
+#       cls, run: str | Path, device: str = "auto", checkpoint: str = "last.pt"
 #   ) -> PragmaModel:
 #
 # Pinned required params: ["run"]  (cls is implicit for classmethod)
 # Pinned optional params: ["device", "checkpoint"]
-# Pinned defaults: device="cpu", checkpoint="last.pt"
+# Pinned defaults: device="auto" (1.1.0: GPU-first — CUDA when available), checkpoint="last.pt"
 
 GOLDEN_FROM_PRETRAINED_REQUIRED: list[str] = ["run"]
 GOLDEN_FROM_PRETRAINED_OPTIONAL: list[str] = ["device", "checkpoint"]
 GOLDEN_FROM_PRETRAINED_DEFAULTS: dict[str, Any] = {
-    "device": "cpu",
+    "device": "auto",
     "checkpoint": "last.pt",
 }
 
@@ -115,11 +115,11 @@ def test_from_pretrained_defaults() -> None:
 #
 # Golden signature (read from pragmatiq/models/pragmatiq.py on contract date):
 #
-#   @torch.no_grad()
-#   def embed_records(self, records: list[dict[str, Any]]) -> np.ndarray:
+#   def embed_records(self, records: list[dict[str, Any]], precision: str = "auto",
+#                     token_budget: int | None = None) -> np.ndarray:
 #
 # Pinned required params: ["records"]  (self is implicit)
-# Pinned optional params: []
+# Pinned optional params: [] (precision / token_budget were added in 1.1.0; additive)
 # Return type annotation: np.ndarray
 
 GOLDEN_EMBED_RECORDS_REQUIRED: list[str] = ["records"]

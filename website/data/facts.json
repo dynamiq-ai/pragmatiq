@@ -16,6 +16,11 @@
       "summary": "Pretrain a pragmatiq model on tokenized shards."
     },
     {
+      "name": "pretrain_plan",
+      "signature": "pretrain_plan(shard_dir: 'str | Path', model_size: 'str' = 'small', config: 'str | Path | dict[str, Any] | None' = None, run_name: 'str' = 'plan', runs_root: 'str | Path' = 'runs', resume: 'str | None' = None, **overrides: 'Any') -> 'dict[str, Any]'",
+      "summary": "Resolve a pretrain configuration without training (``pretrain --show-config``)."
+    },
+    {
       "name": "finetune",
       "signature": "finetune(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', config: 'str | Path | dict[str, Any] | None' = None, device: 'str' = 'auto', **overrides: 'Any') -> 'dict[str, Any]'",
       "summary": "LoRA fine-tune a trained model's adapters + head on a label table."
@@ -27,7 +32,7 @@
     },
     {
       "name": "probe",
-      "signature": "probe(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', device: 'str' = 'auto', token_budget: 'int' = 16384, seed: 'int' = 0, with_baseline: 'bool' = True, probe_model: 'str' = 'gbdt') -> 'dict[str, Any]'",
+      "signature": "probe(shard_dir: 'str | Path', run: 'str | Path', label_path: 'str | Path', device: 'str' = 'auto', token_budget: 'int' = 16384, seed: 'int' = 0, with_baseline: 'bool' = True, probe_model: 'str' = 'gbdt', staleness_window: 'str | int | None' = None) -> 'dict[str, Any]'",
       "summary": "Probe a trained model on a label table; compares to a raw-count baseline."
     },
     {
@@ -36,14 +41,49 @@
       "summary": "Evaluate communication-campaign uplift on a trained model."
     },
     {
+      "name": "export",
+      "signature": "export(run: 'str | Path', shard_dir: 'str | Path', out: 'str | Path' = 'pragmatiq_embedder.onnx', device: 'str' = 'auto') -> 'dict[str, Any]'",
+      "summary": "Export the dense ONNX reformulation of the model from one example user."
+    },
+    {
+      "name": "benchmark",
+      "signature": "benchmark(run: 'str | Path', shard_dir: 'str | Path', device: 'str' = 'auto', out: 'str | Path' = 'benchmark_results.md', max_users: 'int | None' = None, precision: 'str' = 'auto') -> 'dict[str, Any]'",
+      "summary": "Benchmark batch-embedding throughput and write a results markdown file."
+    },
+    {
       "name": "gnn",
       "signature": "gnn(shard_dir: 'str | Path', run: 'str | Path', transfers_path: 'str | Path', aml_label_path: 'str | Path', seeds: 'tuple[int, ...]' = (0, 1, 2), device: 'str' = 'auto', epochs: 'int' = 150) -> 'dict[str, Any]'",
       "summary": "Run the four-arm AML GNN ablation."
     },
     {
+      "name": "validate",
+      "signature": "validate(data_dir: 'str | Path') -> 'dict[str, Any]'",
+      "summary": "Validate a raw dataset against the data contract."
+    },
+    {
       "name": "quickstart",
       "signature": "quickstart(out: 'str | Path' = 'runs/quickstart', n_users: 'int' = 50000, seed: 'int' = 0, model_size: 'str' = 'nano', max_steps: 'int' = 400, n_workers: 'int' = 0) -> 'dict[str, Any]'",
       "summary": "End-to-end smoke: synth \u2192 tokenize \u2192 nano pretrain \u2192 probe."
+    },
+    {
+      "name": "runs_list",
+      "signature": "runs_list(runs_root: 'str | Path' = 'runs') -> 'list[dict[str, Any]]'",
+      "summary": "List runs under ``runs_root`` with their last logged step/loss/metrics."
+    },
+    {
+      "name": "runs_compare",
+      "signature": "runs_compare(names: 'list[str]', runs_root: 'str | Path' = 'runs') -> 'list[dict[str, Any]]'",
+      "summary": "Compare several runs' last metrics side by side (missing runs flagged)."
+    },
+    {
+      "name": "calibrate",
+      "signature": "calibrate(stats: 'str | Path', config: 'str | Path | dict[str, Any] | None' = None, out: 'str | Path | None' = None) -> 'dict[str, Any]'",
+      "summary": "Fit generator priors to bank-shareable aggregate statistics."
+    },
+    {
+      "name": "info",
+      "signature": "info() -> 'dict[str, Any]'",
+      "summary": "Describe this installation: versions, devices, kernels, extras and env vars."
     }
   ],
   "gates": [
@@ -170,6 +210,12 @@
       "name": "max_numeric_sample",
       "required": false,
       "type": "int"
+    },
+    {
+      "default": 1000000,
+      "name": "max_counter_distinct",
+      "required": false,
+      "type": "int | None"
     },
     {
       "default": null,
@@ -392,6 +438,18 @@
     {
       "default": 1,
       "name": "num_nodes",
+      "required": false,
+      "type": "int"
+    },
+    {
+      "default": "auto",
+      "name": "accelerator",
+      "required": false,
+      "type": "str"
+    },
+    {
+      "default": 2,
+      "name": "prefetch_batches",
       "required": false,
       "type": "int"
     }

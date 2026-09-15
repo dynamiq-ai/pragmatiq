@@ -58,10 +58,13 @@ def _defaults(fn: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# A. All 15 public functions must be present
+# A. All public functions must be present (15 frozen at 1.0.0 + pretrain_plan and
+# info added in 1.1.0; the set equals pragmatiq.api.__all__)
 # ---------------------------------------------------------------------------
 
 GOLDEN_FUNCTION_NAMES = frozenset({
+    "pretrain_plan",  # 1.1.0: resolve a pretrain config without training (--show-config)
+    "info",  # 1.1.0: installation / device / extras report (pragmatiq info)
     "synthesize",
     "tokenize",
     "pretrain",
@@ -81,9 +84,14 @@ GOLDEN_FUNCTION_NAMES = frozenset({
 
 
 def test_all_public_functions_present() -> None:
-    """All 15 pinned public functions must be importable from pragmatiq.api."""
+    """All pinned public functions must be importable from pragmatiq.api."""
     missing = GOLDEN_FUNCTION_NAMES - set(dir(api_module))
     assert not missing, f"Missing public API functions: {sorted(missing)}"
+
+
+def test_dunder_all_matches_golden() -> None:
+    """``pragmatiq.api.__all__`` is the documented surface and must equal the golden set."""
+    assert set(api_module.__all__) == GOLDEN_FUNCTION_NAMES
 
 
 def test_all_public_functions_are_callable() -> None:
@@ -124,6 +132,8 @@ GOLDEN_REQUIRED_PARAMS: dict[str, list[str]] = {
     "runs_list": [],
     "runs_compare": ["names"],
     "calibrate": ["stats"],
+    "pretrain_plan": ["shard_dir"],  # 1.1.0
+    "info": [],  # 1.1.0
 }
 
 # Pinned optional-parameter names (order-sensitive list; excludes **overrides)
@@ -143,6 +153,8 @@ GOLDEN_OPTIONAL_PARAMS: dict[str, list[str]] = {
     "runs_list": ["runs_root"],
     "runs_compare": ["runs_root"],
     "calibrate": ["config", "out"],
+    "pretrain_plan": ["model_size", "config", "run_name", "runs_root", "resume"],  # 1.1.0
+    "info": [],  # 1.1.0
 }
 
 # Pinned default values for optional parameters
@@ -160,8 +172,10 @@ GOLDEN_DEFAULTS: dict[str, dict[str, Any]] = {
     "probe": {"device": "auto", "token_budget": 16_384, "seed": 0,
               "with_baseline": True, "probe_model": "gbdt"},
     "uplift": {"device": "auto", "token_budget": 16_384, "seed": 0, "learner": "t"},
-    "export": {"out": "pragmatiq_embedder.onnx", "device": "cpu"},
-    "benchmark": {"device": "auto", "out": "deploy/benchmarks/RESULTS.md", "max_users": None},
+    # 1.1.0: export accepts any device (the graph is built on CPU regardless) and the
+    # benchmark writes next to the caller instead of into the repo's deploy/ tree.
+    "export": {"out": "pragmatiq_embedder.onnx", "device": "auto"},
+    "benchmark": {"device": "auto", "out": "benchmark_results.md", "max_users": None},
     "gnn": {"seeds": (0, 1, 2), "device": "auto", "epochs": 150},
     "validate": {},
     "quickstart": {"out": "runs/quickstart", "n_users": 50_000, "seed": 0,
@@ -169,6 +183,10 @@ GOLDEN_DEFAULTS: dict[str, dict[str, Any]] = {
     "runs_list": {"runs_root": "runs"},
     "runs_compare": {"runs_root": "runs"},
     "calibrate": {"config": None, "out": None},
+    # 1.1.0
+    "pretrain_plan": {"model_size": "small", "config": None, "run_name": "plan",
+                      "runs_root": "runs", "resume": None},
+    "info": {},
 }
 
 

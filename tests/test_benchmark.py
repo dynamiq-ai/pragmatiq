@@ -27,7 +27,7 @@ def test_cost_estimate_cpu_vs_cuda_and_nan_guard() -> None:
 
 def test_write_results_renders_table_and_attribution(tmp_path) -> None:
     out = write_results(
-        {"device": "cpu", "users_per_sec": 12.3, "tokens_per_sec": 45678,
+        {"device": "cpu", "precision": "fp32", "users_per_sec": 12.3, "tokens_per_sec": 45678,
          "usd_per_million_users": 2.26},
         tmp_path / "RESULTS.md",
     )

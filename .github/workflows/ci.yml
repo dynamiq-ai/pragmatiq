@@ -53,7 +53,7 @@ jobs:
 
   tests:
     # The full test suite — the `quality` job above runs only a fast smoke subset,
-    # so unit tests for finetuner / uplift / multitask / inference would otherwise
+    # so unit tests for finetuner / uplift / inference would otherwise
     # never run in CI. This job closes that coverage gap.
     # Install .[dev,full] so lightning/torch-geometric/matplotlib/transformers/etc.
     # are present and the 385-test suite (which exercises those paths) stays green.
@@ -71,7 +71,7 @@ jobs:
           pip install torch --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev,full]"
       - name: Full pytest
-        run: pytest tests/ -q --durations=15
+        run: pytest tests/ -q --durations=15 -m "not gpu"
 
   serve-slim:
     # Prove that `pip install pragmatiq[serve]` is genuinely slim: no lightning,
@@ -200,6 +200,10 @@ jobs:
         run: bash scripts/gates/gate_integrations.sh
       - name: BYOC hardening
         run: bash scripts/gates/gate_10_byoc.sh
+      - name: Slim serve install
+        run: bash scripts/gates/gate_serve_slim.sh
+      - name: Storage backends
+        run: bash scripts/gates/gate_storage.sh
 
   supply-chain:
     runs-on: ubuntu-latest

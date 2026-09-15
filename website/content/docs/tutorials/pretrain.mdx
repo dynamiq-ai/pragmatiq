@@ -34,8 +34,10 @@ print(s["last_metrics"])
 </Tab>
 </Tabs>
 
-The trainer auto-detects CUDA (bf16-mixed on GPU, fp32 on CPU) — the same command on both.
-A one-line heartbeat reports `step, loss, mlm_acc, tokens/s, ETA`.
+The trainer auto-detects CUDA (bf16-mixed on GPU, fp32 on CPU) — the same command on both;
+`pragmatiq pretrain` defaults to `--config auto`, and `--show-config` prints the resolved
+plan without training. Batches are collated on a prefetch thread so the GPU never waits on
+the host. A one-line heartbeat reports `step, loss, mlm_acc, tokens/s, ETA`.
 
 </Step>
 

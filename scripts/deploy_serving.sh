@@ -14,7 +14,8 @@
 # The default matches `pragmatiq quickstart` (out=runs/quickstart), which lays out a
 # self-contained workspace and writes the run under <out>/runs/<name>.
 #
-# Requires docker; uses the host GPU automatically when nvidia-smi is present.
+# Requires docker; serves on the host GPU when nvidia-smi is present (GPU-first), and
+# falls back to the CPU Triton config (deploy/triton/config.cpu.pbtxt) otherwise.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO_ROOT="$(pwd)"
@@ -52,11 +53,16 @@ if [ "$VARIANT" = "nemotron" ]; then EXTRAS="nemotron"; TAG="nemotron"; fi
 IMAGE="pragmatiq-triton:${TAG}"
 
 GPU_FLAG=""
-GPU_ENV=""
+CPU_MOUNT=""
+CPU_ENV=""
 if command -v nvidia-smi >/dev/null 2>&1; then
   GPU_FLAG="--gpus all"
-  GPU_ENV="-e PRAGMATIQ_SERVE_GPU=1"
-  echo "GPU detected → serving on CUDA"
+  echo "GPU detected → serving on CUDA (bf16)"
+else
+  # No GPU: overlay the KIND_CPU Triton config and pin the backend to the CPU.
+  CPU_MOUNT="-v ${REPO_ROOT}/deploy/triton/config.cpu.pbtxt:/models/model_repository/pragmatiq_embedder/config.pbtxt:ro"
+  CPU_ENV="-e PRAGMATIQ_SERVE_CPU=1"
+  echo "no GPU detected → serving on CPU (fp32)"
 fi
 
 echo "=== building $IMAGE (EXTRAS='${EXTRAS}') ==="
@@ -68,9 +74,10 @@ docker rm -f "$NAME" >/dev/null 2>&1 || true
 
 echo "=== starting tritonserver ($NAME) ==="
 # shellcheck disable=SC2086
-docker run -d --rm --name "$NAME" $GPU_FLAG $GPU_ENV \
+docker run -d --rm --name "$NAME" $GPU_FLAG $CPU_ENV \
   -p "${PORT}:8000" -p "${METRICS_PORT}:8002" --shm-size 1g \
   -v "${REPO_ROOT}/deploy/triton/model_repository:/models/model_repository:ro" \
+  $CPU_MOUNT \
   -v "${RUN_ABS}:/models/run:ro" \
   "$IMAGE" \
   tritonserver --model-repository=/models/model_repository --metrics-port=8002 >/dev/null

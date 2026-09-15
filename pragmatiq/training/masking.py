@@ -84,7 +84,8 @@ class MaskingStrategy:
         user_of_token = batch.user_of_event[batch.event_of_token]  # [T]
         # encode (user, key) into a single id to sample uniquely per pair
         key_ids = batch.key_ids
-        pair = user_of_token.to(torch.int64) * (int(key_ids.max().item()) + 1 if T else 1) + key_ids
+        # (key_ids.max() + 1) stays a device tensor: no host sync per micro-batch.
+        pair = user_of_token.to(torch.int64) * ((key_ids.max() + 1) if T else 1) + key_ids
         uniq, inv = torch.unique(pair, return_inverse=True)
         pair_sel = rand(uniq.numel()) < self.p_key
         key_sel = pair_sel[inv]

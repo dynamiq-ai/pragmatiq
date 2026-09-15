@@ -28,7 +28,7 @@ from typing import Any, TypeVar
 import numpy as np
 import torch
 
-from .tokenizer import TokenizedRecord, truncate_record
+from .tokenizer import TokenizedRecord, cap_events, truncate_record
 
 _T = TypeVar("_T")
 
@@ -78,6 +78,13 @@ class PackedBatch:
     is_text: torch.Tensor = field(default_factory=lambda: torch.zeros(0, dtype=torch.bool))
     feed_text: torch.Tensor = field(default_factory=lambda: torch.zeros(0, dtype=torch.bool))
     text_values: list[str] = field(default_factory=list)
+    # Longest segment each encoder will see, INCLUDING its [EVT]/[USR] prefix
+    # slot, computed on the host by the collator so the model never has to sync
+    # the device to learn the padded-block width. None for hand-built batches
+    # (the model then falls back to a device max()).
+    max_len_event: int | None = None
+    max_len_history: int | None = None
+    max_len_profile: int | None = None
 
     @property
     def n_users(self) -> int:
@@ -91,13 +98,25 @@ class PackedBatch:
     def n_tokens(self) -> int:
         return int(self.key_ids.numel())
 
-    def to(self, device: torch.device | str) -> PackedBatch:
-        """Move all tensors to ``device`` (lists are left as-is)."""
+    def to(self, device: torch.device | str, non_blocking: bool = False) -> PackedBatch:
+        """Move all tensors to ``device`` (lists and ints are left as-is).
+
+        ``non_blocking=True`` overlaps the host→device copy with compute when the
+        source tensors are pinned (see :meth:`pin_memory`); it is a no-op otherwise.
+        """
         moved: dict[str, Any] = {
-            f: (v.to(device) if isinstance(v, torch.Tensor) else v)
+            f: (v.to(device, non_blocking=non_blocking) if isinstance(v, torch.Tensor) else v)
             for f, v in self.__dict__.items()
         }
         return PackedBatch(**moved)
+
+    def pin_memory(self) -> PackedBatch:
+        """Copy every tensor into page-locked host memory (for async H2D copies)."""
+        pinned: dict[str, Any] = {
+            f: (v.pin_memory() if isinstance(v, torch.Tensor) else v)
+            for f, v in self.__dict__.items()
+        }
+        return PackedBatch(**pinned)
 
     def token_budget(self) -> int:
         """Total tokens (events + profile) — the dynamic-batch budget metric."""
@@ -164,13 +183,21 @@ class VarlenCollator:
     """Collates a list of :class:`TokenizedRecord` into a :class:`PackedBatch`.
 
     No padding anywhere: arrays are concatenated and ``cu_seqlens`` carry the
-    structure. The collator is pure/stateless, so it is safe across workers.
+    structure. ``max_events`` applies the per-user event cap (the most recent
+    events; :func:`cap_events`) to every record — after eval-point truncation in
+    :class:`TruncatingCollator`. The collator holds no other state, so it is safe
+    across workers.
     """
+
+    def __init__(self, max_events: int | None = None) -> None:
+        self.max_events = max_events
 
     def __call__(self, records: list[TokenizedRecord]) -> PackedBatch:
         """Pack ``records`` (one user each) into a single batch."""
         if not records:
             raise ValueError("cannot collate an empty record list")
+        if self.max_events is not None:
+            records = [cap_events(r, self.max_events) for r in records]
 
         key_ids, value_ids, positions, event_of_token = [], [], [], []
         is_text_parts: list[np.ndarray] = []
@@ -181,11 +208,13 @@ class VarlenCollator:
         hist_lens: list[int] = []  # events per user (for cu_seqlens_history)
 
         p_key, p_val, p_pos, item_of_ptok = [], [], [], []
-        p_tlog, prof_item_lens, prof_per_user, user_of_pitem = [], [], [], []
+        p_tlog, prof_per_user, user_of_pitem = [], [], []
+        prof_item_lens: list[int] = []  # tokens per profile item (cu_seqlens_profile_item)
 
         global_event = 0
         global_pitem = 0
         n_events_per_user = []
+        prof_tokens_per_user: list[int] = []
 
         for u, rec in enumerate(records):
             n_ev = rec.n_events
@@ -200,16 +229,26 @@ class VarlenCollator:
                 rec_text_values: list[str] = []
             else:
                 rec_text_values = list(rec.text_values)
-            for e in range(n_ev):
-                lo, hi = int(rec.event_offsets[e]), int(rec.event_offsets[e + 1])
-                ntok = hi - lo
-                evt_lens.append(ntok)
-                key_ids.append(rec.key_ids[lo:hi])
-                value_ids.append(rec.value_ids[lo:hi])
-                positions.append(rec.positions[lo:hi])
-                is_text_parts.append(it_full[lo:hi])
-                event_of_token.append(np.full(ntok, global_event, dtype=np.int64))
-                global_event += 1
+            # event_offsets is a CSR over the token arrays (0 … n_tokens), so the
+            # per-event slices concatenate back to the whole arrays: append them
+            # once and derive the event ids with one repeat instead of a Python
+            # loop per event.
+            offsets = np.asarray(rec.event_offsets, dtype=np.int64)
+            if offsets.size != n_ev + 1 or (offsets.size and (offsets[0] != 0 or offsets[-1] != rec.key_ids.size)):
+                raise ValueError(
+                    f"record {rec.user_id!r}: event_offsets must run from 0 to n_tokens="
+                    f"{rec.key_ids.size} with one entry per event (got {offsets.tolist()[:8]}…)"
+                )
+            lens = np.diff(offsets)
+            evt_lens.extend(lens.tolist())
+            key_ids.append(rec.key_ids)
+            value_ids.append(rec.value_ids)
+            positions.append(rec.positions)
+            is_text_parts.append(it_full)
+            event_of_token.append(
+                np.repeat(np.arange(global_event, global_event + n_ev, dtype=np.int64), lens)
+            )
+            global_event += n_ev
             text_values.extend(rec_text_values)
             ev_ts.append(rec.event_ts)
             ev_tlog.append(rec.time_log)
@@ -219,17 +258,24 @@ class VarlenCollator:
             ev_src.append(rec.source_ids.astype(np.int64))
             user_of_event.append(np.full(n_ev, u, dtype=np.int64))
 
-            n_items = len(rec.prof_offsets) - 1
+            poffsets = np.asarray(rec.prof_offsets, dtype=np.int64)
+            n_items = max(poffsets.size - 1, 0)
             prof_per_user.append(n_items)
-            for it in range(n_items):
-                lo, hi = int(rec.prof_offsets[it]), int(rec.prof_offsets[it + 1])
-                ntok = hi - lo
-                prof_item_lens.append(ntok)
-                p_key.append(rec.prof_key_ids[lo:hi])
-                p_val.append(rec.prof_value_ids[lo:hi])
-                p_pos.append(rec.prof_positions[lo:hi])
-                item_of_ptok.append(np.full(ntok, global_pitem, dtype=np.int64))
-                global_pitem += 1
+            if poffsets.size and (poffsets[0] != 0 or poffsets[-1] != rec.prof_key_ids.size):
+                raise ValueError(
+                    f"record {rec.user_id!r}: prof_offsets must run from 0 to n_prof_tokens="
+                    f"{rec.prof_key_ids.size} (got {poffsets.tolist()[:8]}…)"
+                )
+            plens = np.diff(poffsets) if n_items else np.zeros(0, dtype=np.int64)
+            prof_item_lens.extend(plens.tolist())
+            p_key.append(rec.prof_key_ids)
+            p_val.append(rec.prof_value_ids)
+            p_pos.append(rec.prof_positions)
+            item_of_ptok.append(
+                np.repeat(np.arange(global_pitem, global_pitem + n_items, dtype=np.int64), plens)
+            )
+            global_pitem += n_items
+            prof_tokens_per_user.append(int(rec.prof_key_ids.size))
             p_tlog.append(rec.prof_time_log)
             user_of_pitem.append(np.full(n_items, u, dtype=np.int64))
 
@@ -280,6 +326,10 @@ class VarlenCollator:
             is_text=is_text,
             feed_text=is_text.clone(),  # inference feeds every text token; the masker hides masked ones
             text_values=text_values,
+            # +1: every segment the encoders see carries an [EVT]/[USR] prefix slot.
+            max_len_event=(max(evt_lens) + 1) if evt_lens else 1,
+            max_len_history=max(hist_lens) + 1,
+            max_len_profile=max(prof_tokens_per_user) + 1,
         )
 
 
@@ -293,7 +343,8 @@ class TruncatingCollator(VarlenCollator):
     this collator can never contain an event at or past its user's eval point.
     """
 
-    def __init__(self, cutoffs: Mapping[str, int]) -> None:
+    def __init__(self, cutoffs: Mapping[str, int], max_events: int | None = None) -> None:
+        super().__init__(max_events)
         self.cutoffs = cutoffs
 
     def __call__(self, records: list[TokenizedRecord]) -> PackedBatch:

@@ -77,15 +77,19 @@ class Calendar:
         day_of_week = ((days.astype("datetime64[D]").view("int64") + 3) % 7).astype(np.int8)
         is_weekend = day_of_week >= 5
 
+        # England & Wales bank holidays, computed per year (Easter-based days move,
+        # weekend Christmas / New Year get substitute weekdays). The book is
+        # GB-majority, so one calendar drives paydays and holiday spend for all.
         is_holiday = np.zeros(n_days, dtype=bool)
-        md = np.stack(
-            [(days.astype("datetime64[M]").view("int64") % 12) + 1, (days - days.astype("datetime64[M]")).view("int64") + 1],
-            axis=1,
-        )
-        for mm, dd in ((1, 1), (4, 7), (5, 1), (8, 25), (12, 24), (12, 25), (12, 26), (12, 31)):
-            is_holiday |= (md[:, 0] == mm) & (md[:, 1] == dd)
+        y0 = int(str(start.astype("datetime64[Y]")))
+        y1 = int(str((start + n_days - 1).astype("datetime64[Y]")))
+        for year in range(y0, y1 + 1):
+            for hol in uk_bank_holidays(year):
+                idx = int((hol - start).astype(np.int64))
+                if 0 <= idx < n_days:
+                    is_holiday[idx] = True
 
-        month_of_year = md[:, 0]
+        month_of_year = (days.astype("datetime64[M]").view("int64") % 12) + 1
         season_by_month = np.array([0.88, 0.94, 0.98, 1.0, 1.02, 1.04, 1.06, 1.05, 0.99, 1.0, 1.08, 1.28])
         season_mult = season_by_month[month_of_year - 1].astype(np.float64)
 
@@ -122,6 +126,60 @@ class Calendar:
 
 def _normalize24(curve: np.ndarray) -> np.ndarray:
     return curve / curve.mean()
+
+
+def _dow(day: np.datetime64) -> int:
+    """Monday=0 for a day-resolution datetime64 (1970-01-01 was a Thursday)."""
+    return int((day.astype("datetime64[D]").view("int64") + 3) % 7)
+
+
+def easter_sunday(year: int) -> np.datetime64:
+    """Gregorian Easter Sunday (anonymous / Meeus-Jones-Butcher algorithm)."""
+    a = year % 19
+    b, c = divmod(year, 100)
+    d, e = divmod(b, 4)
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i, k = divmod(c, 4)
+    ll = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * ll) // 451
+    month, day = divmod(h + ll - 7 * m + 114, 31)
+    return np.datetime64(f"{year:04d}-{month:02d}-{day + 1:02d}")
+
+
+def _nth_monday(year: int, month: int, last: bool) -> np.datetime64:
+    first = np.datetime64(f"{year:04d}-{month:02d}-01")
+    if last:
+        end = (first.astype("datetime64[M]") + 1).astype("datetime64[D]") - 1
+        return end - _dow(end)
+    return first + (7 - _dow(first)) % 7
+
+
+def uk_bank_holidays(year: int) -> list[np.datetime64]:
+    """England & Wales bank holidays for ``year`` (day resolution, sorted).
+
+    New Year's Day, Good Friday, Easter Monday, early May and spring bank
+    holidays, summer bank holiday, Christmas Day and Boxing Day; a fixed-date
+    holiday falling on a weekend moves to the next free weekday, as in the
+    official calendar. One-off holidays (royal events) are not modelled.
+    """
+    taken: set[np.datetime64] = set()
+
+    def substitute(d: np.datetime64) -> np.datetime64:
+        while _dow(d) >= 5 or d in taken:
+            d = d + 1
+        taken.add(d)
+        return d
+
+    days = [substitute(np.datetime64(f"{year:04d}-01-01"))]
+    easter = easter_sunday(year)
+    days += [easter - 2, easter + 1]
+    days += [_nth_monday(year, 5, last=False), _nth_monday(year, 5, last=True),
+             _nth_monday(year, 8, last=True)]
+    days += [substitute(np.datetime64(f"{year:04d}-12-25")),
+             substitute(np.datetime64(f"{year:04d}-12-26"))]
+    return sorted(days)
 
 
 # --------------------------------------------------------------------------- merchants
@@ -196,6 +254,10 @@ class MerchantUniverse:
     countries: np.ndarray  # object[n_merchants]
     by_mcc: list[np.ndarray]  # merchant ids per MCC, popularity-sorted
     by_mcc_cum: list[np.ndarray]  # cumulative Zipf probs aligned with by_mcc
+    # Same pools restricted to one merchant country (popularity order kept),
+    # so everyday spend lands on home-country merchants and travel spend on the
+    # trip country's. An empty (mcc, country) pool falls back to the global one.
+    by_mcc_country: dict[str, list[tuple[np.ndarray, np.ndarray]]]
     mcc_mu: np.ndarray  # float64[n_mcc] lognormal amount mu
     mcc_sigma: np.ndarray
     mcc_online_p: np.ndarray
@@ -261,6 +323,17 @@ class MerchantUniverse:
             zipf /= zipf.sum()
             by_mcc.append(ids.astype(np.int32))
             by_mcc_cum.append(np.cumsum(zipf))
+        by_mcc_country: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+        for c in countries:
+            pools: list[tuple[np.ndarray, np.ndarray]] = []
+            for ids in by_mcc:
+                sub = ids[merchant_country[ids] == c]
+                if len(sub) == 0:
+                    pools.append((np.zeros(0, dtype=np.int32), np.zeros(0)))
+                    continue
+                z = 1.0 / np.arange(1, len(sub) + 1, dtype=np.float64) ** 1.07
+                pools.append((sub.astype(np.int32), np.cumsum(z / z.sum())))
+            by_mcc_country[str(c)] = pools
 
         mcc_mu = np.array([r[3] for r in MCC_CATALOG])
         mcc_sigma = np.array([r[4] for r in MCC_CATALOG])
@@ -274,17 +347,26 @@ class MerchantUniverse:
                 mcc_mu[i] = float(np.log(max(float(mean), 0.01)) - 0.5 * mcc_sigma[i] ** 2)
         return cls(
             n_merchants=n, mcc_idx=mcc_idx, names=names, countries=merchant_country,
-            by_mcc=by_mcc, by_mcc_cum=by_mcc_cum,
+            by_mcc=by_mcc, by_mcc_cum=by_mcc_cum, by_mcc_country=by_mcc_country,
             mcc_mu=mcc_mu,
             mcc_sigma=mcc_sigma,
             mcc_online_p=np.array([r[5] for r in MCC_CATALOG]),
         )
 
-    def sample_in_mcc(self, mcc: int, u: np.ndarray) -> np.ndarray:
-        """Map uniforms ``u`` to merchant ids within MCC ``mcc`` (Zipf-weighted)."""
-        pos = np.searchsorted(self.by_mcc_cum[mcc], u, side="right")
-        pos = np.minimum(pos, len(self.by_mcc[mcc]) - 1)
-        return self.by_mcc[mcc][pos]
+    def sample_in_mcc(self, mcc: int, u: np.ndarray, country: str | None = None) -> np.ndarray:
+        """Map uniforms ``u`` to merchant ids within MCC ``mcc`` (Zipf-weighted).
+
+        With ``country`` the draw is restricted to that country's merchants
+        (falling back to the global pool when the country has none in the MCC).
+        """
+        ids, cum = self.by_mcc[mcc], self.by_mcc_cum[mcc]
+        if country is not None:
+            pool = self.by_mcc_country.get(country)
+            if pool is not None and len(pool[mcc][0]):
+                ids, cum = pool[mcc]
+        pos = np.searchsorted(cum, u, side="right")
+        pos = np.minimum(pos, len(ids) - 1)
+        return ids[pos]
 
 
 # --------------------------------------------------------------------------- transfer graph
@@ -705,8 +787,11 @@ class EpisodeAssignment:
         mule_depth = np.zeros(n, dtype=np.int8)
         for ring in rings:
             mule_member[ring.members] = True
-            mule_window[ring.members, 0] = ring.window_start_day
-            mule_window[ring.members, 1] = ring.window_start_day + ring.window_len_days + 3
+            # Clamp to the horizon: a ring placed near the end must not schedule
+            # behaviour past the last simulated day.
+            mule_window[ring.members, 0] = min(ring.window_start_day, cal.n_days - 2)
+            mule_window[ring.members, 1] = min(ring.window_start_day + ring.window_len_days + 3,
+                                               cal.n_days - 1)
             mule_layer[ring.members] = ring.layer_of_member.astype(np.int8)
             mule_depth[ring.members] = np.int8(int(ring.layer_of_member.max()) + 1)
         return cls(

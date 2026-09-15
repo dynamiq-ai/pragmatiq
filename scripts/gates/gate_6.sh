@@ -61,7 +61,9 @@ summary = api.pretrain(work / "tok", "gate6", model_size="small" if full else "n
                                "warmup_steps": steps // 10,
                                "log_every": 50, "checkpoint_every_min": 1000.0}, runs_root=work / "runs")
 res = api.gnn(work / "tok", summary["run_dir"], work / "raw" / "transfers.parquet",
-              work / "raw" / "labels" / "aml.parquet", seeds=(0, 1, 2), epochs=150)
+              work / "raw" / "labels" / "aml.parquet",
+              seeds=tuple(int(x) for x in os.environ.get("PRAGMATIQ_GATE6_SEEDS", "0,1,2").split(",")),
+              epochs=150)
 ps = res["per_setup"]
 print(f"  (a) isolated pragmatiq {ps['a_isolated']['mean']:.3f} ± {ps['a_isolated']['std']:.3f}")
 print(f"  (b) GNN + pragmatiq    {ps['b_gnn_pragma']['mean']:.3f} ± {ps['b_gnn_pragma']['std']:.3f}")
@@ -74,7 +76,7 @@ print(json.dumps(v))
 # structure recovers AML signal an isolated per-user embedding misses (c > a) —
 # and message passing adds over the same features without a graph (c > d). The
 # verdict's `pass` is exactly this mechanism.
-assert v["pass"], "expected relational recovery (c > a) and message passing to add (c > d)"
+assert v["pass"], "expected relational recovery: GraphSAGE + hand-crafted (c) > isolated probe (a) beyond the cross-seed noise"
 # Reported, NOT gated: the learned per-user embedding adds a little over the
 # isolated probe (b > a) but does not beat hand-crafted features (b < c) on this
 # synthetic book — the isolated embedding is near chance, so it does not capture

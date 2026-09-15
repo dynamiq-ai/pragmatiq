@@ -10,8 +10,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as _pc
 import pyarrow.parquet as pq
 
 from pragmatiq.core.schema import (
@@ -22,6 +25,9 @@ from pragmatiq.core.schema import (
     TRANSFERS_SCHEMA,
     label_schema,
 )
+
+# pyarrow.compute builds its kernels at import time, so the stubs do not list them.
+pc: Any = _pc
 
 
 @dataclass
@@ -84,35 +90,40 @@ def _check_field_cardinality(data_dir: Path, report: ValidationReport,
     event field that is (near-)unique per occurrence is almost always a per-event
     identifier — it explodes the categorical/BPE vocab and carries no learnable
     signal. Numeric magnitude fields are skipped (the tokenizer percentile-bins them)."""
-    from collections import defaultdict
-
     pf = pq.ParquetFile(data_dir / "events.parquet")
-    occ: dict[str, int] = defaultdict(int)
-    distinct: dict[str, set] = defaultdict(set)
-    nullv: dict[str, int] = defaultdict(int)
+    key_parts: list[pa.Array] = []
+    item_parts: list[pa.Array] = []
     n = 0
     for batch in pf.iter_batches(columns=["fields"], batch_size=65_536):
         f = batch.column("fields")
-        keys = f.keys.to_pylist() if hasattr(f.keys, "to_pylist") else list(f.keys)
-        items = f.items.to_pylist() if hasattr(f.items, "to_pylist") else list(f.items)
-        for k, v in zip(keys, items):
-            occ[k] += 1
-            if v is None:
-                nullv[k] += 1
-            s = distinct[k]
-            if len(s) <= cap:
-                s.add(v)
+        key_parts.append(f.keys)
+        item_parts.append(f.items)
         n += len(batch)
         if n >= sample_rows:
             break
-    for k, c in nullv.items():
-        report.warn(f"events.parquet: field '{k}' has {c} null values — tokenized as [UNK]; "
-                    "impute or drop them if that is not intended")
-    for k, s in distinct.items():
-        d, o = len(s), occ[k]
-        sample = list(s)[:500]
+    if not key_parts:
+        return
+    keys = pa.concat_arrays(key_parts)
+    items = pa.concat_arrays(item_parts)
+    # One grouped aggregation replaces a Python loop over every (key, value)
+    # pair: occurrences, nulls, and distinct values per key.
+    tbl = pa.table({"k": keys, "isnull": pc.cast(pc.is_null(items), pa.int64()), "v": items})
+    agg = tbl.group_by("k").aggregate([
+        ("isnull", "sum"), ("v", "count", pc.CountOptions(mode="all")), ("v", "count_distinct"),
+    ])
+    stats = {row["k"]: (int(row["isnull_sum"] or 0), int(row["v_count"]), int(row["v_count_distinct"]))
+             for row in agg.to_pylist()}
+    for k, (nulls, _o, _d) in stats.items():
+        if nulls:
+            report.warn(f"events.parquet: field '{k}' has {nulls} null values — tokenized as [UNK]; "
+                        "impute or drop them if that is not intended")
+    for k, (_nulls, o, d) in stats.items():
+        d = min(d, cap)
+        if not (o >= 1000 and d >= 0.9 * o):
+            continue
+        sample = pc.unique(pc.filter(items, pc.equal(keys, k))).slice(0, 500).to_pylist()
         numeric = sample and sum(_is_floatish(v) for v in sample) >= 0.9 * len(sample)
-        if o >= 1000 and d >= 0.9 * o and not numeric:
+        if not numeric:
             report.warn(
                 f"events.parquet: field '{k}' has ~{d} distinct values over {o} occurrences "
                 "(near-unique per event) — likely a per-event identifier that will explode the "
@@ -128,10 +139,10 @@ def _check_transfers(data_dir: Path, report: ValidationReport) -> None:
         return
     if _check_schema(path, TRANSFERS_SCHEMA, report) is None:
         return
-    df = pq.read_table(path, columns=["from_user", "to_user"]).to_pandas()
-    if df["from_user"].isna().any() or df["to_user"].isna().any():
+    t = pq.read_table(path, columns=["from_user", "to_user"])
+    if pc.any(pc.is_null(t["from_user"])).as_py() or pc.any(pc.is_null(t["to_user"])).as_py():
         report.error("transfers.parquet: null from_user/to_user — drop or impute these edges")
-    self_loops = int((df["from_user"] == df["to_user"]).sum())
+    self_loops = int(pc.sum(pc.fill_null(pc.equal(t["from_user"], t["to_user"]), False)).as_py() or 0)
     if self_loops:
         report.warn(f"transfers.parquet: {self_loops} self-loop edges (from_user == to_user)")
 
@@ -170,40 +181,57 @@ def validate_dataset(data_dir: str | Path, max_rows: int | None = 2_000_000) -> 
     ev = data_dir / "events.parquet"
     pf = pq.ParquetFile(ev)
     n_rows = 0
-    last_uid = None
-    last_ts = None
     null_ids = 0
     null_ts = 0
-    bad_source = set()
+    bad_source: set[str] = set()
     out_of_order = 0
     closed: set[str] = set()  # uids whose run of adjacent rows has ended
     non_adjacent_flagged = False
+    # Carry the previous batch's last row so runs and ordering are checked
+    # across batch boundaries exactly as in a single row-by-row pass.
+    carry_uid: str | None = None
+    carry_ts: int | None = None
+    have_carry = False
     for batch in pf.iter_batches(columns=["user_id", "ts", "source"], batch_size=131_072):
-        uids = batch.column("user_id").to_pylist()
-        tss = batch.column("ts").cast(pa.int64()).to_pylist()
-        srcs = batch.column("source").to_pylist()
-        for uid, ts, src in zip(uids, tss, srcs):
-            n_rows += 1
-            if uid is None or uid == "":
-                null_ids += 1
-            if src not in SOURCES:
-                bad_source.add(src)
-            # events must be time-sorted within each user (null ts can't be compared)
-            if ts is None:
-                null_ts += 1
-            elif uid == last_uid and last_ts is not None and ts < last_ts:
-                out_of_order += 1
-            if uid != last_uid:
-                if last_uid is not None:
-                    closed.add(last_uid)
-                if uid in closed and not non_adjacent_flagged:
-                    r.error(f"events.parquet: user {uid!r} appears in non-adjacent rows — sort by "
-                            "(user_id, ts) before tokenizing; otherwise the user fragments into "
-                            "multiple records that overwrite each other's index entry")
-                    non_adjacent_flagged = True
-            last_uid = uid
-            if ts is not None:
-                last_ts = ts
+        n = batch.num_rows
+        if n == 0:
+            continue
+        n_rows += n
+        uids = batch.column("user_id")
+        ts = batch.column("ts").cast(pa.int64())
+        null_ids += int(pc.sum(pc.fill_null(pc.or_kleene(pc.is_null(uids), pc.equal(uids, "")), False)).as_py() or 0)
+        null_ts += int(pc.sum(pc.is_null(ts)).as_py() or 0)
+        bad_source.update(str(s) for s in pc.unique(batch.column("source")).to_pylist() if s not in SOURCES)
+        if have_carry:
+            uids_x = pa.concat_arrays([pa.array([carry_uid], type=pa.string()), uids])
+            ts_x = pa.concat_arrays([pa.array([carry_ts], type=pa.int64()), ts])
+        else:
+            uids_x, ts_x = uids, ts
+        m = len(uids_x)
+        if m > 1:
+            # Row j+1 continues row j's run when the user_id repeats; within a run an
+            # event is out of order when its ts precedes the last non-null ts seen.
+            same = np.asarray(pc.fill_null(pc.equal(uids_x.slice(1), uids_x.slice(0, m - 1)), False))
+            ts_ff = pc.fill_null_forward(ts_x)
+            earlier = np.asarray(pc.fill_null(pc.less(ts_x.slice(1), ts_ff.slice(0, m - 1)), False))
+            out_of_order += int(np.count_nonzero(same & earlier))
+            starts = np.flatnonzero(~same) + 1  # rows (in uids_x) that begin a new run
+            if starts.size:
+                prev_uids = uids_x.take(pa.array(starts - 1)).to_pylist()
+                new_uids = uids_x.take(pa.array(starts)).to_pylist()
+                for prev_uid, uid in zip(prev_uids, new_uids):
+                    if prev_uid is not None:
+                        closed.add(prev_uid)
+                    if uid in closed and not non_adjacent_flagged:
+                        r.error(f"events.parquet: user {uid!r} appears in non-adjacent rows — sort by "
+                                "(user_id, ts) before tokenizing; otherwise the user fragments into "
+                                "multiple records that overwrite each other's index entry")
+                        non_adjacent_flagged = True
+        else:
+            ts_ff = pc.fill_null_forward(ts_x)
+        carry_uid = uids_x[m - 1].as_py()
+        carry_ts = ts_ff[m - 1].as_py()
+        have_carry = True
         if max_rows is not None and n_rows >= max_rows:
             r.warn(f"events.parquet: stopped checking after {max_rows} rows")
             break
@@ -218,10 +246,10 @@ def validate_dataset(data_dir: str | Path, max_rows: int | None = 2_000_000) -> 
         r.error(f"events.parquet: {out_of_order} events out of time order within a user — "
                 "sort by (user_id, ts) before tokenizing")
 
-    prof = pq.read_table(data_dir / "profiles.parquet", columns=["user_id"]).to_pandas()
-    if prof["user_id"].isna().any():
+    prof_uids = pq.read_table(data_dir / "profiles.parquet", columns=["user_id"]).column("user_id")
+    if pc.any(pc.is_null(prof_uids)).as_py():
         r.error("profiles.parquet: null user_id present")
-    if prof["user_id"].duplicated().any():
+    if len(pc.unique(prof_uids)) < len(prof_uids):
         r.warn("profiles.parquet: duplicate user_id rows (the last one wins at tokenization)")
 
     _check_field_cardinality(data_dir, r)

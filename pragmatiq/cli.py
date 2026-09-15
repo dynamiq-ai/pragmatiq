@@ -22,11 +22,21 @@ synth_app = typer.Typer(help="Synthetic data generation.", no_args_is_help=True)
 app.add_typer(synth_app, name="synth")
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        from pragmatiq import __version__
+
+        typer.echo(f"pragmatiq {__version__}")
+        raise typer.Exit()
+
+
 @app.callback()
 def _setup(
     ctx: typer.Context,
     verbose: bool = typer.Option(True, "--verbose/--quiet",
                                  help="Show INFO-level progress logs on stderr."),
+    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True,
+                                 help="Print the pragmatiq version and exit."),
 ) -> None:
     ctx.obj = {"verbose": verbose}
     logging.basicConfig(level=logging.INFO if verbose else logging.WARNING,
@@ -76,11 +86,16 @@ def pretrain_cmd(
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     run_name: str = typer.Option(..., "--name", help="Run name (runs/{name})."),
     model_size: str = typer.Option("small", help="small | medium | large."),
-    config: str | None = typer.Option(None, help="Pretrain YAML (configs/pretrain.yaml)."),
+    config: str | None = typer.Option(
+        "auto", help="Pretrain YAML (configs/pretrain.yaml), or 'auto' to size the batch and "
+                     "schedule from the data and the device."),
     runs_root: str = typer.Option("runs", help="Runs root directory."),
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
     wandb: bool = typer.Option(False, "--wandb",
                                help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."),
+    show_config: bool = typer.Option(False, "--show-config",
+                                     help="Print the resolved training + model config as JSON "
+                                          "and exit without training."),
 ) -> None:
     """Pretrain a pragmatiq model (MLM) on tokenized shards."""
     from pragmatiq import api
@@ -92,6 +107,11 @@ def pretrain_cmd(
         overrides["wandb"] = True
     if ctx.obj and not ctx.obj.get("verbose", True):
         overrides["verbose"] = False  # --quiet also silences the heartbeat
+    if show_config:
+        plan = api.pretrain_plan(shard_dir, model_size=model_size, config=config, run_name=run_name,
+                                 runs_root=runs_root, resume=resume, **overrides)
+        typer.echo(json.dumps(plan, indent=2, default=str))
+        return
     summary = api.pretrain(shard_dir, run_name, model_size=model_size, config=config,
                            runs_root=runs_root, resume=resume, **overrides)
     typer.echo(json.dumps(summary, indent=2))
@@ -105,12 +125,16 @@ def probe_cmd(
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
     probe_model: str = typer.Option("gbdt", help="Probe head: gbdt | logistic | lightgbm."),
     seed: int = typer.Option(0, help="Probe random seed (for reproducible AUCs)."),
+    staleness_window: str | None = typer.Option(
+        None, help="Drop the most recent window of history before each eval point "
+                   "(e.g. 6h, 1d): the paper's event-staleness robustness check."),
 ) -> None:
     """Probe a trained model on a label table; reports ROC-AUC + PR-AUC vs baseline."""
     from pragmatiq import api
 
     typer.echo(json.dumps(
-        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed), indent=2))
+        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed,
+                  staleness_window=staleness_window), indent=2))
 
 
 @app.command("uplift")
@@ -132,7 +156,7 @@ def finetune_cmd(
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     run: str = typer.Option(..., help="Run directory of a trained model."),
     label: str = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
-    config: str | None = typer.Option(None, help="Finetune YAML (configs/finetune/*.yaml)."),
+    config: str | None = typer.Option(None, help="Finetune YAML (see configs/finetune/credit.yaml)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
 ) -> None:
     """LoRA fine-tune a trained model's adapters + head on a label table."""
@@ -171,6 +195,14 @@ def quickstart_cmd(
     typer.echo(res["message"])
 
 
+@app.command("info")
+def info_cmd() -> None:
+    """Describe this installation: versions, device, kernels, extras, env vars."""
+    from pragmatiq import api
+
+    typer.echo(json.dumps(api.info(), indent=2))
+
+
 @app.command("validate")
 def validate_cmd(
     data_dir: str = typer.Argument(..., help="Raw dataset directory."),
@@ -188,11 +220,12 @@ def export_cmd(
     run: str = typer.Option(..., help="Run directory of a trained model."),
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory (for an example user)."),
     out: str = typer.Option("pragmatiq_embedder.onnx", help="Output ONNX path."),
+    device: str = typer.Option("auto", help="Accepted for symmetry; the graph is built on CPU."),
 ) -> None:
     """Export the padded-embedder ONNX variant (varlen caveat documented)."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.export(run, shard_dir, out=out), indent=2))
+    typer.echo(json.dumps(api.export(run, shard_dir, out=out, device=device), indent=2))
 
 
 @app.command("benchmark")
@@ -200,12 +233,14 @@ def benchmark_cmd(
     run: str = typer.Option(..., help="Run directory of a trained model."),
     shard_dir: str = typer.Argument(..., help="Tokenized shard directory."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
-    out: str = typer.Option("deploy/benchmarks/RESULTS.md", help="Results markdown."),
+    out: str = typer.Option("benchmark_results.md", help="Results markdown."),
+    precision: str = typer.Option("auto", help="auto | bf16 | fp32 (CUDA autocast dtype)."),
 ) -> None:
     """Benchmark batch-embedding throughput; writes RESULTS.md."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.benchmark(run, shard_dir, device=device, out=out), indent=2))
+    typer.echo(json.dumps(api.benchmark(run, shard_dir, device=device, out=out, precision=precision),
+                          indent=2))
 
 
 @app.command("gnn")

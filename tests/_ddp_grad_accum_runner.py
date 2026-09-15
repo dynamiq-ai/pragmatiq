@@ -50,8 +50,8 @@ import torch
 
 from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
 from pragmatiq.data.tokenizer import MASK, PragmaTokenizer
-from pragmatiq.experiments.run import Run
 from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
+from pragmatiq.runs.run import Run
 from pragmatiq.training.masking import T_TOKEN, MaskedBatch
 from pragmatiq.training.pretrainer import PreTrainer, TrainConfig, seed_everything
 

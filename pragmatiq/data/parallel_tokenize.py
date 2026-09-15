@@ -87,11 +87,15 @@ def _cap_arrow_threads() -> None:
 _FIT_PF: pq.ParquetFile | None = None
 
 
-def _init_fit_worker(data_dir: str) -> None:
+_FIT_COUNTER_CAP: int | None = None
+
+
+def _init_fit_worker(data_dir: str, counter_cap: int | None = None) -> None:
     """Fit-worker initializer: cap Arrow threads, open events.parquet."""
     _cap_arrow_threads()
-    global _FIT_PF
+    global _FIT_PF, _FIT_COUNTER_CAP
     _FIT_PF = pq.ParquetFile(Path(data_dir) / "events.parquet")
+    _FIT_COUNTER_CAP = counter_cap
 
 
 def _run_fit_task(task: tuple[int, int]) -> _FitAccum:
@@ -99,7 +103,7 @@ def _run_fit_task(task: tuple[int, int]) -> _FitAccum:
     from pragmatiq.data.tokenizer import _FitAccum
 
     assert _FIT_PF is not None
-    acc = _FitAccum()
+    acc = _FitAccum(max_counter_distinct=_FIT_COUNTER_CAP)
     batches = _FIT_PF.iter_batches(
         columns=["source", "fields"],
         batch_size=_BATCH_SIZE,
@@ -153,9 +157,9 @@ def parallel_fit(
         n_workers,
         mp_context=mp.get_context(method),
         initializer=_init_fit_worker,
-        initargs=(str(data_dir),),
+        initargs=(str(data_dir), tok.config.max_counter_distinct),
     )
-    merged = _FitAccum()
+    merged = _FitAccum(max_counter_distinct=tok.config.max_counter_distinct)
     try:
         for acc in _ordered_bounded(ex, _run_fit_task, tasks, 2 * n_workers):
             merged.merge(acc)  # strict task order => stable counter / sample order

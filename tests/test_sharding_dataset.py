@@ -403,3 +403,251 @@ class TestLoader:
             total_users += batch.n_users
         assert total_users == len(ds)
         ds.close()
+
+
+def _reference_collate_arrays(records) -> dict[str, np.ndarray]:
+    """The pre-1.1 per-event / per-item Python loop of VarlenCollator, kept as the oracle."""
+    key_ids, value_ids, positions, event_of_token, is_text_parts = [], [], [], [], []
+    evt_lens: list[int] = []
+    p_key, p_val, p_pos, item_of_ptok, prof_item_lens, prof_per_user, user_of_pitem = [], [], [], [], [], [], []
+    global_event = global_pitem = 0
+    for u, rec in enumerate(records):
+        it_full = rec.is_text
+        if it_full.size != rec.key_ids.size or len(rec.text_values) != int(it_full.sum()):
+            it_full = np.zeros(rec.key_ids.size, dtype=np.int8)
+        for e in range(rec.n_events):
+            lo, hi = int(rec.event_offsets[e]), int(rec.event_offsets[e + 1])
+            evt_lens.append(hi - lo)
+            key_ids.append(rec.key_ids[lo:hi])
+            value_ids.append(rec.value_ids[lo:hi])
+            positions.append(rec.positions[lo:hi])
+            is_text_parts.append(it_full[lo:hi])
+            event_of_token.append(np.full(hi - lo, global_event, dtype=np.int64))
+            global_event += 1
+        n_items = len(rec.prof_offsets) - 1
+        prof_per_user.append(n_items)
+        for it in range(n_items):
+            lo, hi = int(rec.prof_offsets[it]), int(rec.prof_offsets[it + 1])
+            prof_item_lens.append(hi - lo)
+            p_key.append(rec.prof_key_ids[lo:hi])
+            p_val.append(rec.prof_value_ids[lo:hi])
+            p_pos.append(rec.prof_positions[lo:hi])
+            item_of_ptok.append(np.full(hi - lo, global_pitem, dtype=np.int64))
+            global_pitem += 1
+        user_of_pitem.append(np.full(n_items, u, dtype=np.int64))
+
+    def cat(parts, dtype=np.int64):
+        return np.concatenate(parts).astype(dtype) if parts else np.zeros(0, dtype=dtype)
+
+    def cu(lens):
+        out = np.zeros(len(lens) + 1, dtype=np.int32)
+        np.cumsum(np.asarray(lens, dtype=np.int32), out=out[1:])
+        return out
+
+    return {"key_ids": cat(key_ids), "value_ids": cat(value_ids), "positions": cat(positions),
+            "event_of_token": cat(event_of_token), "cu_seqlens_event": cu(evt_lens),
+            "is_text": cat(is_text_parts, np.int8).astype(bool),
+            "prof_key_ids": cat(p_key), "prof_value_ids": cat(p_val), "prof_positions": cat(p_pos),
+            "item_of_prof_token": cat(item_of_ptok), "cu_seqlens_profile_item": cu(prof_item_lens),
+            "cu_seqlens_profile": cu(prof_per_user), "user_of_prof_item": cat(user_of_pitem)}
+
+
+class TestCollatorVectorized:
+    def test_matches_reference_loop(self, shards) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        for uids in (ds.user_ids[:5], ds.user_ids[40:73], ds.user_ids[290:300]):
+            recs = ds.get_many(uids)
+            batch = VarlenCollator()(recs)
+            ref = _reference_collate_arrays(recs)
+            for name, arr in ref.items():
+                got = getattr(batch, name).numpy()
+                assert np.array_equal(got, arr), name
+        ds.close()
+
+    def test_max_len_fields_match_cu_seqlens(self, shards) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        sampler = DynamicBatchSampler(ds.index, token_budget=2048, seed=1)
+        sampler.set_epoch(0)
+        for i, batch in enumerate(ShardDataLoader(ds, sampler)):
+            ce = batch.cu_seqlens_event
+            ch = batch.cu_seqlens_history
+            assert batch.max_len_event == (int((ce[1:] - ce[:-1]).max()) + 1 if ce.numel() > 1 else 1)
+            assert batch.max_len_history == int((ch[1:] - ch[:-1]).max()) + 1
+            item_len = (batch.cu_seqlens_profile_item[1:] - batch.cu_seqlens_profile_item[:-1]).numpy()
+            per_user = np.bincount(batch.user_of_prof_item.numpy(), weights=item_len, minlength=batch.n_users)
+            assert batch.max_len_profile == int(per_user.max()) + 1
+            if i >= 6:
+                break
+        ds.close()
+
+    def test_malformed_offsets_rejected(self, shards) -> None:
+        import dataclasses
+
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        rec = ds.get(ds.user_ids[0])
+        ds.close()
+        bad = dataclasses.replace(rec, event_offsets=rec.event_offsets[:-1])
+        with pytest.raises(ValueError, match="event_offsets"):
+            VarlenCollator()([bad])
+
+
+class TestPrefetchLoader:
+    def _make(self, shard_dir, prefetch: int, pin: bool = False):
+        ds = ShardDataset(shard_dir)
+        sampler = DynamicBatchSampler(ds.index, token_budget=2048, seed=0)
+        sampler.set_epoch(0)
+        return ds, ShardDataLoader(ds, sampler, prefetch=prefetch, pin_memory=pin)
+
+    @staticmethod
+    def _same(a, b) -> bool:
+        if a.user_ids != b.user_ids or a.text_values != b.text_values:
+            return False
+        for f, v in a.__dict__.items():
+            if isinstance(v, torch.Tensor) and not torch.equal(v, getattr(b, f)):
+                return False
+        return True
+
+    def test_stream_and_state_match_sync_loader(self, shards) -> None:
+        shard_dir, _ = shards
+        ds_a, sync = self._make(shard_dir, 0)
+        ds_b, pre = self._make(shard_dir, 3)
+        it_a, it_b = iter(sync), iter(pre)
+        n = len(sync)
+        for _ in range(n):
+            a, b = next(it_a), next(it_b)
+            assert self._same(a, b)
+            assert sync.state_dict() == pre.state_dict()
+        with pytest.raises(StopIteration):
+            next(it_a)
+        with pytest.raises(StopIteration):
+            next(it_b)
+        assert sync.state_dict() == pre.state_dict()  # epoch rolled over identically
+        ds_a.close()
+        ds_b.close()
+
+    def test_resume_from_prefetch_snapshot_matches_sync(self, shards) -> None:
+        shard_dir, _ = shards
+        ds_c, pre = self._make(shard_dir, 2)
+        it = iter(pre)
+        for _ in range(3):
+            next(it)
+        snap = pre.state_dict()
+        it.close()  # abandon mid-epoch: the producer thread must stop, not hang
+        ds_d, sync2 = self._make(shard_dir, 0)
+        sync2.load_state_dict(snap)
+        ds_e, pre2 = self._make(shard_dir, 2)
+        pre2.load_state_dict(snap)
+        rest_sync = [b.user_ids for b in sync2]
+        rest_pre = [b.user_ids for b in pre2]
+        assert rest_sync == rest_pre
+        assert len(rest_sync) == len(pre) - 3
+        ds_c.close()
+        ds_d.close()
+        ds_e.close()
+
+    def test_producer_error_is_raised_in_consumer(self, shards, monkeypatch) -> None:
+        shard_dir, _ = shards
+        ds, pre = self._make(shard_dir, 2)
+        monkeypatch.setattr(ds, "get_many", lambda uids: (_ for _ in ()).throw(RuntimeError("boom")))
+        with pytest.raises(RuntimeError, match="boom"):
+            next(iter(pre))
+        ds.close()
+
+    def test_pin_memory_and_non_blocking_to(self, shards) -> None:
+        shard_dir, _ = shards
+        ds, pre = self._make(shard_dir, 1, pin=torch.cuda.is_available())
+        batch = next(iter(pre))
+        moved = batch.to("cpu", non_blocking=True)
+        assert self._same(batch, moved)
+        ds.close()
+
+
+class TestShardWriterRefactors:
+    """Arrow-native shard columns and incremental profile puts leave the outputs unchanged."""
+
+    def test_large_list_columns_equal_python_list_construction(self, shards) -> None:
+        import pyarrow as pa
+
+        from pragmatiq.data.sharding import _ARRAY_FIELDS, SHARD_SCHEMA, _large_list, _record_to_arrays
+
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        recs = [_record_to_arrays(ds.get(u)) for u in ds.user_ids[:37]]
+        ds.close()
+        cols_new: dict = {"user_id": pa.array([f"u{i}" for i in range(len(recs))], type=pa.string())}
+        cols_old: dict = {"user_id": [f"u{i}" for i in range(len(recs))]}
+        for name, t in _ARRAY_FIELDS:
+            cols_new[name] = _large_list([r[name] for r in recs], t)
+            cols_old[name] = [r[name].tolist() for r in recs]
+        new = pa.table(cols_new, schema=SHARD_SCHEMA)
+        old = pa.table(cols_old, schema=SHARD_SCHEMA)
+        assert new.equals(old)
+
+    def test_duplicate_user_raises_at_add(self, shards, tmp_path: Path) -> None:
+        shard_dir, tok = shards
+        ds = ShardDataset(shard_dir)
+        rec = ds.get(ds.user_ids[0])
+        ds.close()
+        w = ShardWriter(tmp_path / "dup", tokenizer_hash=tok.content_hash, rows_per_shard=8)
+        w.add(rec)
+        with pytest.raises(ValueError, match="duplicate user_id"):
+            w.add(rec)
+
+    def test_profiles_written_incrementally_and_index_complete(self, shards, tmp_path: Path) -> None:
+        shard_dir, tok = shards
+        src = ShardDataset(shard_dir)
+        uids = src.user_ids[:20]
+        recs = [src.get(u) for u in uids]
+        w = ShardWriter(tmp_path / "inc", tokenizer_hash=tok.content_hash, rows_per_shard=4)
+        for rec in recs:
+            w.add(rec, profile={"attributes": {"country": "GB"}, "lifelong": [], "as_of": 0})
+        manifest = w.close()
+        assert manifest["n_users"] == 20
+        idx = UserIndex(tmp_path / "inc")
+        assert idx.order == uids
+        assert all(idx.profile(u) == {"attributes": {"country": "GB"}, "lifelong": [], "as_of": 0} for u in uids)
+        metas = idx.meta_many(uids[::3])
+        assert [m.user_id for m in metas] == uids[::3]
+        assert metas[1] == idx.meta(uids[3])
+        idx.close()
+        src.close()
+
+    def test_get_many_uses_one_index_transaction(self, shards, monkeypatch) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)
+        calls = {"meta_many": 0, "meta": 0}
+        real_meta_many = ds.index.meta_many
+
+        def counting_meta_many(user_ids):
+            calls["meta_many"] += 1
+            return real_meta_many(user_ids)
+
+        monkeypatch.setattr(ds.index, "meta_many", counting_meta_many)
+        monkeypatch.setattr(ds.index, "meta", lambda uid: calls.__setitem__("meta", calls["meta"] + 1))
+        out = ds.get_many(ds.user_ids[:50])
+        assert [r.user_id for r in out] == ds.user_ids[:50]
+        assert calls == {"meta_many": 1, "meta": 0}  # one batched index read, no per-user lookups
+        ds.close()
+
+
+class TestShardCacheBudget:
+    def test_byte_budget_keeps_hot_shards_and_evicts_by_size(self, shards) -> None:
+        shard_dir, _ = shards
+        ds = ShardDataset(shard_dir)  # default: byte budget, not a shard count
+        assert ds._cache_n is None and ds._cache_bytes is not None and ds._cache_bytes > 0
+        keys = sorted({(m.band, m.shard) for m in ds.index.meta_many(ds.user_ids)})
+        first = ds._shard_table(*keys[0])
+        assert ds._cached_bytes == int(first.nbytes)
+        tiny = ShardDataset(shard_dir, cache_bytes=1)  # every load evicts the previous one
+        for k in keys:
+            tiny._shard_table(*k)
+        assert len(tiny._cache) == 1 and tiny._cached_bytes == int(tiny._cache[keys[-1]].nbytes)
+        pinned = ShardDataset(shard_dir, cache_shards=2)
+        for k in keys:
+            pinned._shard_table(*k)
+        assert len(pinned._cache) == min(2, len(keys))
+        for d in (ds, tiny, pinned):
+            d.close()

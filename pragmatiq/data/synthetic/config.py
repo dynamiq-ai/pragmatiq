@@ -20,6 +20,16 @@ DEFAULT_COUNTRY_MIX: dict[str, float] = {
     "LT": 0.05,
 }
 
+# Account currency per country. Internal accounting (income, budgets, balances,
+# the LTV profit model) is in GBP; only the emitted ``amount`` strings are
+# converted with the fixed mid-rates below, so a PLN user's grocery amounts are
+# ~5x a GB user's for the same underlying spend and FX events abroad are
+# expressed in the merchant's currency. # GUESS: mid-2023 spot rates, held flat.
+COUNTRY_CCY: dict[str, str] = {
+    "GB": "GBP", "IE": "EUR", "FR": "EUR", "DE": "EUR", "ES": "EUR", "PL": "PLN", "LT": "EUR",
+}
+FX_PER_GBP: dict[str, float] = {"GBP": 1.0, "EUR": 1.17, "PLN": 5.05, "USD": 1.27}
+
 DEFAULT_ARCHETYPE_MIX: dict[str, float] = {
     "student": 0.10,
     "salaried": 0.38,
@@ -54,7 +64,7 @@ class WorldConfig:
 
     archetype_mix: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_ARCHETYPE_MIX))
 
-    # Realism / difficulty knobs (see tests/baselines).
+    # Realism / difficulty knobs (see scripts/baselines).
     trait_noise: float = 0.55  # 0 = labels fully determined by traits; 1 = mostly noise
     label_noise: float = 0.005  # random flip prob on binary user-level labels
     activity_scale: float = 1.0  # global multiplier on event volume

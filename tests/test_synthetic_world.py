@@ -56,6 +56,25 @@ class TestCalendar:
         # 2023-12-25 is day 358 from 2023-01-01.
         assert cal.is_holiday[358]
 
+    def test_bank_holidays_are_computed_per_year(self) -> None:
+        from pragmatiq.data.synthetic.world import easter_sunday, uk_bank_holidays
+
+        assert str(easter_sunday(2023)) == "2023-04-09"
+        assert str(easter_sunday(2024)) == "2024-03-31"
+        assert str(easter_sunday(2025)) == "2025-04-20"
+        h2024 = [str(d) for d in uk_bank_holidays(2024)]
+        assert h2024 == ["2024-01-01", "2024-03-29", "2024-04-01", "2024-05-06", "2024-05-27",
+                         "2024-08-26", "2024-12-25", "2024-12-26"]
+        # Weekend Christmas / New Year move to substitute weekdays.
+        h2021 = [str(d) for d in uk_bank_holidays(2021)]
+        assert "2021-12-27" in h2021 and "2021-12-28" in h2021 and "2021-12-25" not in h2021
+        assert [str(d) for d in uk_bank_holidays(2022)][0] == "2022-01-03"
+        cfg = WorldConfig(n_users=10, months=14, n_merchants=100, seed=0, start_date="2024-01-01",
+                          eval_month_credit=2, eval_month_short=8)
+        cal = Calendar.build(cfg)
+        assert cal.is_holiday[(np.datetime64("2024-03-29") - np.datetime64("2024-01-01")).astype(int)]
+        assert not cal.is_holiday[(np.datetime64("2024-05-01") - np.datetime64("2024-01-01")).astype(int)]
+
 
 class TestMerchants:
     def test_universe_shapes(self, world: World) -> None:
@@ -63,6 +82,26 @@ class TestMerchants:
         assert mu.n_merchants == 2000
         assert len(mu.names) == 2000
         assert all(isinstance(n, str) and n for n in mu.names[:50])
+
+    def test_country_pools_return_that_countrys_merchants(self, world: World) -> None:
+        mu = world.merchants
+        rng = np.random.default_rng(0)
+        for c in world.cfg.country_mix:
+            for mcc in (0, 3, 7):
+                ids = mu.sample_in_mcc(mcc, rng.random(500), c)
+                assert set(mu.mcc_idx[ids].tolist()) == {mcc}
+                pool = mu.by_mcc_country[c][mcc][0]
+                if len(pool):
+                    assert set(mu.countries[ids].tolist()) == {c}
+        assert np.array_equal(mu.sample_in_mcc(0, np.array([0.0, 0.5])),
+                              mu.sample_in_mcc(0, np.array([0.0, 0.5]), "ZZ"))  # unknown → global
+
+    def test_mule_windows_inside_the_horizon(self, world: World) -> None:
+        win = world.episodes.mule_window
+        members = win[:, 0] >= 0
+        assert members.any()
+        assert (win[members, 1] < world.calendar.n_days).all()
+        assert (win[members, 0] < win[members, 1]).all()
 
     def test_zipf_popularity_within_mcc(self, world: World) -> None:
         mu = world.merchants

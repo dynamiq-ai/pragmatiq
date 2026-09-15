@@ -6,14 +6,17 @@ description: Get pragmatiq running locally — Python 3.11+, a virtual environme
 > pragmatiq is an independent implementation inspired by the PRAGMA paper
 > ([arXiv 2604.08649](https://arxiv.org/abs/2604.08649)) and is not affiliated with or endorsed by Revolut.
 
-pragmatiq is **CPU-first**: everything runs on CPU (slower but correct), and CUDA / flash-attn
-are accelerations, not requirements.
+pragmatiq is **GPU-first and CPU-complete**: every command picks a CUDA device when one is
+visible (bf16 at inference, bf16-mixed in training, flash-attn's varlen kernel when
+installed) and runs the same code in fp32 on a CPU when none is — slower, same results
+contract.
 
 ## Requirements
 
-- **Python 3.11+**
+- **Python 3.11+** and **torch 2.6+**
 - A virtual environment (recommended, so the install is isolated)
-- A GPU is optional
+- A GPU is recommended, not required; `flash-attn >= 2.4.1` (a wheel matching your torch /
+  CUDA build) is optional and enables the padding-free attention kernel
 
 ## Install
 
@@ -54,9 +57,18 @@ pip install -e ".[train]"   # or .[full], .[dev,full], ... — combine as needed
 ## Verify
 
 ```bash
+pragmatiq info            # resolved device (cuda / cpu), precision, flash-attn, extras
 pytest -q                 # the test suite
 ruff check . && mypy pragmatiq
-bash scripts/gates/gate_8.sh   # the CPU end-to-end pipeline smoke
+bash scripts/gates/gate_8.sh   # the nano end-to-end pipeline smoke
 ```
+
+## Running on GPU
+
+Nothing to configure: `device="auto"` is the default everywhere, `PRAGMATIQ_DEVICE=cpu`
+pins the CPU on a GPU host, and `PRAGMATIQ_INFERENCE_PRECISION=fp32` disables the bf16
+autocast at inference. The README section
+[Running on GPU](https://github.com/dynamiq-ai/pragmatiq#running-on-gpu) covers flash-attn
+wheels, the deterministic path, and the measured hardware table.
 
 Then run the [Quickstart](/docs/get-started/quickstart) to see the whole pipeline end to end.

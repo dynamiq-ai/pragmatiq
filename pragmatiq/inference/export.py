@@ -317,6 +317,12 @@ def export_onnx(model: PragmaModel, example_batch: Any, out_path: str | Path,
             "to event tokens the dense graph does not restate — serve embed-mode models "
             "with the native Triton python backend (deploy/triton)."
         )
+    major, minor = (int(x) for x in torch.__version__.split("+")[0].split(".")[:2])
+    if (major, minor) < (2, 6):
+        raise RuntimeError(
+            f"ONNX export uses the dynamo exporter with dynamic shapes, which needs torch>=2.6 "
+            f"(found {torch.__version__}); upgrade torch to export."
+        )
     try:
         import onnxscript  # noqa: F401  (torch dynamo ONNX exporter dependency)
     except ImportError as e:  # pragma: no cover - exercised only without the extra

@@ -34,6 +34,12 @@
   resolved training config; `PragmaModel.from_pretrained()` refuses to load a
   checkpoint against a mismatched tokenizer. Unseen keys/values at inference
   map to `[UNK]` with a logged warning, never an exception.
+- **Compute.** GPU-first, CPU-complete: `from_pretrained(run)` and every
+  inference entry point default to `device="auto"` (CUDA when visible, else
+  CPU; `PRAGMATIQ_DEVICE` pins it). Inference on CUDA runs in bf16 autocast
+  under `torch.inference_mode` with flash-attn's varlen kernel when installed;
+  CPU inference is fp32 and byte-stable. Training is bf16-mixed on CUDA, fp32
+  on CPU.
 
 ## Intended use
 
@@ -55,8 +61,7 @@ classifiers rather than acting as a decision system themselves:
 
 Target tasks demonstrated on the synthetic benchmark: fraud (account takeover),
 credit default (12 months), churn (6 months), AML (mule-ring membership), and
-LTV. Per-event attribution for any of these is available via integrated
-gradients (`pragmatiq/inference/explain.py`).
+LTV.
 
 **Out of scope.** Shipped checkpoints and the quickstart model are trained on
 synthetic data only and must not be used for real credit, fraud, or AML
@@ -69,18 +74,24 @@ for governed downstream models — it is not a standalone decisioning system.
 corpus comes from pragmatiq's agent-based causal simulator
 (`pragmatiq/data/synthetic/`):
 
-- A **world** with a calendar (paydays, weekends, holidays, seasonality,
-  inflation drift), a 50k-merchant universe (Zipf popularity, MCCs, noisy
-  display names), and a transfer graph with injected mule rings.
+- A **world** with a calendar (computed England & Wales bank holidays,
+  weekends, seasonality, inflation drift), a 50k-merchant universe (Zipf
+  popularity per MCC and per country, MCCs, noisy display names), and a
+  transfer graph with injected mule rings whose windows fit the horizon.
 - **Personas** drawn from a configurable archetype mixture (student, salaried,
   freelancer, family, pensioner, high-net-worth, trader, dormant, mule,
   fraud victim), each with latent traits (income level, spend propensity,
   financial stress, tech savviness, risk appetite, sociability, churn hazard,
   fraud vulnerability) sampled from per-archetype priors.
 - **Per-user simulation**: a lifecycle Markov chain, recurring
-  salary/rent/subscription series, a non-homogeneous Poisson spending process,
-  Hawkes-burst app sessions, trading and communications processes, P2P
-  transfers, and balance tracking with overdraft events.
+  salary/rent/subscription series on a per-user payday rule (last business
+  day, a fixed date, or four-weekly), a non-homogeneous Poisson spending
+  process over home-country merchants (trip-country merchants while abroad,
+  amounts emitted in the transaction currency at fixed `# GUESS` FX rates),
+  Hawkes-burst app sessions, equity trading in market hours and crypto around
+  the clock, communications, P2P transfers, and balance tracking whose
+  overdraft fees are debited from the balance. The README section "Synthetic
+  data realism" lists every constant.
 - **Episode injection**: account-takeover fraud episodes, multi-month financial
   stress arcs, and mule episodes — recorded in a latent log that the label
   oracle reads.
@@ -148,15 +159,16 @@ With it on:
   hand-crafted features, no graph, `0.604`. The synthetic mules are multi-hop
   layered laundering chains: their amounts and counterparty degree are drawn to
   *match ordinary accounts*, so 1-hop degree is not a trivial oracle ((d) is only
-  moderate at `0.604`), and the discriminative signal is the multi-hop layering
+  moderate at `0.597`), and the discriminative signal is the multi-hop layering
   chain. The **gated claim** is *relational recovery*: a GraphSAGE over the
   transfer graph recovers money-mule rings a probe on the isolated per-user
-  embedding cannot — `(c) 0.670 ≫ (a) 0.498` — so the AML signal lives in the
-  multi-hop transfer structure an isolated embedding misses, and message passing
-  adds over the same features without a graph (`(c) > (d)`). The **honest
-  limitation, reported not gated:** the learned per-user embedding adds only a
-  little over the isolated probe (`(b) 0.554 > (a) 0.498`) and does **not** beat
-  hand-crafted features (`(b) 0.554 < (c) 0.670`). The isolated embedding sits
+  embedding cannot — `(c) 0.622 ≫ (a) 0.480` (five seeds, full scale) — so the AML
+  signal lives in the multi-hop transfer structure an isolated embedding misses.
+  Message passing adds over the same features without a graph (`(c) 0.622 >
+  (d) 0.597`) by less than the per-seed spread, so that is reported, not gated.
+  The **honest limitation, reported not gated:** the learned per-user embedding
+  adds only a little over the isolated probe (`(b) 0.572 > (a) 0.480`) and does
+  **not** beat hand-crafted features (`(b) 0.572 < (c) 0.622`). The isolated embedding sits
   near chance, so the model does not capture the multi-hop laundering signal in
   the per-user representation; recovering it in a learned representation is the
   **open challenge**. This is consistent with the PRAGMA paper's own observation
@@ -168,13 +180,20 @@ With it on:
   exported graph reproduces the native embeddings (validated against onnxruntime
   on export, shape-dynamic in the user/event/token axes). The **Triton python
   backend** (`deploy/triton/`) remains the high-throughput path because it runs
-  the native varlen model and skips the padding the dense graph materializes — a
-  deployment choice, not a fidelity gap. Pick Triton for throughput, ONNX for
-  portability.
-- Long histories are capped by default (per-event ≤24 tokens, profile ≤200
-  tokens, ≤6500 most-recent events per user); set those caps to `None` to encode
-  histories in full. Cost grows with token count under the token-budget batching,
-  and very long users dominate batches.
+  the native varlen model on the GPU in bf16 and skips the padding the dense
+  graph materializes — a deployment choice, not a fidelity gap. Pick Triton for
+  throughput, ONNX for portability.
+- **Event staleness.** The paper reports task metrics moving by well under one
+  point when the most recent events are missing at scoring time; pragmatiq
+  measures the same with `pragmatiq probe --staleness-window` and the README
+  staleness table. Until that table is filled on a given build, treat serving
+  from a lagging feed as unvalidated for that build.
+- Long histories are capped by default: per-event ≤24 tokens and profile ≤200
+  tokens at encode time, and the ≤6500 most-recent events per user applied
+  when a batch is collated, after any eval-point truncation (shards keep the
+  full history). Set those caps to `None` to encode histories in full. Cost
+  grows with token count under the token-budget batching, and very long users
+  dominate batches.
 - Hyperparameters the paper does not specify (learning rates, token budget,
   vocab size, RoPE base, etc.) are documented guesses — see the README GUESS
   table.
@@ -194,9 +213,6 @@ With it on:
   population before any deployment, and comply with applicable credit and
   consumer-protection regulation (e.g. adverse-action explanation
   requirements).
-- **Explainability is a tool, not a defense.** Integrated-gradients event
-  attribution highlights which events drove a score; it does not by itself
-  satisfy model-governance or recourse obligations.
 - **Misuse.** Embeddings that summarize a person's financial behavior are
   sensitive by construction. Apply your institution's data-protection controls
   to embedding stores exactly as you would to the raw event data.

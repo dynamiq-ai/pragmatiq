@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import pragmatiq.experiments.compare as compare_mod
-from pragmatiq.experiments.compare import compare_runs
+import pragmatiq.runs.run as run_mod
+from pragmatiq.runs.run import compare_runs
 
 
 def test_compare_runs_preserves_input_order_and_flags_missing(monkeypatch) -> None:
@@ -11,7 +11,7 @@ def test_compare_runs_preserves_input_order_and_flags_missing(monkeypatch) -> No
         {"name": "alpha", "step": 100, "loss": 1.5},
         {"name": "beta", "step": 200, "loss": 0.9},
     ]
-    monkeypatch.setattr(compare_mod, "list_runs", lambda root: summaries)
+    monkeypatch.setattr(run_mod, "list_runs", lambda root: summaries)
 
     out = compare_runs(["beta", "alpha", "ghost"], runs_root="ignored")
 

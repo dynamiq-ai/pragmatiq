@@ -1,0 +1,509 @@
+{
+  "acceptance": [
+    {
+      "check": "pretrain d=1 completes",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 438370.15576593357
+    },
+    {
+      "check": "pretrain d=2 completes",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 828441.5135347035
+    },
+    {
+      "check": "pretrain d=4 completes",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 1595041.8948303591
+    },
+    {
+      "check": "pretrain d=8 completes",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 2416437.012708757
+    },
+    {
+      "check": "DDP scaling efficiency (max devices)",
+      "passed": false,
+      "threshold": ">= 0.70",
+      "value": 0.6890401242320788
+    },
+    {
+      "check": "finetune d=1 epochs",
+      "passed": true,
+      "threshold": "all epochs, finite AUC",
+      "value": 3
+    },
+    {
+      "check": "finetune d=1 epoch-2 tok/s vs epoch-1",
+      "passed": true,
+      "threshold": ">= 0.8",
+      "value": 4.969
+    },
+    {
+      "check": "finetune d=1 loader wait share (last epoch)",
+      "passed": true,
+      "threshold": "<= 0.5",
+      "value": 0.009
+    },
+    {
+      "check": "finetune d=8 epochs",
+      "passed": true,
+      "threshold": "all epochs, finite AUC",
+      "value": 3
+    },
+    {
+      "check": "serving GPU req/s > CPU req/s (concurrency 1)",
+      "passed": true,
+      "threshold": "> 1.0",
+      "value": 1.24
+    },
+    {
+      "check": "flash-attn \u2261 SDPA max abs diff",
+      "passed": true,
+      "threshold": "<= 1e-02",
+      "value": 0.0
+    },
+    {
+      "check": "bf16 vs fp32 embeddings mean cosine (|\u0394ROC-AUC| reported)",
+      "passed": true,
+      "threshold": ">= 0.99",
+      "value": 0.9999985314403546
+    },
+    {
+      "check": "serving request caps + chunked == whole",
+      "passed": true,
+      "threshold": "reject oversized; max abs < 1e-2",
+      "value": 0.004548549652099609
+    },
+    {
+      "check": "ONNX export on the pod",
+      "passed": true,
+      "threshold": "exported and validated",
+      "value": null
+    },
+    {
+      "check": "attention backend (flash on CUDA bf16; SDPA when disabled)",
+      "passed": true,
+      "threshold": "as expected",
+      "value": "flash"
+    },
+    {
+      "check": "quickstart --n-users 2000 --max-steps 80",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 310.9
+    }
+  ],
+  "all_passed": false,
+  "legs": {
+    "attention": {
+      "bf16_backend": "flash",
+      "bf16_backend_flash_disabled": "sdpa",
+      "cuda": true,
+      "flash_importable": true,
+      "fp32_backend": "sdpa",
+      "passed": true
+    },
+    "export": {
+      "max_abs_diff": 4.76837158203125e-07,
+      "opset": 18,
+      "out": "outputs/gpu-validation-h100x8/pragmatiq_embedder.onnx",
+      "passed": true,
+      "seconds": 99.2
+    },
+    "finetune": [
+      {
+        "best_val_auc": 0.5052914231558996,
+        "devices": 1,
+        "epoch_stats": [
+          {
+            "batches": 478,
+            "data_wait_seconds": 88.81,
+            "epoch": 1,
+            "phase": "train",
+            "seconds": 112.22,
+            "tokens": 14392481,
+            "tokens_per_sec": 128247.2,
+            "users": 2000
+          },
+          {
+            "batches": 118,
+            "data_wait_seconds": 0.08,
+            "epoch": 1,
+            "phase": "val",
+            "seconds": 3.33,
+            "tokens": 3446059,
+            "tokens_per_sec": 1034209.8,
+            "users": 500
+          },
+          {
+            "batches": 482,
+            "data_wait_seconds": 0.21,
+            "epoch": 2,
+            "phase": "train",
+            "seconds": 22.59,
+            "tokens": 14392481,
+            "tokens_per_sec": 637238.1,
+            "users": 2000
+          },
+          {
+            "batches": 118,
+            "data_wait_seconds": 0.07,
+            "epoch": 2,
+            "phase": "val",
+            "seconds": 3.36,
+            "tokens": 3446059,
+            "tokens_per_sec": 1024714.0,
+            "users": 500
+          },
+          {
+            "batches": 481,
+            "data_wait_seconds": 0.2,
+            "epoch": 3,
+            "phase": "train",
+            "seconds": 23.42,
+            "tokens": 14392481,
+            "tokens_per_sec": 614601.1,
+            "users": 2000
+          },
+          {
+            "batches": 118,
+            "data_wait_seconds": 0.07,
+            "epoch": 3,
+            "phase": "val",
+            "seconds": 3.45,
+            "tokens": 3446059,
+            "tokens_per_sec": 998738.7,
+            "users": 500
+          }
+        ],
+        "epochs_run": 3,
+        "returncode": 0,
+        "token_budget": 88576,
+        "val_auc_history": [
+          0.5003159058600538,
+          0.5052914231558996,
+          0.4839677776022745
+        ],
+        "wall_time_s": 180.9
+      },
+      {
+        "best_val_auc": 0.5553625019744116,
+        "devices": 8,
+        "epoch_stats": [],
+        "epochs_run": 3,
+        "returncode": 0,
+        "token_budget": 88576,
+        "val_auc_history": [
+          0.5439898910124784,
+          0.28960669720423315,
+          0.5553625019744116
+        ],
+        "wall_time_s": 543.3
+      }
+    ],
+    "flash_check": {
+      "error": null,
+      "flash_available": true,
+      "max_abs_diff": 0.0,
+      "mean_abs_diff": 0.0,
+      "passed": true,
+      "skip_reason": "",
+      "skipped": false,
+      "tol": 0.01
+    },
+    "precision": {
+      "abs_auc_delta": 0.04128482818997126,
+      "bf16_probe_auc": 0.6132856919471662,
+      "bf16_resolved": "bf16",
+      "bf16_tokens_per_sec": 1394299.7,
+      "bf16_users_per_sec": 127.2,
+      "device": "cuda:0",
+      "fp32_probe_auc": 0.5720008637571949,
+      "fp32_resolved": "fp32",
+      "fp32_tokens_per_sec": 807459.3,
+      "fp32_users_per_sec": 73.6,
+      "mean_cosine": 0.9999985314403546,
+      "min_cosine": 0.9999973463130309,
+      "passed": false
+    },
+    "quickstart_fast": {
+      "max_steps": 80,
+      "n_users": 2000,
+      "passed": true,
+      "returncode": 0,
+      "wall_time_s": 310.9
+    },
+    "serve_caps": {
+      "chunked_vs_whole_max_abs": 0.004548549652099609,
+      "device": "cuda",
+      "passed": true,
+      "rejected_oversized": true
+    },
+    "serving": [
+      {
+        "concurrency": 1,
+        "device": "cpu",
+        "n_completed": 64,
+        "p50_ms": 9.4,
+        "p95_ms": 10.2,
+        "p99_ms": 11.7,
+        "req_s": 103.72
+      },
+      {
+        "concurrency": 4,
+        "device": "cpu",
+        "n_completed": 64,
+        "p50_ms": 32.8,
+        "p95_ms": 36.5,
+        "p99_ms": 39.0,
+        "req_s": 120.69
+      },
+      {
+        "concurrency": 16,
+        "device": "cpu",
+        "n_completed": 64,
+        "p50_ms": 210.3,
+        "p95_ms": 333.0,
+        "p99_ms": 340.4,
+        "req_s": 68.11
+      },
+      {
+        "concurrency": 64,
+        "device": "cpu",
+        "n_completed": 256,
+        "p50_ms": 666.9,
+        "p95_ms": 775.3,
+        "p99_ms": 811.6,
+        "req_s": 94.06
+      },
+      {
+        "concurrency": 1,
+        "device": "cuda",
+        "n_completed": 64,
+        "p50_ms": 7.4,
+        "p95_ms": 7.6,
+        "p99_ms": 14.1,
+        "req_s": 129.02
+      },
+      {
+        "concurrency": 4,
+        "device": "cuda",
+        "n_completed": 64,
+        "p50_ms": 32.7,
+        "p95_ms": 60.0,
+        "p99_ms": 71.2,
+        "req_s": 113.9
+      },
+      {
+        "concurrency": 16,
+        "device": "cuda",
+        "n_completed": 64,
+        "p50_ms": 140.1,
+        "p95_ms": 208.0,
+        "p99_ms": 212.6,
+        "req_s": 102.52
+      },
+      {
+        "concurrency": 64,
+        "device": "cuda",
+        "n_completed": 256,
+        "p50_ms": 574.3,
+        "p95_ms": 700.5,
+        "p99_ms": 765.4,
+        "req_s": 103.03
+      }
+    ],
+    "training": [
+      {
+        "devices": 1,
+        "efficiency": 1.0,
+        "elapsed_s": 34.8,
+        "gpu_mem_gb": 1.834707968,
+        "model_size": "small",
+        "returncode": 0,
+        "run_dir": "outputs/gpu-validation-sweep8/runs/sweep_d1",
+        "run_name": "sweep_d1",
+        "token_budget": 32768,
+        "tokens_per_sec": 438370.15576593357
+      },
+      {
+        "devices": 2,
+        "efficiency": 0.9449109418582858,
+        "elapsed_s": 42.1,
+        "gpu_mem_gb": 1.882094592,
+        "model_size": "small",
+        "returncode": 0,
+        "run_dir": "outputs/gpu-validation-sweep8/runs/sweep_d2",
+        "run_name": "sweep_d2",
+        "token_budget": 32768,
+        "tokens_per_sec": 828441.5135347035
+      },
+      {
+        "devices": 4,
+        "efficiency": 0.9096432967952927,
+        "elapsed_s": 44.4,
+        "gpu_mem_gb": 1.863186432,
+        "model_size": "small",
+        "returncode": 0,
+        "run_dir": "outputs/gpu-validation-sweep8/runs/sweep_d4",
+        "run_name": "sweep_d4",
+        "token_budget": 32768,
+        "tokens_per_sec": 1595041.8948303591
+      },
+      {
+        "devices": 8,
+        "efficiency": 0.6890401242320788,
+        "elapsed_s": 60.8,
+        "gpu_mem_gb": 1.87080704,
+        "model_size": "small",
+        "returncode": 0,
+        "run_dir": "outputs/gpu-validation-sweep8/runs/sweep_d8",
+        "run_name": "sweep_d8",
+        "token_budget": 32768,
+        "tokens_per_sec": 2416437.012708757
+      }
+    ],
+    "triton": {
+      "rows": [],
+      "skip_reason": "--skip-triton flag set"
+    }
+  },
+  "meta": {
+    "cuda": "12.8",
+    "finished": "2026-09-14T23:32:43",
+    "flash_attn": "2.8.3",
+    "gpu_count": 8,
+    "gpu_name": "NVIDIA A100-SXM4-80GB",
+    "host": "88557abf377a",
+    "mode": "gpu",
+    "model_size": "small",
+    "n_users": 50000,
+    "nccl_safe": "off (training sweep) / on (fine-tune legs)",
+    "pragmatiq": "1.0.0",
+    "python": "3.11.11",
+    "sources": {
+      "everything else": "run h100x8 (same 8\u00d7A100-SXM4-80GB pod class, socket transport)",
+      "training": "run sweep8 (NVLink transport, tokens_per_sec_window steady state)"
+    },
+    "started": "2026-09-14T23:47:52",
+    "steps": 300,
+    "tag": "1.1.0",
+    "token_budget": 32768,
+    "torch": "2.8.0+cu128"
+  },
+  "utilisation": [
+    {
+      "gpu": {
+        "mean_power_w": 73.4,
+        "mean_util_pct": 3.8,
+        "mean_util_pct_steady": 5.1,
+        "n_gpus": 8,
+        "n_samples": 256,
+        "peak_mem_mib": 2439.0,
+        "peak_util_pct": 53.0
+      },
+      "label": "pretrain_d1",
+      "mean_cpu_pct": 2.2,
+      "peak_ram_gb": 56.1
+    },
+    {
+      "gpu": {
+        "mean_power_w": 80.8,
+        "mean_util_pct": 7.9,
+        "n_gpus": 8,
+        "n_samples": 320,
+        "peak_mem_mib": 3067.0,
+        "peak_util_pct": 96.0
+      },
+      "label": "pretrain_d2",
+      "mean_cpu_pct": 3.4,
+      "peak_ram_gb": 59.18
+    },
+    {
+      "gpu": {
+        "mean_power_w": 95.4,
+        "mean_util_pct": 18.2,
+        "n_gpus": 8,
+        "n_samples": 344,
+        "peak_mem_mib": 3912.0,
+        "peak_util_pct": 100.0
+      },
+      "label": "pretrain_d4",
+      "mean_cpu_pct": 5.0,
+      "peak_ram_gb": 65.85
+    },
+    {
+      "gpu": {
+        "mean_power_w": 115.3,
+        "mean_util_pct": 79.9,
+        "n_gpus": 8,
+        "n_samples": 4064,
+        "peak_mem_mib": 5650.0,
+        "peak_util_pct": 100.0
+      },
+      "label": "pretrain_d8",
+      "mean_cpu_pct": 18.2,
+      "peak_ram_gb": 142.11
+    },
+    {
+      "gpu": {
+        "mean_power_w": 75.4,
+        "mean_util_pct": 2.9,
+        "mean_util_pct_steady": 4.9,
+        "n_gpus": 8,
+        "n_samples": 1200,
+        "peak_mem_mib": 3977.0,
+        "peak_util_pct": 72.0
+      },
+      "label": "finetune_d1",
+      "mean_cpu_pct": 3.1,
+      "peak_ram_gb": 68.43
+    },
+    {
+      "gpu": {
+        "mean_power_w": 114.9,
+        "mean_util_pct": 78.9,
+        "mean_util_pct_steady": 86.1,
+        "n_gpus": 8,
+        "n_samples": 3832,
+        "peak_mem_mib": 6880.0,
+        "peak_util_pct": 100.0
+      },
+      "label": "finetune_d8",
+      "mean_cpu_pct": 23.1,
+      "peak_ram_gb": 184.97
+    },
+    {
+      "gpu": {
+        "mean_power_w": 66.7,
+        "mean_util_pct": 0.0,
+        "mean_util_pct_steady": 0.0,
+        "n_gpus": 8,
+        "n_samples": 40,
+        "peak_mem_mib": 4.0,
+        "peak_util_pct": 0.0
+      },
+      "label": "serving_cpu",
+      "mean_cpu_pct": 14.6,
+      "peak_ram_gb": 55.67
+    },
+    {
+      "gpu": {
+        "mean_power_w": 68.8,
+        "mean_util_pct": 1.3,
+        "mean_util_pct_steady": 2.2,
+        "n_gpus": 8,
+        "n_samples": 40,
+        "peak_mem_mib": 1755.0,
+        "peak_util_pct": 22.0
+      },
+      "label": "serving_cuda",
+      "mean_cpu_pct": 3.7,
+      "peak_ram_gb": 56.09
+    }
+  ]
+}

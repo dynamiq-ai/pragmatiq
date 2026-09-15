@@ -75,6 +75,7 @@ GOLDEN_COMMAND_PATHS: frozenset[str] = frozenset({
     "export",
     "benchmark",
     "gnn",
+    "info",  # 1.1.0
     "synth generate",
     "synth calibrate",
     "runs list",
@@ -83,16 +84,19 @@ GOLDEN_COMMAND_PATHS: frozenset[str] = frozenset({
 
 GOLDEN_COMMAND_PARAMS: dict[str, list[str]] = {
     "tokenize": ["data_dir", "out", "config", "tokenizer_dir", "max_users", "n_workers"],
-    "pretrain": ["shard_dir", "run_name", "model_size", "config", "runs_root", "resume", "wandb"],
-    "probe": ["shard_dir", "run", "label", "device", "probe_model", "seed"],
+    # 1.1.0: --show-config prints the resolved config without training
+    "pretrain": ["shard_dir", "run_name", "model_size", "config", "runs_root", "resume", "wandb",
+                 "show_config"],
+    "probe": ["shard_dir", "run", "label", "device", "probe_model", "seed", "staleness_window"],
     "uplift": ["shard_dir", "run", "label", "device", "learner"],
     "finetune": ["shard_dir", "run", "label", "config", "device"],
     "embed": ["shard_dir", "run", "out", "device"],
     "quickstart": ["out", "n_users", "model_size", "max_steps", "n_workers"],
     "validate": ["data_dir"],
-    "export": ["run", "shard_dir", "out"],
-    "benchmark": ["run", "shard_dir", "device", "out"],
+    "export": ["run", "shard_dir", "out", "device"],
+    "benchmark": ["run", "shard_dir", "device", "out", "precision"],
     "gnn": ["shard_dir", "run", "transfers", "aml_label", "seeds", "epochs", "device"],
+    "info": [],  # 1.1.0
     "synth generate": ["out", "config", "n_users", "seed", "n_workers", "report"],
     "synth calibrate": ["stats", "config", "out"],
     "runs list": ["runs_root"],
@@ -199,3 +203,12 @@ class TestCLISmoke:
         assert result.exit_code == 0
         assert "list" in result.output
         assert "compare" in result.output
+
+
+def test_root_version_option() -> None:
+    """1.1.0: ``pragmatiq --version`` is an eager root option."""
+    from pragmatiq.cli import _setup
+
+    sig = inspect.signature(_setup)
+    assert "version" in sig.parameters
+    assert sig.parameters["version"].default.is_eager is True

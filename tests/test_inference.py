@@ -9,13 +9,13 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+import torch
 
 from pragmatiq import api
 from pragmatiq.data.collate import VarlenCollator
 from pragmatiq.data.dataset import ShardDataset
 from pragmatiq.inference.benchmark import benchmark_batch_embed, perf_analyzer_command
 from pragmatiq.inference.embedder import BatchEmbedder
-from pragmatiq.inference.explain import EventAttributor
 from pragmatiq.models.pragmatiq import PragmaModel
 
 
@@ -210,20 +210,6 @@ class TestApiTokenizerCompatibility:
             )
 
 
-class TestEventAttributor:
-    def test_topk_events(self, trained) -> None:
-        work, run_dir = trained
-        model = PragmaModel.from_pretrained(run_dir)
-        ds = ShardDataset(work / "tok")
-        batch = VarlenCollator()([ds.get(u) for u in ds.user_ids[:3]])
-        ds.close()
-        attrs = EventAttributor(model, steps=8).attribute(batch, top_k=5)
-        assert len(attrs) == 3
-        for a in attrs:
-            assert len(a.event_indices) <= 5
-            assert len(a.scores) == len(a.event_indices)
-
-
 class TestExport:
     def test_pack_to_dense_matches_native(self, trained) -> None:
         """The dense reformulation reproduces the varlen embeddings exactly."""
@@ -282,12 +268,14 @@ class TestExport:
         assert onnx_emb.shape == native.shape
         assert np.allclose(onnx_emb, native, atol=1e-3)
 
-    def test_export_rejects_non_cpu_device(self, trained) -> None:
-        # ONNX export runs on CPU; a non-CPU device must fail fast with guidance
-        # rather than crash deep in dense-tensor construction (no GPU needed here).
+    def test_export_accepts_any_device(self, trained, tmp_path: Path) -> None:
+        # The graph is built and validated on CPU whatever the device argument says,
+        # so "auto"/"cuda" export exactly like "cpu" (no GPU needed here).
+        pytest.importorskip("onnxscript", reason="install pragmatiq[serve] for ONNX export")
+        pytest.importorskip("onnxruntime", reason="install pragmatiq[serve] for ONNX export")
         work, run_dir = trained
-        with pytest.raises(ValueError, match="CPU"):
-            api.export(run_dir, work / "tok", device="cuda")
+        res = api.export(run_dir, work / "tok", out=tmp_path / "m.onnx", device="cuda")
+        assert Path(res["out"]).exists()
 
     def test_onnx_export_self_validates(self, trained, tmp_path: Path, monkeypatch) -> None:
         pytest.importorskip("onnxscript", reason="install pragmatiq[serve] for ONNX export")
@@ -406,3 +394,96 @@ class TestTritonServingContract:
         assert emb.shape == (2, model.runtime.model.config.dim)
         assert emb.dtype == np.float32 and np.isfinite(emb).all()
         model.finalize()
+
+
+def test_from_pretrained_never_needs_full_unpickle(trained, monkeypatch) -> None:
+    """The run's checkpoint loads with weights_only=True (the safe path is the only one taken)."""
+    _work, run_dir = trained
+    calls: list[bool] = []
+    real = torch.load
+
+    def spy(*a, **kw):
+        calls.append(bool(kw.get("weights_only", False)))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(torch, "load", spy)
+    PragmaModel.from_pretrained(run_dir, device="auto")
+    assert calls == [True]
+
+
+class TestInferencePrecision:
+    """inference_context / resolve_precision / resolve_device policy (CPU-checkable part)."""
+
+    def test_precision_resolution(self, monkeypatch) -> None:
+        from pragmatiq.core.env import resolve_precision
+
+        monkeypatch.delenv("PRAGMATIQ_INFERENCE_PRECISION", raising=False)
+        assert resolve_precision("auto", "cpu") == "fp32"
+        assert resolve_precision("auto", "cuda") == "bf16"
+        assert resolve_precision("bf16", "cpu") == "fp32"  # CPU never autocasts
+        assert resolve_precision("fp32", "cuda") == "fp32"
+        monkeypatch.setenv("PRAGMATIQ_INFERENCE_PRECISION", "fp32")
+        assert resolve_precision("auto", "cuda") == "fp32"
+        with pytest.raises(ValueError, match="precision"):
+            resolve_precision("fp16", "cpu")
+
+    def test_device_env_pin(self, monkeypatch) -> None:
+        from pragmatiq.core.env import resolve_device
+
+        monkeypatch.setenv("PRAGMATIQ_DEVICE", "cpu")
+        assert resolve_device("auto") == "cpu"
+        assert resolve_device("cuda") == "cuda"  # explicit values pass through
+        monkeypatch.delenv("PRAGMATIQ_DEVICE")
+        assert resolve_device("auto") in ("cpu", "cuda")
+
+    def test_cpu_context_is_fp32_inference_mode(self, trained) -> None:
+        from pragmatiq.core.env import inference_context
+
+        work, run_dir = trained
+        model = PragmaModel.from_pretrained(run_dir)  # device="auto" → cpu here
+        assert next(model.parameters()).device.type == "cpu"
+        ds = ShardDataset(work / "tok")
+        batch = VarlenCollator()(ds.get_many(ds.user_ids[:3]))
+        ds.close()
+        with torch.no_grad():
+            ref = model.embed_users(batch)
+        with inference_context("cpu", "bf16"):  # bf16 is downgraded to fp32 on CPU
+            out = model.embed_users(batch)
+            assert out.dtype == torch.float32 and out.is_inference()
+        assert torch.equal(ref, out)
+
+    def test_embed_records_chunking_matches_single_forward(self, trained) -> None:
+        work, run_dir = trained
+        model = PragmaModel.from_pretrained(run_dir)
+        ds = ShardDataset(work / "tok")
+        tok = model._tokenizer
+        recs = [ds.get(u) for u in ds.user_ids[:6]]
+        ds.close()
+        from pragmatiq.core.schema import UserRecord
+
+        records = [UserRecord(user_id=r.user_id, events=[(int(r.event_ts[i]), "transaction",
+                              dict(tok.decode_event(r, i))) for i in range(min(r.n_events, 5))],
+                              attributes={}, lifelong=[]) for r in recs]
+        whole = model.embed_records(records)
+        chunked = model.embed_records(records, token_budget=1)  # one record per forward
+        assert whole.shape == chunked.shape == (6, model.config.dim)
+        assert np.allclose(whole, chunked, atol=1e-4)
+        assert model.embed_records([]).shape == (0, model.config.dim)
+
+    @pytest.mark.gpu
+    def test_bf16_matches_fp32_on_cuda(self, trained) -> None:
+        if not torch.cuda.is_available():
+            pytest.skip("needs CUDA")
+        work, run_dir = trained
+        model = PragmaModel.from_pretrained(run_dir, device="cuda")
+        ds = ShardDataset(work / "tok")
+        batch = VarlenCollator()(ds.get_many(ds.user_ids[:8])).to("cuda")
+        ds.close()
+        from pragmatiq.core.env import inference_context
+
+        with inference_context("cuda", "fp32"):
+            ref = model.embed_users(batch).float()
+        with inference_context("cuda", "bf16"):
+            out = model.embed_users(batch).float()
+        cos = torch.nn.functional.cosine_similarity(ref, out, dim=-1)
+        assert float(cos.min()) > 0.99

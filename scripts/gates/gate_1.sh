@@ -77,7 +77,7 @@ from pragmatiq.data.synthetic import WorldConfig, generate
 generate(WorldConfig(n_users=int(sys.argv[2]), seed=3), sys.argv[1],
          n_workers=4, write_report=False)
 EOF
-$PY tests/baselines/credit_gbdt.py --data "$DATA" --out-json "$WORK/auc.json"
+$PY scripts/baselines/credit_gbdt.py --data "$DATA" --out-json "$WORK/auc.json"
 $PY - "$WORK/auc.json" <<'EOF'
 import json, sys
 res = json.load(open(sys.argv[1]))

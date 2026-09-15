@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .config import FX_PER_GBP
 from .world import DAY_US, MCC_IDX, MCC_KEYS, World
 
 HOUR_US = 3_600_000_000
@@ -200,9 +201,10 @@ class EpisodeInjector:
         all_merch = np.concatenate([[test_merch], merch]).astype(object)
         n_all = len(all_ts)
         cur = str(_ATTACKER_CCYS[rng.integers(0, len(_ATTACKER_CCYS))])
+        fx = FX_PER_GBP.get(cur, 1.0)  # amounts are GBP internally; emitted in the card's ccy
         txn.append(
             all_ts,
-            amount=np.array([f"{a:.2f}" for a in all_amt], dtype=object),
+            amount=np.array([f"{a * fx:.2f}" for a in all_amt], dtype=object),
             currency=np.full(n_all, cur, dtype=object),
             mcc=all_mcc,
             merchant=all_merch,
@@ -314,9 +316,10 @@ class EpisodeInjector:
         atm_ts = cal.start_us() + (atm_day * DAY_US).astype(np.int64) + \
             (rng.uniform(20, 27.5, size=n_atm) % 24 * HOUR_US).astype(np.int64)
         atm_amt = np.round(rng.uniform(180, 450, size=n_atm), 2)
+        fx = FX_PER_GBP.get(ccy, 1.0)
         txn.append(
             atm_ts,  # the global merge sorts by ts; sorting here would mispair ts↔amount
-            amount=np.array([f"{a:.2f}" for a in atm_amt], dtype=object),
+            amount=np.array([f"{a * fx:.2f}" for a in atm_amt], dtype=object),
             currency=np.full(n_atm, ccy, dtype=object),
             mcc=np.full(n_atm, mcc_code["atm"], dtype=object),
             # ATM cash-out merchant names are drawn from the same noised pool as
@@ -335,7 +338,7 @@ class EpisodeInjector:
         cx_amt = np.round(rng.uniform(120, 600, size=n_cx), 2)
         txn.append(
             cx_ts,  # the global merge sorts by ts; sorting here would mispair ts↔amount/merchant
-            amount=np.array([f"{a:.2f}" for a in cx_amt], dtype=object),
+            amount=np.array([f"{a * fx:.2f}" for a in cx_amt], dtype=object),
             currency=np.full(n_cx, ccy, dtype=object),
             mcc=np.full(n_cx, mcc_code["online_retail"], dtype=object),
             merchant=_CRYPTO_EXCHANGES[rng.integers(0, len(_CRYPTO_EXCHANGES), size=n_cx)],

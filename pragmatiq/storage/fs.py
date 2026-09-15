@@ -11,10 +11,7 @@ is raised when the extra is absent.
 from __future__ import annotations
 
 import posixpath
-from collections.abc import Generator
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
 
 from fsspec import AbstractFileSystem
 from fsspec import filesystem as _fsspec_filesystem
@@ -129,18 +126,6 @@ def exists(url: str | Path) -> bool:
     return fs.exists(path)  # type: ignore[no-any-return]
 
 
-def makedirs(url: str | Path, *, exist_ok: bool = True) -> None:
-    """Create *url* (and all intermediate directories) on its filesystem.
-
-    Args:
-        url:      Target directory URL or path.
-        exist_ok: If ``True`` (default), do nothing when the directory already
-                  exists.
-    """
-    fs, path = get_fs(url)
-    fs.makedirs(path, exist_ok=exist_ok)
-
-
 def ls(url: str | Path) -> list[str]:
     """List the immediate children of *url* on its filesystem.
 
@@ -171,9 +156,8 @@ def read_bytes(url: str | Path) -> bytes:
 def write_bytes(url: str | Path, data: bytes) -> None:
     """Write *data* bytes to *url*, creating or overwriting the file.
 
-    The parent directory is created automatically if it does not exist yet,
-    matching the behaviour of :func:`~pragmatiq.storage.artifacts.write_json`.
-    This works for both local paths and remote/in-memory filesystems via
+    The parent directory is created automatically if it does not exist yet;
+    this works for both local paths and remote/in-memory filesystems via
     the underlying fsspec ``makedirs`` call.
     """
     fs, path = get_fs(url)
@@ -193,37 +177,15 @@ def write_text(url: str | Path, text: str, *, encoding: str = "utf-8") -> None:
     write_bytes(url, text.encode(encoding))
 
 
-@contextmanager
-def open_file(
-    url: str | Path, mode: str = "rb"
-) -> Generator[Any, None, None]:
-    """Open *url* on its filesystem and return a context-manager file object.
-
-    Delegates directly to :meth:`fsspec.AbstractFileSystem.open`.
-
-    Args:
-        url:  Path or URL to open.
-        mode: File mode string (``"rb"``, ``"wb"``, ``"r"``, ``"w"``…).
-
-    Yields:
-        A file-like object compatible with the chosen mode.
-    """
-    fs, path = get_fs(url)
-    with fs.open(path, mode=mode) as fh:
-        yield fh
-
-
 __all__: list[str] = [
     "get_fs",
     "is_remote",
     "is_local",
     "exists",
-    "makedirs",
     "ls",
     "remove",
     "read_bytes",
     "write_bytes",
     "read_text",
     "write_text",
-    "open_file",
 ]

@@ -17,25 +17,66 @@ from typing import Any
 
 from pragmatiq.core.config import load_yaml as _load_yaml
 from pragmatiq.core.env import resolve_device as _resolve_device
-from pragmatiq.progress import progress
+from pragmatiq.core.errors import ConfigError, DataContractError
+from pragmatiq.core.progress import progress
 from pragmatiq.storage.staging import staging as _staging
+
+__all__ = [
+    "synthesize", "tokenize", "pretrain", "pretrain_plan", "finetune", "embed", "probe",
+    "uplift", "export", "benchmark", "gnn", "validate", "quickstart", "runs_list",
+    "runs_compare", "calibrate", "info",
+]
+
+
+def _require_shard_dir(shard_dir: str | Path) -> Path:
+    """Return ``shard_dir`` as a Path, or raise a DataContractError naming the fix."""
+    p = Path(shard_dir)
+    if not p.is_dir():
+        raise DataContractError(
+            f"shard directory {str(shard_dir)!r} does not exist; pass the output of "
+            "`pragmatiq tokenize <data_dir> --out <shard_dir>`"
+        )
+    if not (p / "tokenizer").is_dir():
+        raise DataContractError(
+            f"{str(shard_dir)!r} is not a tokenized shard directory (no tokenizer/ inside); "
+            "run `pragmatiq tokenize` first"
+        )
+    return p
+
+
+def _require_run_dir(run: str | Path, checkpoint: str = "last.pt") -> Path:
+    """Return ``run`` as a Path, or raise a DataContractError naming the fix."""
+    p = Path(run)
+    if not p.is_dir():
+        raise DataContractError(
+            f"run directory {str(run)!r} does not exist; pass a trained run such as "
+            "runs/<name> (created by `pragmatiq pretrain --name <name>`)"
+        )
+    ckpt = p / "checkpoints" / checkpoint
+    if not ckpt.exists():
+        raise DataContractError(
+            f"run {str(run)!r} has no checkpoint at checkpoints/{checkpoint}; the run did not "
+            "finish a checkpoint (re-run or resume pretraining) or the path is not a run directory"
+        )
+    if not (p / "tokenizer").is_dir():
+        raise DataContractError(
+            f"run {str(run)!r} has no tokenizer/ copy; it was not written by pragmatiq pretrain"
+        )
+    return p
 
 
 def _read_shard_tokenizer_hash(shard_dir: str | Path) -> str:
     """Load the live tokenizer hash from a tokenized shard directory."""
     from pragmatiq.data.tokenizer import PragmaTokenizer
 
-    tok_dir = Path(shard_dir) / "tokenizer"
-    if not tok_dir.exists():
-        raise ValueError(f"{shard_dir!r} is missing tokenizer/; run pragmatiq tokenize first")
-    return PragmaTokenizer.load(tok_dir).content_hash
+    return PragmaTokenizer.load(_require_shard_dir(shard_dir) / "tokenizer").content_hash
 
 
 def _run_tokenizer_hash(run: str | Path) -> str:
     """Load the tokenizer hash copied into a training run."""
     from pragmatiq.data.tokenizer import PragmaTokenizer
 
-    return PragmaTokenizer.load(Path(run) / "tokenizer").content_hash
+    return PragmaTokenizer.load(_require_run_dir(run) / "tokenizer").content_hash
 
 
 def _ensure_shard_tokenizer_matches_run(shard_dir: str | Path, run: str | Path) -> None:
@@ -43,9 +84,29 @@ def _ensure_shard_tokenizer_matches_run(shard_dir: str | Path, run: str | Path) 
     shard_hash = _read_shard_tokenizer_hash(shard_dir)
     run_hash = _run_tokenizer_hash(run)
     if shard_hash != run_hash:
-        raise ValueError(
-            f"tokenizer hash mismatch: shard_dir {shard_hash!r} != run {run_hash!r}. "
-            "Re-tokenize with the run tokenizer or use the matching training run."
+        raise DataContractError(
+            f"tokenizer hash mismatch: shard_dir {str(shard_dir)!r} was encoded with tokenizer "
+            f"{shard_hash[:12]}… but run {str(run)!r} was trained with {run_hash[:12]}…. "
+            "Re-tokenize with `--tokenizer-dir <run>/tokenizer` or use the matching training run."
+        )
+
+
+def _require_label_table(label_path: str | Path) -> None:
+    """Check a label parquet exists and carries ``user_id`` + ``label`` columns."""
+    import pyarrow.parquet as pq
+
+    p = Path(label_path)
+    if not p.exists():
+        raise DataContractError(
+            f"label table {str(label_path)!r} does not exist; expected a parquet such as "
+            "<data_dir>/labels/default_12m.parquet"
+        )
+    cols = set(pq.read_schema(p).names)
+    missing = {"user_id", "label"} - cols
+    if missing:
+        raise DataContractError(
+            f"label table {str(label_path)!r} is missing column(s) {sorted(missing)}; a label "
+            "table needs string `user_id`, integer `label` and (recommended) `eval_ts` columns"
         )
 
 
@@ -63,13 +124,15 @@ def _enforce_resume_config(saved: dict[str, Any], current: dict[str, Any]) -> No
     """Validate that a resumed run keeps architecture/objective config fixed."""
     mismatches = []
     for key in sorted((set(saved) | set(current)) - _RESUME_OPERATIONAL_KEYS):
+        if key not in saved:
+            continue  # field added after the checkpoint was written; the current default applies
         if saved.get(key) != current.get(key):
             mismatches.append(f"{key}: saved={saved.get(key)!r} current={current.get(key)!r}")
     if mismatches:
         shown = "; ".join(mismatches[:8])
         if len(mismatches) > 8:
             shown += f"; ... +{len(mismatches) - 8} more"
-        raise ValueError(
+        raise ConfigError(
             "resolved config mismatch while resuming; start a new run for architecture, "
             f"optimizer, masking, data, or schedule changes. Differences: {shown}"
         )
@@ -189,7 +252,8 @@ def tokenize(
         tok.save(out / "tokenizer")
         tok_src = out / "tokenizer"
 
-        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard)
+        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard,
+                             max_events_per_user=tok.config.max_events_per_user)
         # Progress total is best-effort: manifest.json may be absent or foreign
         # (bring-your-own datasets only owe us the parquet contract).
         total: int | None = None
@@ -244,7 +308,7 @@ def pretrain(
     Returns a summary dict (run name, final step, last metrics).
     """
     if resume is not None and resume != "auto":
-        raise ValueError(
+        raise ConfigError(
             f"resume must be None or 'auto', got {resume!r}; a fresh run over an "
             "existing run dir would overwrite it"
         )
@@ -279,23 +343,28 @@ def pretrain(
         return result
 
 
-def _pretrain_inner(
+def _resolve_pretrain(
     shard_dir: str | Path,
     run_name: str,
-    model_size: str = "small",
-    config: str | Path | dict[str, Any] | None = None,
-    runs_root: str | Path = "runs",
-    resume: str | None = None,
-    **overrides: Any,
-) -> dict[str, Any]:
-    from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
-    from pragmatiq.data.tokenizer import PragmaTokenizer
-    from pragmatiq.experiments.run import Run
-    from pragmatiq.experiments.tracking import MetricLogger
-    from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
-    from pragmatiq.training.pretrainer import PreTrainer, TrainConfig
+    model_size: str,
+    config: str | Path | dict[str, Any] | None,
+    runs_root: str | Path,
+    resume: str | None,
+    overrides: dict[str, Any],
+) -> tuple[Any, Any, dict[str, Any], dict[str, Any], str, bool, Path]:
+    """The one place a pretrain configuration is resolved.
 
-    shard_dir = Path(shard_dir)
+    Returns ``(tokenizer, TrainConfig, model_overrides, resolved, model_size,
+    resuming, shard_dir)`` — shared by :func:`pretrain` (which then trains) and
+    :func:`pretrain_plan` (which only reports), so ``--show-config`` prints
+    exactly what a run would use.
+    """
+    from pragmatiq.data.tokenizer import PragmaTokenizer
+    from pragmatiq.models.pragmatiq import ModelConfig
+    from pragmatiq.runs.run import Run
+    from pragmatiq.training.pretrainer import TrainConfig
+
+    shard_dir = _require_shard_dir(shard_dir)
     tok = PragmaTokenizer.load(shard_dir / "tokenizer")
     base: dict[str, Any] = {}
     # "auto" may arrive as the literal string (Python) or a Path("auto") (the CLI's
@@ -348,11 +417,11 @@ def _pretrain_inner(
         base = merged
     # Reject unknown config keys so a mistyped option surfaces immediately as a
     # clear error. Recognized keys are TrainConfig or ModelConfig fields; `size`
-    # (the model-size selector in configs/model/*.yaml) and the derived
+    # (the model-size selector) and the derived
     # `vocab_size` are also accepted.
     unknown = set(base) - known - {"vocab_size", "size"}
     if unknown:
-        raise ValueError(f"unknown pretrain config key(s): {sorted(unknown)}; known: {sorted(known)}")
+        raise ConfigError(f"unknown pretrain config key(s): {sorted(unknown)}; known: {sorted(known)}")
     tcfg = TrainConfig(**{k: v for k, v in base.items() if k in TrainConfig.__dataclass_fields__})
     # Architecture fields (rope_base, dropout, dim, ...) in the config tune the
     # model on top of the size preset (these are the paper-silent knobs the design notes expose).
@@ -365,16 +434,62 @@ def _pretrain_inner(
     if getattr(tok.config, "text_value_mode", "bpe") == "embed":
         model_overrides.setdefault("text_encoder", tok.config.text_encoder)
         model_overrides.setdefault("text_encoder_dim", tok.config.text_encoder_dim)
-
-    from pragmatiq.training.pretrainer import seed_everything
-
-    seed_everything(tcfg.seed, tcfg.deterministic)  # deterministic init + dropout stream (resume-safe)
-    model = PragmaModel(ModelConfig.preset(model_size, tok.vocab_size, overrides=model_overrides))
+    try:
+        mcfg = ModelConfig.preset(model_size, tok.vocab_size, overrides=model_overrides)
+    except ValueError as e:
+        raise ConfigError(f"{e}; pass --model-size nano|small|medium|large") from e
     resolved = {"model_size": model_size, "vocab_size": tok.vocab_size,
-                **{k: getattr(model.config, k) for k in
+                **{k: getattr(mcfg, k) for k in
                    ("dim", "n_heads", "depth_profile", "depth_event", "depth_history",
                     "dropout", "rope_base", "max_position", "text_encoder", "text_encoder_dim")},
                 **dataclasses.asdict(tcfg)}
+    return tok, tcfg, model_overrides, resolved, model_size, resuming, shard_dir
+
+
+def pretrain_plan(
+    shard_dir: str | Path,
+    model_size: str = "small",
+    config: str | Path | dict[str, Any] | None = None,
+    run_name: str = "plan",
+    runs_root: str | Path = "runs",
+    resume: str | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    """Resolve a pretrain configuration without training (``pretrain --show-config``).
+
+    Runs the same resolution as :func:`pretrain` — YAML or dict config, ``"auto"``
+    autoconfiguration from the shards and device, the model-size preset, a resumed
+    run's stored config, and explicit overrides — and returns the resolved
+    training + architecture settings as one JSON-able dict, plus ``device`` (what
+    ``"auto"`` resolves to on this host) and ``tokenizer_hash``.
+    """
+    if resume is not None and resume != "auto":
+        raise ConfigError(f"resume must be None or 'auto', got {resume!r}")
+    tok, _tcfg, _mo, resolved, _size, resuming, _sd = _resolve_pretrain(
+        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides))
+    return {**resolved, "device": _resolve_device("auto"), "tokenizer_hash": tok.content_hash,
+            "resuming": resuming}
+
+
+def _pretrain_inner(
+    shard_dir: str | Path,
+    run_name: str,
+    model_size: str = "small",
+    config: str | Path | dict[str, Any] | None = None,
+    runs_root: str | Path = "runs",
+    resume: str | None = None,
+    **overrides: Any,
+) -> dict[str, Any]:
+    from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
+    from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
+    from pragmatiq.runs.run import Run
+    from pragmatiq.runs.tracking import MetricLogger
+    from pragmatiq.training.pretrainer import PreTrainer, seed_everything
+
+    tok, tcfg, model_overrides, resolved, model_size, resuming, shard_dir = _resolve_pretrain(
+        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides))
+    seed_everything(tcfg.seed, tcfg.deterministic)  # deterministic init + dropout stream (resume-safe)
+    model = PragmaModel(ModelConfig.preset(model_size, tok.vocab_size, overrides=model_overrides))
     run = (Run.open(run_name, runs_root) if resuming
            else Run.create(run_name, resolved, tcfg.seed, tok.content_hash, runs_root,
                            tokenizer_src=shard_dir / "tokenizer"))
@@ -385,7 +500,8 @@ def _pretrain_inner(
     trainer = PreTrainer(model, run, tcfg, tok.content_hash, logger=logger)
     ds = ShardDataset(shard_dir)
     sampler = DynamicBatchSampler(ds.index, token_budget=tcfg.token_budget, seed=tcfg.seed)
-    loader = ShardDataLoader(ds, sampler)
+    loader = ShardDataLoader(ds, sampler, prefetch=tcfg.prefetch_batches,
+                             pin_memory=str(trainer.fabric.device).startswith("cuda"))
     trainer.fit(loader, resume=resume)
     logger.close()
     ds.close()
@@ -438,7 +554,7 @@ def embed(
         emb = embed_users(model, ds, token_budget=token_budget, device=device)
         ds.close()
         if not emb:
-            raise ValueError(f"no users found in shard_dir {shard_dir!r}; check the path and that "
+            raise DataContractError(f"no users found in shard_dir {str(shard_dir)!r}; check the path and that "
                              "tokenize() produced shards")
         if out is not None:
             import numpy as np
@@ -462,6 +578,7 @@ def probe(
     seed: int = 0,
     with_baseline: bool = True,
     probe_model: str = "gbdt",
+    staleness_window: str | int | None = None,
 ) -> dict[str, Any]:
     """Probe a trained model on a label table; compares to a raw-count baseline.
 
@@ -471,6 +588,11 @@ def probe(
     ROC-AUC and PR-AUC are returned. Histories are truncated at each user's ``eval_ts``
     (when present) before embedding, for both the probe and the baseline — task metrics
     must never be computed on embeddings that contain the outcome window.
+
+    ``staleness_window`` (``"6h"``, ``"1d"``, seconds as a number) additionally drops
+    the most recent window of history before every eval point — the paper's event
+    staleness check (§3.4.2): a model is safe to serve from a lagging feed when its
+    metrics barely move. Requires ``eval_ts`` in the label table.
     """
     with _staging() as stage:
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
@@ -484,22 +606,30 @@ def probe(
             _load_label_table,
             cutoffs_from_labels,
             embed_users,
+            staleness_to_us,
         )
 
+        staleness_us = staleness_to_us(staleness_window)
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        _require_label_table(label_path)
         model = PragmaModel.from_pretrained(run, device=device)
         ds = ShardDataset(shard_dir)
         uids, _, eval_us = _load_label_table(label_path)
-        cutoffs = cutoffs_from_labels(uids, eval_us)
+        if staleness_us and eval_us is None:
+            raise DataContractError(
+                f"staleness_window needs an eval_ts column in the label table {str(label_path)!r}")
+        cutoffs = cutoffs_from_labels(uids, eval_us, staleness_us)
         emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
         probe_res = EmbeddingProbe(model=probe_model, seed=seed).run(emb, label_path)
         out_dict: dict[str, Any] = {"probe_model": probe_model,
                                     "probe_auc": probe_res.auc, "probe_pr_auc": probe_res.pr_auc,
                                     "probe_accuracy": probe_res.accuracy,
-                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence}
+                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence,
+                                    "staleness_window": staleness_window, "staleness_us": staleness_us}
         if with_baseline:
-            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path)
+            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path,
+                                                                     staleness_us=staleness_us)
             out_dict["baseline_auc"] = base.auc
             out_dict["baseline_pr_auc"] = base.pr_auc
         ds.close()
@@ -590,14 +720,15 @@ def finetune(
         base.update(overrides)
         unknown = set(base) - set(FineTuneConfig.__dataclass_fields__)
         if unknown:
-            raise ValueError(f"unknown finetune config key(s): {sorted(unknown)}; "
-                             f"known: {sorted(FineTuneConfig.__dataclass_fields__)}")
+            raise ConfigError(f"unknown finetune config key(s): {sorted(unknown)}; "
+                              f"known: {sorted(FineTuneConfig.__dataclass_fields__)}")
         fcfg = FineTuneConfig(**{k: v for k, v in base.items()
                                  if k in FineTuneConfig.__dataclass_fields__})
         # Seed before LoRA init + dropout so the same seed → identical adapters (rule 2).
         seed_everything(fcfg.seed)
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
+        _require_label_table(label_path)
         model = PragmaModel.from_pretrained(run, device=device)
         ds = ShardDataset(shard_dir)
         result = LoRAFineTuner(model, fcfg, device=device).fit(ds, label_path)
@@ -609,12 +740,14 @@ def export(
     run: str | Path,
     shard_dir: str | Path,
     out: str | Path = "pragmatiq_embedder.onnx",
-    device: str = "cpu",
+    device: str = "auto",
 ) -> dict[str, Any]:
     """Export the dense ONNX reformulation of the model from one example user.
 
-    ONNX export runs on CPU (the dense graph and its constants are built on CPU and
-    validated against onnxruntime's CPU provider); ``device`` must be ``"cpu"``.
+    The dense graph is traced and validated on CPU against onnxruntime's CPU
+    provider whatever ``device`` says (the export is a graph, not a run), so
+    ``"auto"`` and ``"cuda"`` are accepted and the model is simply loaded on CPU.
+    Needs torch >= 2.6 (the dynamo exporter) and the ``serve`` extra.
     """
     with _staging() as stage:
         run = stage.input(run)  # type: ignore[assignment]
@@ -627,12 +760,10 @@ def export(
         from pragmatiq.inference.export import export_onnx
         from pragmatiq.models.pragmatiq import PragmaModel
 
-        if _resolve_device(device) != "cpu":
-            raise ValueError(f"ONNX export runs on CPU; pass device='cpu' (got {device!r})")
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
-        model = PragmaModel.from_pretrained(run, device="cpu")
+        model = PragmaModel.from_pretrained(run, device="cpu")  # the graph is built on CPU
         ds = ShardDataset(shard_dir)
-        example = VarlenCollator()([ds.get(ds.user_ids[0])])
+        example = VarlenCollator(max_events=ds.max_events)([ds.get(ds.user_ids[0])])
         ds.close()
         result = export_onnx(model, example, out)
         if _out_staged:
@@ -646,10 +777,15 @@ def benchmark(
     run: str | Path,
     shard_dir: str | Path,
     device: str = "auto",
-    out: str | Path = "deploy/benchmarks/RESULTS.md",
+    out: str | Path = "benchmark_results.md",
     max_users: int | None = None,
+    precision: str = "auto",
 ) -> dict[str, Any]:
-    """Benchmark batch-embedding throughput and write RESULTS.md."""
+    """Benchmark batch-embedding throughput and write a results markdown file.
+
+    ``precision`` (``auto`` | ``bf16`` | ``fp32``) is the CUDA autocast dtype;
+    ``auto`` is bf16 on CUDA and fp32 on CPU.
+    """
     with _staging() as stage:
         run = stage.input(run)  # type: ignore[assignment]
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
@@ -660,7 +796,8 @@ def benchmark(
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
         model = PragmaModel.from_pretrained(run, device=device)
-        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users)
+        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users,
+                                      precision=precision)
         write_results(stats, out)
         return stats
 
@@ -763,8 +900,10 @@ def quickstart(
     synthesize({"n_users": n_users, "seed": seed}, out=raw, n_workers=n_workers, write_report=False)
     tokenize(raw, tok, config={"target_vocab": 28000, "n_buckets": 64})
     summary = pretrain(tok, "quickstart", model_size=model_size,
+                       # One device: a nano smoke run gains nothing from DDP, and on an
+                       # 8-GPU host the launch and all-reduce overhead made it ~2.5x slower.
                        config={"max_steps": max_steps, "token_budget": 8192,
-                               "warmup_steps": max(10, max_steps // 10)},
+                               "warmup_steps": max(10, max_steps // 10), "devices": 1},
                        runs_root=runs_root)
     res = probe(tok, summary["run_dir"], label)
     return {"run_dir": summary["run_dir"], "probe": res,
@@ -790,7 +929,7 @@ def runs_list(runs_root: str | Path = "runs") -> list[dict[str, Any]]:
         return []
     with _staging() as stage:
         runs_root = stage.input(runs_root)  # type: ignore[assignment]
-        from pragmatiq.experiments.run import list_runs
+        from pragmatiq.runs.run import list_runs
 
         return list_runs(runs_root)
 
@@ -801,7 +940,7 @@ def runs_compare(names: list[str], runs_root: str | Path = "runs") -> list[dict[
         return [{"name": n, "missing": True} for n in names]
     with _staging() as stage:
         runs_root = stage.input(runs_root)  # type: ignore[assignment]
-        from pragmatiq.experiments.compare import compare_runs
+        from pragmatiq.runs.run import compare_runs
 
         return compare_runs(names, runs_root)
 
@@ -832,3 +971,73 @@ def calibrate(
 
             OmegaConf.save(OmegaConf.create(result), Path(out))
         return result
+
+
+_ENV_VARS: tuple[str, ...] = (
+    "PRAGMATIQ_DEVICE", "PRAGMATIQ_INFERENCE_PRECISION", "PRAGMATIQ_DISABLE_FLASH",
+    "PRAGMATIQ_SERVE_CPU", "PRAGMATIQ_SERVE_MAX_RECORDS", "PRAGMATIQ_SERVE_TOKEN_BUDGET",
+    "PRAGMATIQ_OUT", "PRAGMATIQ_RUN", "PRAGMATIQ_DETERMINISTIC",
+)
+_EXTRA_MODULES: tuple[tuple[str, str], ...] = (
+    ("lightning", "train"), ("onnxruntime", "serve"), ("onnxscript", "serve"),
+    ("torch_geometric", "aml"), ("transformers", "text"), ("lightgbm", "gbdt"),
+    ("wandb", "tracking"), ("streamlit", "demo"), ("s3fs", "s3"), ("gcsfs", "gcs"),
+    ("adlfs", "azure"), ("tritonclient", "triton-client"),
+)
+
+
+def info() -> dict[str, Any]:
+    """Describe this installation: versions, devices, kernels, extras and env vars.
+
+    The output of ``pragmatiq info`` — the first thing to paste into a bug
+    report. Reports the pragmatiq / Python / torch versions, what ``device="auto"``
+    resolves to (with every visible CUDA device and its memory), whether
+    flash-attn is importable, which attention backend each device/dtype pair
+    would use, the inference precision ``"auto"`` resolves to, which optional
+    extras are importable, and the value of every ``PRAGMATIQ_*`` environment
+    variable pragmatiq honours.
+    """
+    import importlib
+    import os
+    import platform
+    from importlib.metadata import PackageNotFoundError, version
+
+    import torch
+
+    import pragmatiq
+    from pragmatiq.core.env import resolve_precision
+    from pragmatiq.models.layers import attention_backend, flash_available
+
+    device = _resolve_device("auto")
+    cuda: dict[str, Any] = {"available": bool(torch.cuda.is_available()), "devices": []}
+    if cuda["available"]:
+        cuda["version"] = torch.version.cuda
+        for i in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(i)
+            cuda["devices"].append({"index": i, "name": props.name,
+                                    "memory_gib": round(props.total_memory / (1024 ** 3), 1)})
+    try:
+        flash_version: str | None = version("flash-attn")
+    except PackageNotFoundError:
+        flash_version = None
+    extras: dict[str, dict[str, Any]] = {}
+    for module, extra in _EXTRA_MODULES:
+        try:
+            importlib.import_module(module)
+            ok = True
+        except Exception:
+            ok = False
+        extras[module] = {"importable": ok, "extra": extra}
+    return {
+        "pragmatiq": pragmatiq.__version__,
+        "python": platform.python_version(),
+        "torch": torch.__version__,
+        "device": device,
+        "cuda": cuda,
+        "flash_attn": {"importable": flash_available(), "version": flash_version},
+        "attention_backend": {"cuda/bf16": attention_backend("cuda", torch.bfloat16),
+                              "cpu/fp32": attention_backend("cpu", torch.float32)},
+        "inference_precision": resolve_precision("auto", device),
+        "extras": extras,
+        "env": {k: os.environ.get(k) for k in _ENV_VARS},
+    }

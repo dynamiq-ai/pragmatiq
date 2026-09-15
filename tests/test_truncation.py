@@ -120,3 +120,99 @@ class TestTruncateRecord:
         wrapped = TruncatingCollator({})(recs)
         assert plain.n_tokens == wrapped.n_tokens
         assert plain.n_events == wrapped.n_events
+
+
+class TestEventCapAtCollate:
+    """The per-user event cap is applied when a batch is collated, after the eval-point cut."""
+
+    @staticmethod
+    def _record(n: int) -> UserRecord:
+        hour = 3_600_000_000
+        return UserRecord(
+            user_id="heavy",
+            events=[(int((i + 1) * hour), "transaction", {"amount": f"{i + 1}.50", "mcc": "5411"})
+                    for i in range(n)],
+            attributes={"country": "GB"}, lifelong=[("kyc_passed", hour)], as_of=int((n + 1) * hour),
+        )
+
+    def test_encode_keeps_the_full_history(self, dataset: ShardDataset) -> None:
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        tok.config.max_events_per_user = 10
+        rec = tok.encode(self._record(40))
+        assert rec.n_events == 40  # shards carry everything; the cap is a batch-time decision
+
+    def test_cap_events_keeps_most_recent(self, dataset: ShardDataset) -> None:
+        from pragmatiq.data.tokenizer import cap_events
+
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        full = tok.encode(self._record(40))
+        capped = cap_events(full, 10)
+        assert capped.n_events == 10
+        assert np.array_equal(capped.event_ts, full.event_ts[30:])
+        assert capped.event_offsets[0] == 0 and capped.event_offsets[-1] == capped.key_ids.size
+        assert np.array_equal(capped.key_ids, full.key_ids[int(full.event_offsets[30]):])
+        assert np.array_equal(capped.time_log, full.time_log[30:])  # still referenced to the last event
+        assert np.array_equal(capped.prof_key_ids, full.prof_key_ids)  # profile untouched
+        assert cap_events(full, 40) is full and cap_events(full, None) is full
+
+    def test_truncating_collator_caps_after_the_cutoff(self, dataset: ShardDataset) -> None:
+        tok = PragmaTokenizer.load(dataset.dir / "tokenizer")
+        full = tok.encode(self._record(40))
+        cutoff = int(full.event_ts[20])  # events 0..19 are before the eval point
+        batch = TruncatingCollator({"heavy": cutoff}, max_events=10)([full])
+        assert batch.n_events == 10
+        assert np.array_equal(batch.event_ts.numpy(), full.event_ts[10:20])  # the 10 most recent BEFORE the cut
+        plain = VarlenCollator(max_events=10)([full])
+        assert np.array_equal(plain.event_ts.numpy(), full.event_ts[30:])
+
+    def test_manifest_carries_the_cap_and_loader_applies_it(self, dataset: ShardDataset) -> None:
+        assert dataset.max_events == 6500  # TokenizerConfig default, recorded at tokenize time
+        from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader
+
+        loader = ShardDataLoader(dataset, DynamicBatchSampler(dataset.index, token_budget=2048, seed=0))
+        assert loader.collator.max_events == 6500
+
+
+class TestStaleness:
+    """Staleness windows move every eval-point cutoff earlier (paper §3.4.2)."""
+
+    def test_window_parsing(self) -> None:
+        from pragmatiq.training.probe import staleness_to_us
+
+        assert staleness_to_us(None) == 0 and staleness_to_us("0") == 0 and staleness_to_us(0) == 0
+        assert staleness_to_us("90s") == 90_000_000
+        assert staleness_to_us("30m") == 30 * 60_000_000
+        assert staleness_to_us("6h") == 6 * 3_600_000_000
+        assert staleness_to_us("1d") == 86_400_000_000
+        assert staleness_to_us("2w") == 14 * 86_400_000_000
+        assert staleness_to_us(1.5) == 1_500_000
+        with pytest.raises(ValueError, match="staleness window"):
+            staleness_to_us("6 hours")
+        with pytest.raises(ValueError, match=">= 0"):
+            staleness_to_us(-1)
+
+    def test_cutoffs_shift_earlier(self) -> None:
+        from pragmatiq.training.probe import cutoffs_from_labels
+
+        eval_us = np.array([10_000_000_000, 20_000_000_000], dtype=np.int64)
+        fresh = cutoffs_from_labels(["a", "b"], eval_us)
+        stale = cutoffs_from_labels(["a", "b"], eval_us, staleness_us=3_600_000_000)
+        assert fresh == {"a": 10_000_000_000, "b": 20_000_000_000}
+        assert stale == {"a": 10_000_000_000 - 3_600_000_000, "b": 20_000_000_000 - 3_600_000_000}
+        assert cutoffs_from_labels(["a"], None, staleness_us=5) is None
+
+    def test_baseline_features_shrink_with_staleness(self, dataset: ShardDataset) -> None:
+        from pragmatiq.training.probe import RawCountBaseline, cutoffs_from_labels
+
+        uids = dataset.user_ids[:20]
+        recs = [dataset.get(u) for u in uids]
+        eval_us = np.array([int(r.event_ts[-1]) + 1 for r in recs], dtype=np.int64)  # just after the last event
+        base = RawCountBaseline(seed=0)
+        prev = None
+        for window in (0, 86_400_000_000, 30 * 86_400_000_000, 3 * 365 * 86_400_000_000):
+            feats = base.features(dataset, uids, cutoffs=cutoffs_from_labels(uids, eval_us, window))
+            n_events = feats[:, 0]
+            if prev is not None:
+                assert (n_events <= prev).all() and n_events.sum() < prev.sum()
+            prev = n_events
+        assert prev.sum() == 0  # a window longer than the horizon leaves nothing

@@ -170,8 +170,8 @@ class SageMakerAdapter:
                     # Same path the rewritten config.pbtxt run_dir parameter
                     # points at — package() keeps the two in lock-step.
                     "PRAGMATIQ_RUN": f"{_SM_MODEL_DIR}/{_RUN_SUBDIR}",
-                    # Set to '1' to enable GPU inference (CUDA must be available).
-                    "PRAGMATIQ_SERVE_GPU": "1",
+                    # Serving is GPU-first: the backend picks CUDA when the instance
+                    # has one. Set PRAGMATIQ_SERVE_CPU=1 to pin a CPU instance type.
                     # Names the Triton model directory shipped in model.tar.gz.
                     "SAGEMAKER_TRITON_DEFAULT_MODEL_NAME": _TRITON_MODEL_NAME,
                 },

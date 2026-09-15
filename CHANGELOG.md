@@ -4,9 +4,212 @@
 > (arXiv 2604.08649) and is not affiliated with or endorsed by Revolut.
 
 All notable changes to pragmatiq are documented in this file. This project
-follows [Semantic Versioning](https://semver.org); 0.x releases are pre-1.0 and
-the public API may change. From **1.0.0** onward the public API is frozen and
-SemVer applies (see [`docs/STABILITY.md`](docs/STABILITY.md)).
+follows [Semantic Versioning](https://semver.org) with the pre-2.0 caveat in
+[`docs/STABILITY.md`](docs/STABILITY.md): a minor release may break, and every
+break is listed under *Breaking* with a migration line.
+
+## [1.1.0] — GPU-first, generator v2, leaner tree
+
+The GPU is the default target, the synthetic book is more realistic, the data
+path and trainer shed their host-side stalls, and ~3k lines of dead or
+unmaintained code are gone. This is a **minor release that breaks** where
+carrying compatibility would have cost more than it was worth; every break is
+listed under *Breaking* with a migration line, and `docs/STABILITY.md` now
+states the pre-2.0 policy that allows this.
+
+### Breaking
+
+- **Re-tokenize your shards.** The per-user event cap (`max_events_per_user`,
+  6500) is no longer applied at encode time; shards keep the full history and
+  the cap is applied when a batch is collated, *after* the eval-point cut, from
+  a `max_events_per_user` entry in the shard manifest. `TokenizerConfig` also
+  gained `max_counter_distinct`, which changes the tokenizer content hash.
+  *Migration:* run `pragmatiq tokenize` again; models trained on 1.0.x shards
+  keep loading against their own copied tokenizer, but new shards need a new
+  fit or `--tokenizer-dir` pointing at the run's tokenizer.
+- **Generator v2 replaces v1.** The same seed produces a different (more
+  realistic) book than 1.0.x: amounts are in the transaction currency, rent
+  and subscriptions no longer earn interchange, bank holidays are computed,
+  paydays vary per user, trading keeps market hours, overdraft fees feed the
+  balance, merchants follow the user's country. *Migration:* regenerate
+  synthetic data and any result table derived from it; label prevalences move
+  slightly (credit ≈ 2.5 %, churn ≈ 10 %, `ltv_positive` ≈ 73 % at the
+  default config).
+- **`PragmaModel.from_pretrained(run, device="auto")`** — the default device
+  was `"cpu"`. *Migration:* pass `device="cpu"` or set `PRAGMATIQ_DEVICE=cpu`
+  to keep CPU inference on a GPU host. `embed_users`, `BatchEmbedder`,
+  `benchmark_batch_embed`, `LoRAFineTuner` default to `"auto"` too.
+- **Serving is GPU-first; `PRAGMATIQ_SERVE_GPU` is gone.** The Triton config
+  ships `KIND_GPU`, `deploy/docker-compose.yaml` reserves the host GPUs, and
+  the backend picks CUDA whenever it is visible. *Migration:* for a CPU-only
+  host use `deploy/docker-compose.cpu.yaml` or `scripts/deploy_serving.sh`
+  (which overlays `deploy/triton/config.cpu.pbtxt` when `nvidia-smi` is
+  absent), or set `PRAGMATIQ_SERVE_CPU=1`. Requests are now validated (string
+  `user_id`, `events` list per record) and capped at
+  `PRAGMATIQ_SERVE_MAX_RECORDS` (1024) users.
+- **Dependency floors:** `torch>=2.6` (dynamo ONNX exporter, `weights_only`
+  checkpoint loading), `typer>=0.12`. The Triton image is based on NGC
+  `tritonserver:25.06-py3` (torch 2.8). *Migration:* upgrade torch.
+- **`pragmatiq benchmark` writes `benchmark_results.md`** in the current
+  directory instead of `deploy/benchmarks/RESULTS.md`; `api.benchmark(out=...)`
+  default changed accordingly. `api.export(device=...)` defaults to `"auto"`
+  and no longer rejects non-CPU values (the graph is always built on CPU).
+- **`pragmatiq pretrain` defaults to `--config auto`** (batch and schedule
+  sized from the data and device). *Migration:* pass `--config
+  configs/pretrain.yaml` for the fixed defaults.
+- **`FineTuneConfig.token_budget` defaults to `None`** (16 384 on CPU, sized
+  from device memory on CUDA). *Migration:* set it explicitly to pin a budget.
+- **Module moves (internal paths are not contract, listed for grep):**
+  `pragmatiq/progress.py` → `pragmatiq/core/progress.py`;
+  `pragmatiq/experiments/` → `pragmatiq/runs/` (`Run`, `MetricLogger`,
+  `compare_runs`); `tests/baselines/credit_gbdt.py` →
+  `scripts/baselines/credit_gbdt.py`; `MissingExtraError` lives in
+  `pragmatiq.core.errors` (re-exported by `integrations`).
+- **Removed** (see below): the event-attribution module, the multitask
+  inference module, the offline bundle, the Azure ML and Nebius adapter
+  stubs, `storage.artifacts`, unused storage/env helpers, `configs/model/*`,
+  the `fraud` / `aml_gnn` fine-tune YAMLs, `configs/pretrain_nano.yaml`,
+  `docs/audit/`, `sbom/`.
+
+### Added
+
+- **`pragmatiq info`** (versions, resolved device, CUDA, flash-attn,
+  importable extras, run/data roots; `api.info()`), **`pragmatiq --version`**,
+  and **`pragmatiq pretrain --show-config`** (`api.pretrain_plan`) to print the
+  resolved training plan without training.
+- **Inference precision policy** (`pragmatiq.core.env`): `inference_context`
+  wraps every inference forward in `torch.inference_mode` plus bf16 autocast
+  on CUDA (which is what routes attention through the flash varlen kernel);
+  `precision="auto|bf16|fp32"` on `embed_records`, `embed_users`,
+  `BatchEmbedder`, `benchmark` (`--precision`), serving; the
+  `PRAGMATIQ_INFERENCE_PRECISION` and `PRAGMATIQ_DEVICE` environment pins.
+- **`embed_records(records, token_budget=...)`** splits large requests into
+  bounded forward passes; the serving runtime uses it with
+  `PRAGMATIQ_SERVE_TOKEN_BUDGET` (16 384). `request_limits()` exposes the caps.
+- **Event-staleness evaluation** (paper §3.4.2): `api.probe(...,
+  staleness_window="6h")` / `pragmatiq probe --staleness-window`, applied to
+  the probe and the raw-count baseline alike; `scripts/benchmarks/
+  staleness_probe.py` sweeps 0 / 1h / 6h / 1d / 3d into the README
+  `STALENESS_PROBE_RESULTS` block.
+- **Generator v2 realism**: FX-converted amounts (`FX_PER_GBP`), card-only
+  interchange (`monthly_card_spend`), computed England & Wales bank holidays
+  (`uk_bank_holidays`, `easter_sunday`), per-user payday rules, market-hours
+  equity trading with 24/7 crypto, overdraft fees debited from the balance,
+  clamped mule windows, home-country merchant pools and trip-country travel
+  spend, cross-border online orders. Tests cover each property.
+- **Prefetching shard loader** (`ShardDataLoader(prefetch=, pin_memory=)`)
+  used by pretraining (`TrainConfig.prefetch_batches`), fine-tuning
+  (`FineTuneConfig.prefetch_batches`), batch embedding and the benchmark; the
+  sampler position it checkpoints is exact across prefetch depths.
+- **Fine-tune `epoch_stats`** (batches, users, tokens, seconds, tokens/s per
+  epoch and phase) in the `finetune` result, plus `token_budget`; a
+  single-process fallback with a warning when several GPUs are visible but
+  `lightning` is not installed.
+- **`TrainConfig.accelerator`** (`auto|cpu|cuda`) so an explicit CPU run on a
+  GPU host is possible.
+- **`TokenizerConfig.max_counter_distinct`** (1 000 000) bounds `fit()`
+  memory on continuous numeric keys; a key that saturates and then stops
+  parsing as a number raises with a pointer to `force_numeric` /
+  `force_categorical`.
+- **Typed errors** `ConfigError` and `DataContractError` in
+  `pragmatiq.core.errors`, raised where a mistyped config or a broken data
+  contract used to surface as a bare `ValueError`.
+- **`api.__all__`**, read by `scripts/docs_facts.py`.
+- **GPU validation package** `scripts/gpuval/` (monitoring, legs, training,
+  serving, flash check, report) replacing the monolithic `scripts/validate_gpu.py`;
+  new legs: quickstart timing, export on the GPU image, request-cap check,
+  fine-tune epoch stats, attention-backend report; results land in
+  `docs/benchmarks/gpu-validation-1.1.0.json` and render into the README
+  `GPU_VALIDATION_RESULTS` block, drift-checked in CI.
+- `deploy/triton/config.cpu.pbtxt`, `deploy/docker-compose.cpu.yaml`, the
+  `flash` extra (`flash-attn>=2.4.1` floor), the `gpu` pytest marker.
+- CI runs every gate in `scripts/gates/` (including `gate_serve_slim`,
+  `gate_storage`).
+
+### Changed
+
+- **Varlen attention** (`pragmatiq/models/layers.py`): the SDPA fallback
+  scatters with `index_copy_` / `index_select` (deterministic under
+  `torch.use_deterministic_algorithms`, no more crash on CUDA); the segment
+  layout (positions, mask, RoPE tables) is built once per encoder forward and
+  threaded through the blocks; segments are grouped into length buckets so one
+  6,500-event history no longer pads every other segment in the batch to its
+  width (the padded path was O(n_seg × max_len²) on heavy books — a GPU
+  fine-tune without flash-attn ran at 1% utilisation); `attention_backend()` /
+  `flash_available()` report the active kernel; `PRAGMATIQ_DISABLE_FLASH=1`
+  forces SDPA.
+- **AML gate (gate 6)** gates relational recovery only — GraphSAGE + hand-crafted
+  features (c) beating the isolated probe (a) beyond the cross-seed noise. Whether
+  message passing adds over the no-graph control (c > d) is reported, not gated:
+  on generator v2 at full scale the margin is 0.025 with a per-seed spread of 0.043
+  (five seeds). The README/notebook AML table is regenerated on generator v2.
+- **Trainer metrics** log `tokens_per_sec_window` (the rate over the last log
+  interval) next to the cumulative `tokens_per_sec`; the GPU validation sweep
+  reports the steady-state median of the window rate.
+- **`quickstart`** pins `devices=1`: a nano smoke run gains nothing from DDP and
+  was 2.5× slower on an 8-GPU host.
+- **Shard cache** (`ShardDataset`): sized in bytes (a quarter of RAM, up to
+  16 GiB) instead of four shards; `cache_shards=` still pins a count.
+- **Fine-tune `epoch_stats`** carry `data_wait_seconds` (time spent waiting on
+  the loader) next to `tokens_per_sec`, so a slow epoch can be attributed to the
+  host or the device from the result dict alone.
+- **GPU validation harness**: serving legs warm up and send 64+ requests per
+  concurrency level; `scripts/benchmarks/refresh_results.py` regenerates every
+  README/notebook result table on one pod; `scripts/validate_gpu.py
+  --render-json` re-renders a validation JSON into the README block; the RunPod
+  launcher pins the release torch build the flash-attn wheel targets and drops
+  the image's nightly torchvision/torchaudio.
+- **Collator** vectorized with `np.repeat` / `np.diff`; `PackedBatch` carries
+  host-side `max_len_event` / `max_len_history` / `max_len_profile` so the
+  model never syncs to size a block; `PackedBatch.pin_memory()` and
+  `to(device, non_blocking=)`.
+- **Trainer**: one host read per micro-batch, per-type metrics only on logged
+  steps, a single stacked `isfinite` over all grads, Python `random` state in
+  checkpoints, checkpoints loaded with `weights_only=True` (fallback with a
+  warning for foreign files), resume-config check tolerant of keys added by a
+  newer version.
+- **Tokenizer fit** keeps numeric samples as float64 chunks with the same
+  reservoir replay (byte-identical bins); per-day timezone offsets with DST
+  transition bisection; `LargeListArray` shard columns; incremental LMDB
+  profile puts; `UserIndex.meta_many` / `ShardDataset.get_many` in one
+  transaction; `validate` vectorized with `pyarrow.compute`.
+- **Fine-tuning** on CUDA runs bf16 autocast in the single-process path too,
+  sizes `token_budget` from device memory, and prefetches batches.
+- **ONNX export** requires torch >= 2.6 and says so; `export` accepts any
+  `device` and builds on CPU.
+- **Triton image** installs every runtime dependency from `pyproject.toml`
+  (the hand-maintained list once shipped without `fsspec`) and smoke-imports
+  the serving runtime at build time.
+- **Docs**: README rewritten around the GPU-first story (Hardware table,
+  Running on GPU, Synthetic data realism, event staleness, serving device
+  policy, gates table); `docs/STABILITY.md` rewritten to the pre-2.0 policy;
+  `RELEASING.md` documents the feature branch → PR → `main` flow with
+  `develop` mirroring `main`.
+- Smaller fixes: LoRA target matcher anchored on the leaf module name; the
+  GNN keeps the best trained state even below chance (`best_val=-1.0`);
+  the hash text encoder memoizes; the fine-tuner caches its parameter list and
+  skips probability computation on train batches; the CPU intra-op thread cap
+  is a no-op on CUDA; `pyyaml` and `pandas` left the core dependencies
+  (`pandas` in the `aml` / `demo` / `dev` extras); `tritonclient` moved to a
+  `triton-client` extra.
+
+### Removed
+
+- `pragmatiq/inference/explain.py` (integrated-gradients event attribution)
+  and the notebook / README material that referenced it.
+- `pragmatiq/inference/multitask.py` (the benchmark script
+  `scripts/benchmarks/multitask_probe.py` renders its own table).
+- `deploy/offline/` (offline bundle) and the `offline_mode` /
+  `telemetry_enabled` env flags nothing read.
+- `integrations/azure` and `integrations/nebius` stub adapters; the runbook
+  in `docs/INTEGRATIONS.md` covers those platforms with the generic Triton image.
+- `pragmatiq/storage/artifacts.py`, `storage.fs.open_file` / `makedirs`,
+  `storage.cache.local_path` and `PRAGMATIQ_CACHE_DIR`.
+- `configs/model/*.yaml`, `configs/finetune/fraud.yaml`,
+  `configs/finetune/aml_gnn.yaml`, `configs/pretrain_nano.yaml`.
+- `docs/audit/` historical records, the `sbom/` README (folded into
+  `SECURITY.md`), `scripts/validate_gpu.py` (replaced by `scripts/gpuval/`).
+- `PRAGMATIQ_SERVE_GPU`.
 
 ## [1.0.0] — 1.0 production release
 
@@ -47,8 +250,8 @@ the checkpoint format.
   serving contract (`records_json → embeddings [n_users, dim]`); the Triton
   `model.py` and REST/gRPC adapters delegate to it.
 - **Cloud-adapter seams** — `integrations/` holds real SageMaker and
-  Databricks adapters plus documented stubs for Azure ML and Nebius; see
-  `docs/INTEGRATIONS.md`.
+  Databricks adapters plus documented stubs for two further platforms
+  (removed in 1.1.0); see `docs/INTEGRATIONS.md`.
 - **`apps/` UI seam** — the Streamlit demo relocated to `apps/demo`; a thin
   `apps/` namespace provides a stable hook for future UIs.
 - **BYOC hardening** — verified no-phone-home behavior, offline / air-gapped
@@ -158,7 +361,7 @@ the public API or the foundation-model architecture.
 
 ## [0.1.0b2] — Public beta
 
-First public (beta) release: an end-to-end, CPU-first toolkit for behavioral
+First public (beta) release: an end-to-end, CPU-capable toolkit for behavioral
 banking foundation models.
 
 ### Added
@@ -194,6 +397,6 @@ banking foundation models.
   turnkey `deploy_serving.sh`, monitoring (Prometheus + Grafana), and a Streamlit demo.
 - **Documentation** — a modern docs/educational site (Next.js + Fumadocs) at
   pragmatiq.getdynamiq.ai, with interactive visualizers and a facts drift-check.
-- **Engineering** — CPU-first throughout (CUDA and flash-attn are accelerations),
+- **Engineering** — every path runs on CPU (CUDA and flash-attn as accelerations),
   a typed public API, notebooks, a model card, and CI (ruff + mypy + pytest +
   acceptance gates).

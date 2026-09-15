@@ -143,15 +143,19 @@ to `[UNK]` with a one-time logged warning — never a `KeyError`.
 
 ### Pre-training caps
 
-Real histories are heavy-tailed, so `encode` applies three caps (paper defaults;
-each `None` disables it). At synthetic scale none of them bind, so output is
+Real histories are heavy-tailed, so three caps apply (paper defaults; each
+`None` disables it). At synthetic scale none of them bind, so output is
 unchanged; they only act on large real-world records:
 
-| Cap | Default | Effect |
-| --- | --- | --- |
-| `max_event_tokens` | 24 | each event keeps its first 24 tokens |
-| `max_profile_tokens` | 200 | profile keeps the first whole items fitting 200 tokens |
-| `max_events_per_user` | 6500 | a longer history keeps only its most recent events |
+| Cap | Default | Where | Effect |
+| --- | --- | --- | --- |
+| `max_event_tokens` | 24 | `encode` | each event keeps its first 24 tokens |
+| `max_profile_tokens` | 200 | `encode` | profile keeps the first whole items fitting 200 tokens |
+| `max_events_per_user` | 6500 | collation (`VarlenCollator(max_events=)`, read from the shard manifest) | a longer history keeps only its most recent events — applied *after* the eval-point cut, so a probe sees the most recent events before its eval point |
+
+`max_counter_distinct` (1 000 000) is not a cap on the output but on `fit()`:
+it bounds the per-key value table a continuous numeric key would otherwise
+grow without limit.
 
 ---
 
@@ -292,10 +296,19 @@ longest segment (`max_seqlen`) so the fallback can size its block.
 *numerically equivalent within a precision*:
 
 - **flash-attn varlen** on CUDA in fp16/bf16, when `flash_attn_varlen_func` is
-  available;
-- **SDPA fallback** otherwise (always on CPU): each segment is scattered into a
-  padded `[n_seg, max_len, H, hd]` block, and a key-padding mask hides the
-  padding so attention is confined to real tokens.
+  available and `PRAGMATIQ_DISABLE_FLASH` is unset — the default at inference
+  (`inference_context` autocasts to bf16 on CUDA) and in bf16-mixed training;
+- **SDPA fallback** otherwise (always on CPU): segments are grouped into
+  length buckets (`ceil(log2(len))`) and each bucket is scattered into its own
+  padded `[n_seg_b, L_b, H, hd]` block with a deterministic
+  `index_copy_` / `index_select` pair; a key-padding mask hides the padding so
+  attention is confined to real tokens, and a single long history no longer
+  pads every other segment in the batch to its width.
+
+The segment layout (positions, mask, RoPE tables) is built once per encoder
+forward and threaded through every block; the collator ships the longest
+segment length as a host integer so the model never syncs to size a block.
+`attention_backend(device, dtype)` reports which path a forward will take.
 
 Because attention is **within-segment** in both paths, padding in the SDPA block
 is purely structural — the mask removes it entirely from the softmax. That is why

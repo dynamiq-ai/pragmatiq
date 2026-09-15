@@ -5,7 +5,7 @@ lr: 0.001
 weight_decay: 0.01
 max_epochs: 20
 patience: 3
-token_budget: 16384
+token_budget: 16384     # omit (null) to size from the device: 16384 on CPU, memory-based on CUDA
 n_classes: 2
 val_fraction: 0.2
 seed: 0

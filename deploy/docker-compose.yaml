@@ -37,10 +37,14 @@ services:
       timeout: 5s
       retries: 12
       start_period: 60s
-    # CPU-first (global rule 5): no GPU reservation, so `docker compose up` boots
-    # on a CPU-only host (Triton runs the python-backend model on CPU). For GPU
-    # serving, add:
-    #   deploy: {resources: {reservations: {devices: [{capabilities: ["gpu"]}]}}}
+    # GPU-first: reserve the host's GPUs so the python backend serves in bf16 on
+    # CUDA (needs the NVIDIA container toolkit). On a CPU-only host use
+    # `docker compose -f deploy/docker-compose.cpu.yaml up` instead.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: ["gpu"]
 
   prometheus:
     image: prom/prometheus:latest

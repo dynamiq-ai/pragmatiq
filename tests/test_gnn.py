@@ -250,3 +250,43 @@ class TestGateMargin:
         md = aml_results_markdown(res)
         assert "(c) > (a) = False" in md, "markdown must cite the gated noise-aware flag"
         assert "(c) > (a) = True" not in md
+
+
+@requires_pyg
+def test_fit_gnn_keeps_best_trained_state_below_chance(dataset: Path, monkeypatch) -> None:
+    """An arm whose validation AUC never crosses 0.5 must still report its best TRAINED
+    weights (the pre-1.1 best_val=0.5 init silently restored the random initialization)."""
+    import pyarrow.parquet as pq
+    import sklearn.metrics
+
+    from pragmatiq.models import gnn as gnn_mod
+    from pragmatiq.models.gnn import _fit_gnn
+
+    aml = pq.read_table(dataset / "labels" / "aml.parquet").to_pandas()
+    labels = dict(zip(aml["user_id"], aml["label"]))
+    graph = TransferGraphBuilder(dataset / "transfers.parquet").build(_fake_embeddings(list(labels)), labels)
+    tr, va, te = _train_val_test_mask(graph.num_nodes, graph.y, seed=0)
+    created: list = []
+
+    class Recording(gnn_mod.AmlGNN):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            created.append(self)
+
+    monkeypatch.setattr(gnn_mod, "AmlGNN", Recording)
+    snaps: list[dict] = []
+    val_scores = iter([0.40, 0.46, 0.42, 0.41, 0.40, 0.39, 0.38, 0.37])
+
+    def fake_auc(y, p):
+        if len(y) == int(va.sum()):  # a validation evaluation
+            snaps.append({k: v.detach().clone() for k, v in created[-1].state_dict().items()})
+            return next(val_scores)
+        return 0.5  # the single test-mask scoring at the end
+
+    monkeypatch.setattr(sklearn.metrics, "roc_auc_score", fake_auc)
+    _fit_gnn(graph, seed=0, train_mask=tr, val_mask=va, test_mask=te, epochs=40,
+             eval_every=5, patience=2)
+    final = created[-1].state_dict()
+    assert len(snaps) >= 3
+    assert all(torch.equal(final[k], snaps[1][k]) for k in final)  # the 0.46 evaluation wins
+    assert any(not torch.equal(final[k], snaps[0][k]) for k in final)  # not an earlier/untrained state

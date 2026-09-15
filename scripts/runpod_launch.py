@@ -3,17 +3,18 @@
 
 This is the turnkey path for validating pragmatiq on a real A100/H100/H200:
 it creates a pod via the RunPod REST API, waits for SSH, syncs this repo
-(no GitHub required — it tars and copies over SSH), installs, and runs the
-GPU end-to-end: synth -> tokenize -> pretrain -> embed -> gradient-boosting probe,
-plus the auto-config + gradient-accumulation path, the PRAGMA+Nemotron MSE variant,
-the Triton serving contract, and the full-scale training and AML acceptance checks.
+(no GitHub required — it tars and copies over SSH), installs, and runs
+``scripts/gpu_full_validation.py``: the measurement sweep of ``validate_gpu.py``
+(pretrain scaling, fine-tune, serving, flash≡SDPA, bf16 vs fp32, export,
+quickstart timing) followed by the full-scale gate 5 / gate 6 acceptance checks.
+``--remote-script`` runs any other script instead.
 
 Usage:
     export RUNPOD_API_KEY=...            # or put it in .env (gitignored)
     python scripts/runpod_launch.py --gpu "NVIDIA A100 80GB PCIe" --run-name a100-smoke
     python scripts/runpod_launch.py --terminate <pod_id>
     python scripts/runpod_launch.py --dry-run --gpu-count 8 --gpu "NVIDIA H100 80GB HBM3" \\
-        --cloud-type SECURE --remote-script scripts/validate_gpu.py --terminate-on-done
+        --cloud-type SECURE --devices-sweep 1,2,4,8 --terminate-on-done
 
 Requires outbound access to rest.runpod.io. In a restricted/sandboxed network
 environment this host may be blocked by the environment's network egress policy —
@@ -38,29 +39,59 @@ REST = "https://rest.runpod.io/v1"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # ---------------------------------------------------------------------------
-# Flash-attn prebuilt wheel for runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel
-# torch==2.4.0, python==3.11, abi=FALSE.
-# flash-attn 2.6.3 ships cu118 and cu123 wheels only (no cu124); the cu123
-# wheel runs correctly on a cu124 runtime.  Using cu124 in the URL → 404.
-# Source: https://github.com/Dao-AILab/flash-attention/releases/tag/v2.6.3
+# Pod image and the flash-attn wheel built for it. The two MUST agree on the
+# torch version, the python tag and the C++ ABI (tests/test_runpod_launch.py
+# checks the pairing): torch 2.8 CUDA wheels are built with the C++11 ABI, so
+# the cxx11abiTRUE wheel is the matching one. Wheel names are listed at
+# https://github.com/Dao-AILab/flash-attention/releases/tag/v2.8.3 ; image tags at
+# https://hub.docker.com/r/runpod/pytorch/tags .
 # ---------------------------------------------------------------------------
-_FLASH_ATTN_WHEEL = (
-    "https://github.com/Dao-AILab/flash-attention/releases/download/v2.6.3/"
-    "flash_attn-2.6.3+cu123torch2.4cxx11abiFALSE-cp311-cp311-linux_x86_64.whl"
+IMAGE = "runpod/pytorch:2.8.0-py3.11-cuda12.8.1-cudnn-devel-ubuntu22.04"
+FLASH_ATTN_VERSION = "2.8.3"
+# Release torch build the flash-attn wheel is compiled against, and the PyTorch
+# wheel index for the image's CUDA (the image tag carries both).
+TORCH_RELEASE = "2.8.0"
+CUDA_TAG = "cu128"
+FLASH_WHEEL = (
+    f"https://github.com/Dao-AILab/flash-attention/releases/download/v{FLASH_ATTN_VERSION}/"
+    f"flash_attn-{FLASH_ATTN_VERSION}+cu12torch2.8cxx11abiTRUE-cp311-cp311-linux_x86_64.whl"
 )
 
+
+def image_torch_version(image: str = IMAGE) -> str:
+    """The torch version baked into a runpod/pytorch image tag (``2.8.0``)."""
+    return image.split(":", 1)[1].split("-", 1)[0]
+
+
+def image_python_tag(image: str = IMAGE) -> str:
+    """The cpXY python tag of a runpod/pytorch image (``cp311``)."""
+    py = next(p for p in image.split(":", 1)[1].split("-") if p.startswith("py"))
+    return "cp" + py[2:].replace(".", "")
+
+
 # Common install block executed on the pod before any command.
-# - Installs [dev,train,serve] extras so Lightning and training deps are present.
-# - Attempts to install the prebuilt flash-attn wheel; falls back to source build;
-#   a failure is non-fatal (SDPA fallback exists in the model).
+# - Installs the package with --no-deps first so the image's CUDA torch is never
+#   replaced, then every extra's dependencies with torch pinned to the image's
+#   version (pip must not "upgrade" it to a CPU or mismatched-CUDA build).
+# - Installs the prebuilt flash-attn wheel; falls back to a source build; a
+#   failure is non-fatal (the SDPA fallback exists in the model).
 INSTALL = f"""
 set -uo pipefail
 cd /workspace/pragmatiq
-pip install -q -e ".[dev,train,serve]"
+# The image may ship a torch *nightly* of the same major.minor (observed:
+# 2.8.0.dev20250319+cu128); the flash-attn wheel is built against the release
+# ABI, so pin the release build the wheel expects before anything else.
+pip install -q "torch=={TORCH_RELEASE}" --index-url https://download.pytorch.org/whl/{CUDA_TAG}
+# The image's torchvision/torchaudio are built against that nightly and break on
+# import once torch is the release build (torchmetrics, pulled in by lightning,
+# imports torchvision when present). pragmatiq uses neither: remove them.
+pip uninstall -q -y torchvision torchaudio || true
+pip install -q --no-deps -e .
+pip install -q -e ".[dev,full]" "torch=={TORCH_RELEASE}"
 echo "=== installing flash-attn ==="
-pip install -q "{_FLASH_ATTN_WHEEL}" || {{
+pip install -q "{FLASH_WHEEL}" || {{
     echo "Prebuilt wheel not found; trying source build (slow)..."
-    pip install flash-attn==2.6.3 --no-build-isolation -q || \
+    pip install flash-attn=={FLASH_ATTN_VERSION} --no-build-isolation -q || \
         echo "WARNING: flash-attn install failed; SDPA fallback will be used"
 }}
 python -c "import torch; print('torch', torch.__version__, 'cuda_available', torch.cuda.is_available(), 'devices', torch.cuda.device_count())"
@@ -68,52 +99,44 @@ python -c "import flash_attn; print('flash', flash_attn.__version__)" || \
     echo "flash-attn unavailable -> SDPA"
 """.strip()
 
-PIPELINE = r"""
-set -euo pipefail
-cd /workspace/pragmatiq
-# Bound the CPU thread pools so the sequential pipeline stages — the
-# gradient-boosting probe and the embedding pass especially — don't oversubscribe
-# a many-core host and stall on thread-pool contention.
-export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 NUMEXPR_NUM_THREADS=8
-export TOKENIZERS_PARALLELISM=false
-python -X faulthandler -u - <<'PY'
-from pragmatiq import api
-m = api.synthesize({"n_users": 50000, "seed": 0}, out="data/synth", n_workers=8, write_report=True)
-print("synth:", m["n_events"], "events", m["users_per_sec"], "users/s")
-api.tokenize("data/synth", "data/tok")
-s = api.pretrain("data/tok", "gpu-smoke", model_size="small",
-                 config={"max_steps": 4000, "token_budget": 32768})
-print("pretrain:", s["last_metrics"])
-print("embed:", api.embed("data/tok", s["run_dir"], out="embeddings.parquet"))
-# gradient-boosting probe (default) — reports ROC-AUC + PR-AUC vs the same-classifier baseline
-print("probe:", api.probe("data/tok", s["run_dir"], "data/synth/labels/default_12m.parquet"))
+# Default on-pod command: the full validation (measurement sweep + full-scale
+# gates 5/6) via scripts/gpu_full_validation.py, which forwards every argument
+# to scripts/validate_gpu.py. Extra flags come from --remote-args; the launcher
+# maps its own --devices-sweep onto the harness flag of the same name.
+PIPELINE_SCRIPT = "scripts/gpu_full_validation.py"
+PIPELINE = (
+    "set -euo pipefail\n"
+    "cd /workspace/pragmatiq\n"
+    # Bound the CPU thread pools so the sequential stages (gradient-boosting
+    # probe, embedding pass) don't oversubscribe a many-core host.
+    "export OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 NUMEXPR_NUM_THREADS=8\n"
+    "export TOKENIZERS_PARALLELISM=false\n"
+    # The synced tree is a git archive (no .git): hand the result writers the sha
+    # for their provenance stamps.
+    "export PRAGMATIQ_COMMIT={commit}\n"
+    f"python -X faulthandler -u {PIPELINE_SCRIPT} {{args}}\n"
+)
 
-# WF-3 scale knobs: auto-config sizes token_budget / grad_accum / schedule from the
-# data + this GPU; an explicit max_steps keeps the smoke short.
-sa = api.pretrain("data/tok", "gpu-auto", model_size="small", config="auto",
-                  max_steps=300, grad_accum_steps=2)
-print("auto-config + grad-accum pretrain:", sa["last_metrics"])
 
-# PRAGMA+Nemotron variant: embed-mode tokenization auto-wires the MSE text branch.
-# The `hash` stand-in keeps this leg fast; for the real embedder install ".[text]"
-# and set text_encoder="nemotron" (text_encoder_dim is read from the model).
-api.tokenize("data/synth", "data/tok_embed",
-             config={"text_value_mode": "embed", "text_encoder": "hash"})
-sn = api.pretrain("data/tok_embed", "gpu-nemo", model_size="small",
-                  config={"max_steps": 1000, "token_budget": 16384})
-print("nemotron-variant pretrain:", sn["last_metrics"])  # carries loss_text_mse
-print("nemotron probe:", api.probe("data/tok_embed", sn["run_dir"],
-                                    "data/synth/labels/default_12m.parquet"))
-PY
+def pipeline_command(remote_args: str = "", devices_sweep: str | None = None,
+                     out: str | None = None) -> str:
+    """The default on-pod shell command with the harness flags resolved."""
+    parts: list[str] = []
+    if out:
+        parts += ["--out", out]
+    if devices_sweep:
+        parts += ["--devices-sweep", devices_sweep]
+    if remote_args.strip():
+        parts.append(remote_args.strip())
+    return PIPELINE.format(args=" ".join(parts), commit=_head_sha())
 
-# Serving contract on the production path (no Docker needed): the Triton model.py
-# request->response cycle on GPU. Full container serving: scripts/deploy_serving.sh.
-python -m pytest tests/test_inference.py::TestTritonServingContract -q
 
-# Full-scale acceptance checks (the quality bar; flash≡SDPA, probe>baseline, AML recovery)
-PRAGMATIQ_GATE_FULL=1 PRAGMATIQ_GATE_SKIP_UNIT=1 bash scripts/gates/gate_5.sh
-PRAGMATIQ_GATE_FULL=1 bash scripts/gates/gate_6.sh
-"""
+def _head_sha() -> str:
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=REPO_ROOT,
+                              capture_output=True, text=True, check=True, timeout=5).stdout.strip()
+    except Exception:
+        return "unknown"
 
 
 def _api_key() -> str:
@@ -147,7 +170,10 @@ def _req(method: str, path: str, key: str, body: dict | None = None) -> dict:
     req = urllib.request.Request(
         f"{REST}{path}", method=method,
         data=json.dumps(body).encode() if body else None,
-        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json",
+                 # Cloudflare in front of rest.runpod.io rejects the default
+                 # "Python-urllib/x.y" signature with a 403 (error code 1010).
+                 "User-Agent": "pragmatiq-runpod-launch/1.1"},
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
@@ -239,7 +265,7 @@ def create_pod(key: str, gpu: str, name: str, cloud: str = "COMMUNITY",
     # and remove the NCCL_SHM_DISABLE env var to get NVLink-optimal throughput.
     body = {
         "name": name,
-        "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+        "imageName": IMAGE,
         "cloudType": cloud,
         "gpuTypeIds": [g.strip() for g in gpu.split(",") if g.strip()],
         "gpuCount": gpu_count,
@@ -465,7 +491,14 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
                          "The repo is synced to /workspace/pragmatiq so the script is "
                          "available at /workspace/pragmatiq/<PATH>.")
     ap.add_argument("--remote-args", default="", metavar="ARGS",
-                    help="Extra arguments to pass to --remote-script (quoted string).")
+                    help="Extra arguments to pass to the remote script (quoted string); with "
+                         "the default pipeline these reach scripts/validate_gpu.py.")
+    ap.add_argument("--devices-sweep", default=None, metavar="LIST",
+                    help="Device counts for the training sweep of the default pipeline "
+                         "(e.g. 1,2,4,8); default: the harness default.")
+    ap.add_argument("--remote-out", default=None, metavar="DIR",
+                    help="--out passed to the default pipeline (default: the harness default, "
+                         "outputs/gpu-validation-<timestamp>, matched by --pull).")
     # Artifact pull-back
     ap.add_argument("--pull", default="outputs/gpu-validation-*", metavar="GLOB",
                     help="Remote glob (relative to /workspace/pragmatiq) to pull back "
@@ -514,7 +547,7 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     container_disk = min(max(80, 30 * gpu_count), 500)
     pod_body_preview = {
         "name": args.run_name,
-        "imageName": "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04",
+        "imageName": IMAGE,
         "cloudType": args.cloud_type,
         "gpuTypeIds": [g.strip() for g in args.gpu.split(",") if g.strip()],
         "gpuCount": gpu_count,
@@ -526,9 +559,11 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
     if args.remote_script:
         remote_path = f"/workspace/pragmatiq/{args.remote_script}"
         extra = f" {args.remote_args}" if args.remote_args.strip() else ""
-        run_command = f"python -X faulthandler -u {remote_path}{extra}"
+        run_command = (f"cd /workspace/pragmatiq && export PRAGMATIQ_COMMIT={_head_sha()} "
+                       f"OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false && "
+                       f"python -X faulthandler -u {remote_path}{extra}")
     else:
-        run_command = "(default PIPELINE)"
+        run_command = pipeline_command(args.remote_args, args.devices_sweep, args.remote_out)
 
     # ------------------------------------------------------------------
     # --dry-run: print and exit without touching the network
@@ -694,9 +729,11 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
         if args.remote_script:
             remote_path = f"/workspace/pragmatiq/{args.remote_script}"
             extra = f" {args.remote_args}" if args.remote_args.strip() else ""
-            run_cmd = f"python -X faulthandler -u {remote_path}{extra}"
+            run_cmd = (f"cd /workspace/pragmatiq && export PRAGMATIQ_COMMIT={_head_sha()} "
+                       f"OMP_NUM_THREADS=8 MKL_NUM_THREADS=8 OPENBLAS_NUM_THREADS=8 TOKENIZERS_PARALLELISM=false && "
+                       f"python -X faulthandler -u {remote_path}{extra}")
         else:
-            run_cmd = PIPELINE
+            run_cmd = pipeline_command(args.remote_args, args.devices_sweep, args.remote_out)
 
         # INSTALL drops errexit on purpose (the flash-attn fallback chain must
         # be allowed to fail); restore it and prove the editable install
@@ -750,32 +787,32 @@ def main() -> None:  # noqa: C901 — long but linear; split would obscure flow
             # Creation never completed; nothing exists to pull or terminate.
             _run_done.set()
             _cleanup_done.set()
-            raise SystemExit(_exit_code) if _exit_code else None
-        if run_started and ssh_base is not None:
-            _pull_artifacts(ssh_base, args.pull, args.pull_dest,
-                            timeout_sec=args.pull_timeout_sec, excludes=pull_excludes)
-
-        # ---- cost estimate (billing starts at pod creation) ----------
-        elapsed = time.time() - create_ts
-        hours = elapsed / 3600
-        cost = hours * args.usd_per_hour
-        print(f"[cost] pod lifetime {elapsed / 60:.1f} min since creation; "
-              f"estimated cost ~${cost:.2f} at ${args.usd_per_hour:.0f}/hr")
-
-        # ---- auto-terminate (safety-critical) -----------------------
-        # A fired watchdog forces termination even without --terminate-on-done:
-        # --max-runtime-min promises the pod dies at the cap.
-        if args.terminate_on_done or _watchdog_fired.is_set():
-            _terminate_pod(pod_id, key)
         else:
-            print(f"[info] pod still running; terminate with: "
-                  f"python scripts/runpod_launch.py --terminate {pod_id}")
+            if run_started and ssh_base is not None:
+                _pull_artifacts(ssh_base, args.pull, args.pull_dest,
+                                timeout_sec=args.pull_timeout_sec, excludes=pull_excludes)
 
-        # Disarm the watchdog's grace-period hard-DELETE and reap the thread.
-        _run_done.set()
-        _cleanup_done.set()
-        if _watchdog_thread is not None:
-            _watchdog_thread.join(timeout=5)
+            # ---- cost estimate (billing starts at pod creation) ----------
+            elapsed = time.time() - create_ts
+            hours = elapsed / 3600
+            cost = hours * args.usd_per_hour
+            print(f"[cost] pod lifetime {elapsed / 60:.1f} min since creation; "
+                  f"estimated cost ~${cost:.2f} at ${args.usd_per_hour:.0f}/hr")
+
+            # ---- auto-terminate (safety-critical) -----------------------
+            # A fired watchdog forces termination even without --terminate-on-done:
+            # --max-runtime-min promises the pod dies at the cap.
+            if args.terminate_on_done or _watchdog_fired.is_set():
+                _terminate_pod(pod_id, key)
+            else:
+                print(f"[info] pod still running; terminate with: "
+                      f"python scripts/runpod_launch.py --terminate {pod_id}")
+
+            # Disarm the watchdog's grace-period hard-DELETE and reap the thread.
+            _run_done.set()
+            _cleanup_done.set()
+            if _watchdog_thread is not None:
+                _watchdog_thread.join(timeout=5)
 
     # Propagate the remote result to the caller AFTER cleanup is done.
     if _exit_code:

@@ -14,9 +14,9 @@ import torch
 from pragmatiq import api
 from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
 from pragmatiq.data.tokenizer import PragmaTokenizer
-from pragmatiq.experiments.run import Run, list_runs
-from pragmatiq.experiments.tracking import MetricLogger
 from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
+from pragmatiq.runs.run import Run, list_runs
+from pragmatiq.runs.tracking import MetricLogger
 from pragmatiq.training.optim import (
     Muon,
     WarmupCosine,
@@ -40,7 +40,7 @@ def shards(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 def _nano(tok_hash: str, steps: int, run: Run, vocab: int, work: Path, **over):
     cfg = TrainConfig(max_steps=steps, token_budget=4096, warmup_steps=5, seed=0,
-                      checkpoint_every_min=1000.0, log_every=1, **over)
+                      checkpoint_every_min=1000.0, **{"log_every": 1, **over})
     seed_everything(cfg.seed)
     model = PragmaModel(ModelConfig.preset("small", vocab))
     trainer = PreTrainer(model, run, cfg, tok_hash, logger=MetricLogger(run.dir))
@@ -161,7 +161,55 @@ class TestPretrainer:
         assert ckpt["world_size"] == 1  # the RESOLVED world size, not the "auto" string
         assert ckpt["tokenizer_hash"] == tok.content_hash
         assert "masking_gen" in ckpt["rng"] and "torch" in ckpt["rng"] and "numpy" in ckpt["rng"]
+        assert "python" in ckpt["rng"]  # the stdlib random stream is checkpointed too
+        # Everything in the checkpoint is weights_only-safe: no pickled code on load.
+        safe = torch.load(run.checkpoints / "last.pt", map_location="cpu", weights_only=True)
+        assert set(safe) == set(ckpt)
         ds.close()
+
+    def test_resume_restores_python_random_stream(self, shards: Path) -> None:
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        h = tok.content_hash
+        # Uninterrupted: seed, advance the stdlib stream three draws, train, draw once more.
+        u = Run.create("py_u", {}, 0, h, shards / "runs", tokenizer_src=shards / "tok" / "tokenizer")
+        tr, ld, ds = _nano(h, 6, u, tok.vocab_size, shards)
+        for _ in range(3):
+            random.random()
+        tr.fit(ld)
+        ds.close()
+        expected = random.random()
+        # Interrupted at step 3 (checkpoint carries the advanced stream), then resumed by a
+        # fresh trainer whose seed_everything() reset the stream: resume must restore it.
+        i = Run.create("py_i", {}, 0, h, shards / "runs", tokenizer_src=shards / "tok" / "tokenizer")
+        tr1, ld1, ds1 = _nano(h, 6, i, tok.vocab_size, shards)
+        for _ in range(3):
+            random.random()
+        tr1.fit(ld1, max_steps=3)
+        ds1.close()
+        tr2, ld2, ds2 = _nano(h, 6, i, tok.vocab_size, shards)
+        tr2.fit(ld2, resume="auto")
+        ds2.close()
+        assert random.random() == expected
+
+    def test_per_type_metrics_only_computed_on_logged_steps(self, shards: Path, monkeypatch) -> None:
+        tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+        run = Run.create("logev", {}, 0, tok.content_hash, shards / "runs",
+                         tokenizer_src=shards / "tok" / "tokenizer")
+        trainer, loader, ds = _nano(tok.content_hash, 6, run, tok.vocab_size, shards, log_every=3)
+        calls = {"n": 0}
+        real = torch.bincount
+
+        def spy(*a, **kw):
+            calls["n"] += 1
+            return real(*a, **kw)
+
+        monkeypatch.setattr(torch, "bincount", spy)
+        trainer.fit(loader)
+        ds.close()
+        rows = [json.loads(ln) for ln in run.metrics_path.read_text().strip().splitlines()]
+        assert [r["step"] for r in rows] == [1, 3, 6]
+        assert all("mlm_acc" in r and any(k.startswith("loss_") for k in r) for r in rows)
+        assert calls["n"] == 3  # once per logged step (one micro-batch each), never on 2/4/5
 
     def test_resume_bit_exact(self, shards: Path) -> None:
         tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
@@ -919,3 +967,17 @@ class TestFineTune:
                            config={"max_epochs": 2, "lora_rank": 4, "token_budget": 4096})
         assert res["n_adapted"] > 0
         assert "best_val_auc" in res
+
+
+def test_metrics_log_a_windowed_throughput(shards: Path) -> None:
+    """Each logged step carries the rate over its own log window next to the cumulative rate."""
+    import json
+
+    tok = PragmaTokenizer.load(shards / "tok" / "tokenizer")
+    run = Run.create("tpswin", {}, 0, tok.content_hash, shards / "runs",
+                     tokenizer_src=shards / "tok" / "tokenizer")
+    trainer, loader, ds = _nano(tok.content_hash, 4, run, tok.vocab_size, shards, log_every=2)
+    trainer.fit(loader)
+    ds.close()
+    rows = [json.loads(line) for line in run.metrics_path.read_text().splitlines() if line.strip()]
+    assert rows and all("tokens_per_sec_window" in r and r["tokens_per_sec_window"] > 0 for r in rows)

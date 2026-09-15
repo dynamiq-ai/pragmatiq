@@ -43,7 +43,7 @@ _ALLOWLIST: dict[str, list[dict[str, str]]] = {
     # in tracking.py — it's opt-in (user must pass wandb=True).
     "import wandb": [
         {
-            "file": "experiments/tracking.py",
+            "file": "runs/tracking.py",
             "reason": "opt-in: imported only inside `if wandb:` block; user must pass wandb=True",
         }
     ],
@@ -51,13 +51,13 @@ _ALLOWLIST: dict[str, list[dict[str, str]]] = {
     # It writes local event files only — no network connections.
     "torch.utils.tensorboard": [
         {
-            "file": "experiments/tracking.py",
+            "file": "runs/tracking.py",
             "reason": "local-only: SummaryWriter writes files; imported inside `if tensorboard:` guard",
         }
     ],
     "tensorboard": [
         {
-            "file": "experiments/tracking.py",
+            "file": "runs/tracking.py",
             "reason": "local-only: SummaryWriter writes files; imported inside `if tensorboard:` guard",
         },
         {

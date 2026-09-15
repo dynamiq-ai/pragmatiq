@@ -172,3 +172,90 @@ def test_unknown_label_table_warns(good_data: Path, tmp_path: Path) -> None:
     report = validate_dataset(tmp_path)
     assert report.ok, report.summary()
     assert any("unknown label task" in w for w in report.warnings), report.summary()
+
+
+def _reference_scan(events_path: Path, max_rows: int | None = None) -> dict:
+    """The pre-1.1 row-by-row events scan, kept verbatim as the oracle."""
+    from pragmatiq.core.schema import SOURCES
+
+    pf = pq.ParquetFile(events_path)
+    n_rows = 0
+    last_uid = None
+    last_ts = None
+    null_ids = null_ts = out_of_order = 0
+    bad_source: set = set()
+    closed: set = set()
+    non_adjacent: str | None = None
+    for batch in pf.iter_batches(columns=["user_id", "ts", "source"], batch_size=131_072):
+        uids = batch.column("user_id").to_pylist()
+        tss = batch.column("ts").cast(pa.int64()).to_pylist()
+        srcs = batch.column("source").to_pylist()
+        for uid, ts, src in zip(uids, tss, srcs):
+            n_rows += 1
+            if uid is None or uid == "":
+                null_ids += 1
+            if src not in SOURCES:
+                bad_source.add(src)
+            if ts is None:
+                null_ts += 1
+            elif uid == last_uid and last_ts is not None and ts < last_ts:
+                out_of_order += 1
+            if uid != last_uid:
+                if last_uid is not None:
+                    closed.add(last_uid)
+                if uid in closed and non_adjacent is None:
+                    non_adjacent = uid
+            last_uid = uid
+            if ts is not None:
+                last_ts = ts
+        if max_rows is not None and n_rows >= max_rows:
+            break
+    return {"null_ids": null_ids, "null_ts": null_ts, "out_of_order": out_of_order,
+            "bad_source": bad_source, "non_adjacent": non_adjacent}
+
+
+@pytest.mark.parametrize("seed", range(12))
+def test_vectorised_events_scan_matches_reference(good_data: Path, tmp_path: Path, seed: int) -> None:
+    """Fuzz: shuffled runs, null ids/ts, unknown sources, non-adjacent users, tiny batches."""
+    import numpy as np
+
+    from pragmatiq.core.schema import EVENTS_SCHEMA
+
+    rng = np.random.default_rng(seed)
+    ev = pq.read_table(good_data / "events.parquet").to_pandas()
+    ev = ev.head(int(rng.integers(50, 400)) if seed else 3).copy()
+    # corrupt: reverse a user's run, blank some ids, null some ts, bad sources, duplicate a run later
+    users = list(dict.fromkeys(ev["user_id"]))
+    if seed % 3 == 0 and users:
+        u = users[int(rng.integers(0, len(users)))]
+        sel = ev["user_id"] == u
+        ev.loc[sel, "ts"] = ev.loc[sel, "ts"].values[::-1]
+    if seed % 4 == 1:
+        ev.loc[ev.sample(frac=0.05, random_state=seed).index, "user_id"] = ""
+    if seed % 2 == 1:
+        ev.loc[ev.sample(frac=0.08, random_state=seed + 1).index, "ts"] = None
+    if seed % 5 == 2:
+        ev.loc[ev.sample(frac=0.03, random_state=seed + 2).index, "source"] = "bogus"
+    if seed % 3 == 2 and len(users) > 2:
+        ev = ev.iloc[list(range(len(ev))) + list(range(0, min(7, len(ev))))]
+    tmp_path.mkdir(exist_ok=True)
+    # The corrupted frame carries null ts on purpose; write it with a nullable copy of
+    # the contract schema so the writer does not reject what the validator must catch.
+    nullable = pa.schema([f.with_nullable(True) for f in EVENTS_SCHEMA])
+    pq.write_table(pa.Table.from_pandas(ev, schema=nullable, preserve_index=False),
+                   tmp_path / "events.parquet", row_group_size=int(rng.integers(3, 40)))
+    import shutil
+
+    shutil.copy(good_data / "profiles.parquet", tmp_path / "profiles.parquet")
+
+    ref = _reference_scan(tmp_path / "events.parquet")
+    report = validate_dataset(tmp_path)
+    errors = "\n".join(report.errors)
+    assert (f"{ref['null_ids']} rows with null/empty user_id" in errors) == bool(ref["null_ids"])
+    assert (f"{ref['null_ts']} rows with null ts" in errors) == bool(ref["null_ts"])
+    assert (f"{ref['out_of_order']} events out of time order" in errors) == bool(ref["out_of_order"])
+    assert ("unknown source" in errors) == bool(ref["bad_source"])
+    if ref["non_adjacent"] is not None:
+        assert f"user {ref['non_adjacent']!r} appears in non-adjacent rows" in errors
+    else:
+        assert "non-adjacent" not in errors

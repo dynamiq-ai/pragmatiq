@@ -74,7 +74,9 @@ $E(\text{key}) + E(\text{value}) + \text{pos}$ gives per-token vectors. Then:
    slot output **is the user embedding**.
 
 All three encoders are bidirectional, pre-norm, GELU, with $\text{ffn} = 4d$ and dropout 0.1.
-The whole batch is packed **without padding** using `cu_seqlens`. The CPU SDPA fallback
+The whole batch is packed **without padding** using `cu_seqlens`. On CUDA in bf16 (the
+default at inference and in training) attention runs on flash-attn's varlen kernel when it
+is installed; the SDPA fallback
 is checked against a naive padded reference; CUDA flash-attn uses fp16/bf16 kernels and
 is validated at lower-precision tolerances during GPU runs.
 

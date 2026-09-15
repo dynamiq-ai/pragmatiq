@@ -20,6 +20,7 @@ The forward returns these representations; the MLM head (heads.py) consumes
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -107,7 +108,7 @@ def assemble_segments(
     prefix_idx = new_cu[:-1].to(torch.long)
     x = token_vals.new_zeros(T + S, d)
     is_prefix = torch.zeros(T + S, dtype=torch.bool, device=device)
-    is_prefix[prefix_idx] = True
+    is_prefix.index_fill_(0, prefix_idx, True)
     token_dst = (~is_prefix).nonzero(as_tuple=False).squeeze(1)
     # index_copy_ instead of advanced index-assignment so the scatter has a
     # deterministic CUDA implementation under torch.use_deterministic_algorithms.
@@ -124,6 +125,17 @@ def assemble_segments(
         if prefix_pos is not None:
             rope_pos.index_copy_(0, prefix_idx, prefix_pos.float())
     return x, new_cu, prefix_idx, token_dst, rope_pos
+
+
+def _max_segment_len(cu: torch.Tensor, hint: int | None) -> tuple[int, bool]:
+    """Longest assembled segment: the collator's host-side value when present, else a sync.
+
+    Returns ``(max_len, trusted)``; ``trusted`` tells the encoder it can skip its
+    own device→host validation of ``max_len``.
+    """
+    if hint is not None:
+        return int(hint), True
+    return (int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1), False
 
 
 def _segsum(values: torch.Tensor, counts: torch.Tensor) -> torch.Tensor:
@@ -230,8 +242,8 @@ class PragmaModel(nn.Module):
         seg_lengths = (batch.cu_seqlens_event[1:] - batch.cu_seqlens_event[:-1]).long()
         evt_marker = self.embed.embed(torch.full((seg_lengths.numel(),), EVT, device=x_tok.device))
         x, cu, prefix_idx, token_dst, _ = assemble_segments(seg_lengths, evt_marker, x_tok)
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.event_encoder(x, cu, max_len)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_event)
+        h = self.event_encoder(x, cu, max_len, check=not trusted)
         z_tok = h[token_dst]  # ẑ_e  [T, d]
         evt_vec = h[prefix_idx]  # [E, d]
         z_e = evt_vec + self.calendar(batch.event_hour, batch.event_dow, batch.event_dom)
@@ -249,8 +261,8 @@ class PragmaModel(nn.Module):
         x, cu, prefix_idx, _, rope_pos = assemble_segments(
             tokens_per_user, usr_marker, x_prof, tok_time, usr_pos
         )
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.profile_encoder(x, cu, max_len, rope_pos)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_profile)
+        h = self.profile_encoder(x, cu, max_len, rope_pos, check=not trusted)
         return h[prefix_idx]  # z_a  [n_users, d]
 
     def _encode_history(
@@ -262,8 +274,8 @@ class PragmaModel(nn.Module):
         x, cu, prefix_idx, token_dst, rope_pos = assemble_segments(
             events_per_user, z_a, z_e, evt_pos, usr_pos
         )
-        max_len = int((cu[1:] - cu[:-1]).max()) if cu.numel() > 1 else 1
-        h = self.history_encoder(x, cu, max_len, rope_pos)
+        max_len, trusted = _max_segment_len(cu, batch.max_len_history)
+        h = self.history_encoder(x, cu, max_len, rope_pos, check=not trusted)
         return h[prefix_idx], h[token_dst]  # z_h[USR] [n_users,d], z_h[event] [E,d]
 
     def forward(self, batch: PackedBatch) -> PragmaOutput:
@@ -288,19 +300,33 @@ class PragmaModel(nn.Module):
     # ------------------------------------------------------------------ loading
     @classmethod
     def from_pretrained(
-        cls, run: str | Path, device: str = "cpu", checkpoint: str = "last.pt"
+        cls, run: str | Path, device: str = "auto", checkpoint: str = "last.pt"
     ) -> PragmaModel:
         """Load a trained model from a run directory (notebook entry point).
 
         Verifies the checkpoint's tokenizer hash against the run's copied
         tokenizer (global rule 3) and attaches it so :meth:`embed_records` works.
-        ``run`` may be a run directory path or a ``runs/{name}`` path.
+        ``run`` may be a run directory path or a ``runs/{name}`` path. ``device``
+        defaults to ``"auto"``: CUDA when available (or ``PRAGMATIQ_DEVICE``),
+        else CPU.
         """
+        from pragmatiq.core.env import resolve_device
+
         from ..data.tokenizer import PragmaTokenizer
 
+        device = resolve_device(device)
         run_dir = Path(run)
         tok = PragmaTokenizer.load(run_dir / "tokenizer")
-        ckpt = torch.load(run_dir / "checkpoints" / checkpoint, map_location=device, weights_only=False)
+        ckpt_path = run_dir / "checkpoints" / checkpoint
+        try:
+            # Checkpoints are written weights_only-safe (tensors, scalars, str);
+            # loading them that way never executes pickled code.
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=True)
+        except Exception as exc:  # pragma: no cover - only for foreign checkpoints
+            logging.getLogger(__name__).warning(
+                "checkpoint %s is not weights_only-loadable (%s); falling back to a full "
+                "unpickle — only do this for checkpoints you trust", ckpt_path, exc)
+            ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
         fmt = ckpt.get("format")
         if fmt != CKPT_FORMAT:
             raise ValueError(
@@ -308,9 +334,12 @@ class PragmaModel(nn.Module):
                 f"format {CKPT_FORMAT}. Re-train with the current version."
             )
         if ckpt.get("tokenizer_hash") != tok.content_hash:
-            raise ValueError(
-                "tokenizer hash mismatch: this checkpoint was trained with a different "
-                "tokenizer; from_pretrained refuses to run."
+            from pragmatiq.core.errors import DataContractError
+
+            raise DataContractError(
+                f"tokenizer hash mismatch in run {str(run_dir)!r}: the checkpoint was trained "
+                "with a different tokenizer than the one in the run's tokenizer/ directory; "
+                "from_pretrained refuses to run. Restore the run's original tokenizer."
             )
         config = ModelConfig(**ckpt["model_config"])
         model = cls(config)
@@ -318,14 +347,21 @@ class PragmaModel(nn.Module):
         model._tokenizer = tok  # type: ignore[assignment]
         return model.to(device).eval()
 
-    @torch.no_grad()
-    def embed_records(self, records: list[dict[str, Any]]) -> np.ndarray:
+    def embed_records(self, records: list[dict[str, Any]], precision: str = "auto",
+                      token_budget: int | None = None) -> np.ndarray:
         """Embed plain-dict user records (no shard pipeline) → ``[N, d]``.
 
         Each dict has ``user_id`` and ``events`` (+ optional ``attributes``,
         ``lifelong``, ``as_of``); see :class:`~pragmatiq.core.schema.UserRecord`.
         Requires a model loaded via :meth:`from_pretrained` (carries a tokenizer).
+
+        ``precision`` (``auto`` | ``bf16`` | ``fp32``) selects the CUDA autocast
+        dtype (CPU is always fp32). ``token_budget`` splits large requests into
+        forward passes of at most that many tokens (a single record always goes
+        through whole), so a request of thousands of users does not have to fit
+        one forward; the output order matches the input. ``None`` runs one forward.
         """
+        from pragmatiq.core.env import inference_context
         from pragmatiq.core.schema import UserRecord
 
         from ..data.collate import VarlenCollator
@@ -334,6 +370,25 @@ class PragmaModel(nn.Module):
         if tok is None:
             raise RuntimeError("embed_records needs a tokenizer; load via from_pretrained()")
         recs = [tok.encode(r if isinstance(r, UserRecord) else UserRecord.from_dict(r)) for r in records]
-        batch = VarlenCollator()(recs)
+        if not recs:
+            return np.zeros((0, self.config.dim), dtype=np.float32)
+        collate = VarlenCollator(max_events=tok.config.max_events_per_user)
         device = next(self.parameters()).device
-        return self.embed_users(batch.to(device)).float().cpu().numpy()
+        chunks: list[list[Any]] = [[]]
+        if token_budget is None:
+            chunks = [recs]
+        else:
+            used = 0
+            for r in recs:
+                n = r.n_tokens + int(r.prof_key_ids.size)
+                if chunks[-1] and used + n > token_budget:
+                    chunks.append([])
+                    used = 0
+                chunks[-1].append(r)
+                used += n
+        outs: list[np.ndarray] = []
+        with inference_context(device, precision):
+            for chunk in chunks:
+                batch = collate(chunk).to(device)
+                outs.append(self.embed_users(batch).float().cpu().numpy())
+        return outs[0] if len(outs) == 1 else np.concatenate(outs)

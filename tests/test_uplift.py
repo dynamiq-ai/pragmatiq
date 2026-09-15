@@ -9,8 +9,8 @@ import pytest
 
 from pragmatiq import api
 from pragmatiq.data.tokenizer import PragmaTokenizer
-from pragmatiq.experiments.run import Run
 from pragmatiq.models.pragmatiq import ModelConfig, PragmaModel
+from pragmatiq.runs.run import Run
 from pragmatiq.training.pretrainer import PreTrainer, TrainConfig, seed_everything
 from pragmatiq.training.uplift import qini_coefficient, qini_curve
 
@@ -56,7 +56,7 @@ def _pretrain(shards: Path, name: str) -> Path:
                       checkpoint_every_min=1000.0, log_every=10)
     seed_everything(cfg.seed)
     from pragmatiq.data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
-    from pragmatiq.experiments.tracking import MetricLogger
+    from pragmatiq.runs.tracking import MetricLogger
     model = PragmaModel(ModelConfig.preset("small", tok.vocab_size))
     trainer = PreTrainer(model, run, cfg, tok.content_hash, logger=MetricLogger(run.dir))
     ds = ShardDataset(shards / "tok")

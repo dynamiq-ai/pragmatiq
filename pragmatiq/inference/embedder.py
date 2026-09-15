@@ -15,28 +15,36 @@ from typing import Any
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-import torch
 
+from ..core.env import inference_context, resolve_device
+from ..core.progress import progress
 from ..data.dataset import DynamicBatchSampler, ShardDataLoader, ShardDataset
 from ..models.pragmatiq import PragmaModel
-from ..progress import progress
 
 
 class BatchEmbedder:
-    """Embed every user in a shard directory to a parquet of user vectors."""
+    """Embed every user in a shard directory to a parquet of user vectors.
 
-    def __init__(self, model: PragmaModel, device: str = "cpu", token_budget: int = 16_384) -> None:
-        self.model = model.to(device).eval()
-        self.device = device
+    ``device="auto"`` picks CUDA when available; ``precision`` selects the CUDA
+    autocast dtype (``auto`` = bf16 on CUDA, fp32 on CPU). Batches are collated
+    on a prefetch thread and pinned so the GPU never waits on the host.
+    """
+
+    def __init__(self, model: PragmaModel, device: str = "auto", token_budget: int = 16_384,
+                 precision: str = "auto", prefetch: int = 2) -> None:
+        self.device = resolve_device(device)
+        self.model = model.to(self.device).eval()
         self.token_budget = token_budget
+        self.precision = precision
+        self.prefetch = prefetch
 
-    @torch.no_grad()
     def embed_to_parquet(self, shard_dir: str | Path, out_path: str | Path) -> dict[str, Any]:
         """Write ``out_path`` (user_id, embedding) and return throughput stats."""
         ds = ShardDataset(shard_dir)
         sampler = DynamicBatchSampler(ds.index, token_budget=self.token_budget, shuffle=False)
         sampler.set_epoch(0)
-        loader = ShardDataLoader(ds, sampler)
+        is_cuda = self.device.startswith("cuda")
+        loader = ShardDataLoader(ds, sampler, prefetch=self.prefetch, pin_memory=is_cuda)
         out_path = Path(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         # Stream the output: flush a row group every ``chunk`` users instead of
@@ -64,8 +72,9 @@ class BatchEmbedder:
         t0 = time.time()
         try:
             for batch in progress(loader, total=len(loader), desc="embed", unit="batch"):
-                batch = batch.to(self.device)
-                z = self.model.embed_users(batch).float().cpu().numpy()
+                batch = batch.to(self.device, non_blocking=is_cuda)
+                with inference_context(self.device, self.precision):
+                    z = self.model.embed_users(batch).float().cpu().numpy()
                 buf_uids.extend(batch.user_ids)
                 buf_vecs.append(z)
                 n_users += len(batch.user_ids)

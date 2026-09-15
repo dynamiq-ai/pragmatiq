@@ -3,8 +3,8 @@
 pragmatiq is an independent open-source implementation by Dynamiq, inspired by
 the PRAGMA paper (arXiv 2604.08649). It turns user histories made of timestamped
 key–value events into embeddings for probes, LoRA fine-tuning, AML graph work,
-explainability, and serving. It is built to run on CPU first; CUDA and flash-attn
-are accelerations, not requirements.
+and serving. It is GPU-first and CPU-complete: every path picks CUDA when a
+device is visible and runs the same code in fp32 on a CPU when none is.
 
 ## Commands
 
@@ -12,9 +12,16 @@ are accelerations, not requirements.
 pip install -e ".[dev]"            # editable install + test deps
 pytest tests/ -x -q                # full suite
 pytest tests/test_<module>.py -q   # one module
-bash scripts/gates/gate_1.sh       # an acceptance gate (gate_1 .. gate_8)
+bash scripts/gates/gate_1.sh       # one acceptance gate (see the list below)
 ruff check . && mypy pragmatiq     # lint + types
+pragmatiq info                     # resolved device / precision / flash-attn / extras
 ```
+
+Gates: `gate_1` (synthetic data) … `gate_8` (nano end-to-end + packaging),
+`gate_9_contract` (public-API / CLI / serving contract), `gate_serve_slim`,
+`gate_storage`, `gate_integrations`, `gate_10_byoc`;
+`scripts/gates/run_full_validation.sh` runs them all and CI runs every one.
+GPU validation lives in `scripts/gpuval/` (launched via `scripts/runpod_launch.py`).
 
 Gate scripts honor `PRAGMATIQ_GATE_FULL=1` for full-scale runs (100k users,
 8 cores); the default is CI scale (small N with throughput extrapolation).
@@ -30,9 +37,11 @@ Gate scripts honor `PRAGMATIQ_GATE_FULL=1` for full-scale runs (100k users,
    refuses to run with a mismatched tokenizer (clear error message).
 1. Unseen keys/values at inference map to `[UNK]` with a logged warning — never a
    KeyError.
-1. Everything runs on CPU (slow but correct). CUDA paths are accelerations, not
-   requirements. Use flash-attn varlen if available, else fall back to SDPA with
-   an attention mask built from `cu_seqlens`.
+1. GPU-first, CPU-complete: never a CUDA-only path without a CPU branch and a
+   test. CPU is fp32 and byte-stable; CUDA runs bf16 autocast at inference and
+   bf16-mixed in training. `device="auto"` (and `PRAGMATIQ_DEVICE`) resolve the
+   device in `pragmatiq.core.env`; use flash-attn varlen when available, else
+   fall back to SDPA over segments built from `cu_seqlens`.
 1. Write tests alongside each module; type-hint the public API; docstring every
    public function.
 1. Public API (`pragmatiq/api.py`) exposes

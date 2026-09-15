@@ -26,11 +26,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
+from ..core.progress import progress
 from ..data.collate import TruncatingCollator, VarlenCollator, run_with_oom_retry
 from ..data.dataset import DynamicBatchSampler, ShardDataset
 from ..data.tokenizer import truncate_record
 from ..models.pragmatiq import PragmaModel
-from ..progress import progress
 
 
 @contextlib.contextmanager
@@ -56,16 +56,21 @@ def embed_users(
     model: PragmaModel,
     dataset: ShardDataset,
     token_budget: int = 16_384,
-    device: str | torch.device = "cpu",
+    device: str | torch.device = "auto",
     user_ids: list[str] | None = None,
     cutoffs: dict[str, int] | None = None,
+    precision: str = "auto",
 ) -> dict[str, np.ndarray]:
     """Compute ``z_h[USR]`` embeddings for users; returns ``{user_id: vector}``.
 
     ``cutoffs`` (user_id -> µs) truncates each user's history at their label
     eval point before encoding, so task embeddings never see the outcome
-    window (the no-hindcasting rule).
+    window (the no-hindcasting rule). ``device="auto"`` picks CUDA when
+    available; ``precision`` selects the CUDA autocast dtype (CPU stays fp32).
     """
+    from ..core.env import inference_context, resolve_device
+
+    device = resolve_device(str(device))
     model = model.to(device).eval()
     # Restrict the forward pass to the requested users (by their position in the
     # index) so only that cohort is encoded; None embeds everyone. Users not in
@@ -77,15 +82,20 @@ def embed_users(
     sampler = DynamicBatchSampler(dataset.index, token_budget=token_budget, shuffle=False,
                                   subset=subset)
     sampler.set_epoch(0)
-    collator = TruncatingCollator(cutoffs) if cutoffs else VarlenCollator()
+    collator = (TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs
+                else VarlenCollator(max_events=dataset.max_events))
     order = dataset.index.order
 
     def _embed_chunk(chunk: list[str]) -> np.ndarray:
         batch = collator(dataset.get_many(chunk)).to(device)
-        return model.embed_users(batch).float().cpu().numpy()
+        with inference_context(device, precision):
+            return model.embed_users(batch).float().cpu().numpy()
 
     out: dict[str, np.ndarray] = {}
-    with cpu_thread_cap():
+    # The intra-op thread cap only helps CPU forwards; on CUDA it would just
+    # throttle the host-side collation.
+    cap = cpu_thread_cap() if not str(device).startswith("cuda") else contextlib.nullcontext()
+    with cap:
         for batch_idx in progress(sampler, total=len(sampler), desc="embed", unit="batch"):
             uids = [order[i] for i in batch_idx]
 
@@ -120,11 +130,50 @@ def _load_label_table(
     return uids, labels, eval_us
 
 
-def cutoffs_from_labels(uids: list[str], eval_us: np.ndarray | None) -> dict[str, int] | None:
-    """Build the per-user truncation map from a label table's eval_ts column."""
+_DURATION_UNITS_US = {"s": 1_000_000, "m": 60_000_000, "h": 3_600_000_000, "d": 86_400_000_000,
+                      "w": 7 * 86_400_000_000}
+
+
+def staleness_to_us(window: str | int | float | None) -> int:
+    """Parse a staleness window into microseconds.
+
+    Accepts ``None``/``0`` (no staleness), a number of seconds, or a string with a
+    unit suffix: ``"90s"``, ``"30m"``, ``"6h"``, ``"1d"``, ``"2w"``.
+    """
+    if window is None:
+        return 0
+    if isinstance(window, (int, float)):
+        us = int(round(float(window) * _DURATION_UNITS_US["s"]))
+    else:
+        text = window.strip().lower()
+        if not text or text == "0":
+            return 0
+        unit = text[-1]
+        if unit not in _DURATION_UNITS_US:
+            raise ValueError(f"staleness window {window!r}: expected <number><s|m|h|d|w>, e.g. '6h' or '1d'")
+        try:
+            value = float(text[:-1])
+        except ValueError as e:
+            raise ValueError(f"staleness window {window!r}: expected <number><s|m|h|d|w>") from e
+        us = int(round(value * _DURATION_UNITS_US[unit]))
+    if us < 0:
+        raise ValueError(f"staleness window must be >= 0, got {window!r}")
+    return us
+
+
+def cutoffs_from_labels(uids: list[str], eval_us: np.ndarray | None,
+                        staleness_us: int = 0) -> dict[str, int] | None:
+    """Build the per-user truncation map from a label table's eval_ts column.
+
+    ``staleness_us`` moves every cutoff earlier by that much, so the embedding is
+    computed as if the most recent ``staleness_us`` of history had not arrived
+    yet (paper §3.4.2, robustness to event staleness). A lagging feed is the
+    production norm, so a model whose task metrics survive a stale window is
+    safe to serve from a delayed event stream.
+    """
     if eval_us is None:
         return None
-    return {u: int(t) for u, t in zip(uids, eval_us)}
+    return {u: int(t) - int(staleness_us) for u, t in zip(uids, eval_us)}
 
 
 @dataclass
@@ -245,13 +294,14 @@ class RawCountBaseline:
         """
         if cutoffs:
             feats = []
-            for uid in progress(user_ids, total=len(user_ids),
-                                desc="baseline features (truncated)", unit="user"):
-                rec = dataset.get(uid)
-                if uid in cutoffs:
-                    rec = truncate_record(rec, cutoffs[uid])
-                feats.append([rec.n_events, rec.n_tokens, int(rec.prof_key_ids.size),
-                              np.log1p(rec.n_events)])
+            chunk = 512  # get_many decodes each shard once per chunk instead of once per user
+            for start in progress(range(0, len(user_ids), chunk), total=(len(user_ids) + chunk - 1) // chunk,
+                                  desc="baseline features (truncated)", unit="chunk"):
+                for rec in dataset.get_many(user_ids[start:start + chunk]):
+                    if rec.user_id in cutoffs:
+                        rec = truncate_record(rec, cutoffs[rec.user_id])
+                    feats.append([rec.n_events, rec.n_tokens, int(rec.prof_key_ids.size),
+                                  np.log1p(rec.n_events)])
             return np.asarray(feats, dtype=np.float64)
         idx = dataset.index
         pos = {u: i for i, u in enumerate(idx.order)}
@@ -262,12 +312,18 @@ class RawCountBaseline:
                           np.log1p(idx.n_events[i])])
         return np.asarray(feats, dtype=np.float64)
 
-    def run(self, dataset: ShardDataset, label_path: str | Path, test_size: float = 0.3) -> ProbeResult:
-        """Fit/evaluate the raw-count baseline on a label table."""
+    def run(self, dataset: ShardDataset, label_path: str | Path, test_size: float = 0.3,
+            staleness_us: int = 0) -> ProbeResult:
+        """Fit/evaluate the raw-count baseline on a label table.
+
+        ``staleness_us`` shifts the eval-point cutoffs earlier (see
+        :func:`cutoffs_from_labels`) so the baseline sees exactly the history the
+        probe it is compared against saw.
+        """
         from sklearn.model_selection import train_test_split
 
         uids, labels, eval_us = _load_label_table(label_path)
-        cutoffs = cutoffs_from_labels(uids, eval_us)
+        cutoffs = cutoffs_from_labels(uids, eval_us, staleness_us)
         have = set(dataset.index.order)
         keep = [(u, int(lab)) for u, lab in zip(uids, labels) if u in have]
         users = [u for u, _ in keep]

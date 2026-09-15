@@ -1,0 +1,178 @@
+{
+  "acceptance": [
+    {
+      "check": "pretrain d=1 completes",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 0.0
+    },
+    {
+      "check": "finetune d=1 epochs",
+      "passed": true,
+      "threshold": "all epochs, finite AUC",
+      "value": 3
+    },
+    {
+      "check": "|\u0394ROC-AUC| bf16 vs fp32",
+      "passed": true,
+      "threshold": "<= 0.01",
+      "value": 0.0
+    },
+    {
+      "check": "serving request caps + chunked == whole",
+      "passed": true,
+      "threshold": "reject oversized; max abs < 1e-2",
+      "value": 0.0
+    },
+    {
+      "check": "ONNX export on the pod",
+      "passed": true,
+      "threshold": "exported and validated",
+      "value": null
+    },
+    {
+      "check": "attention backend (flash on CUDA bf16; SDPA when disabled)",
+      "passed": true,
+      "threshold": "as expected",
+      "value": "sdpa"
+    },
+    {
+      "check": "quickstart --n-users 2000 --max-steps 80",
+      "passed": true,
+      "threshold": "rc=0",
+      "value": 0.0
+    }
+  ],
+  "all_passed": true,
+  "legs": {
+    "attention": {
+      "bf16_backend": "sdpa",
+      "bf16_backend_flash_disabled": "sdpa",
+      "cuda": false,
+      "flash_importable": false,
+      "fp32_backend": "sdpa",
+      "passed": true
+    },
+    "export": {
+      "max_abs_diff": 0.0,
+      "opset": 18,
+      "out": "pragmatiq_embedder.onnx",
+      "passed": true,
+      "seconds": 0.0
+    },
+    "finetune": [
+      {
+        "best_val_auc": 0.5,
+        "devices": 1,
+        "epoch_stats": [
+          {
+            "batches": 0,
+            "epoch": 1,
+            "phase": "train",
+            "seconds": 0.0,
+            "tokens": 0,
+            "tokens_per_sec": 0.0,
+            "users": 0
+          }
+        ],
+        "epochs_run": 3,
+        "returncode": 0,
+        "token_budget": 16384,
+        "val_auc_history": [
+          0.5,
+          0.5,
+          0.5
+        ],
+        "wall_time_s": 0.0
+      }
+    ],
+    "flash_check": {
+      "skip_reason": "no CUDA",
+      "skipped": true
+    },
+    "precision": {
+      "abs_auc_delta": 0.0,
+      "bf16_probe_auc": 0.5,
+      "bf16_resolved": "fp32",
+      "bf16_tokens_per_sec": 0.0,
+      "bf16_users_per_sec": 0.0,
+      "device": "cpu",
+      "fp32_probe_auc": 0.5,
+      "fp32_resolved": "fp32",
+      "fp32_tokens_per_sec": 0.0,
+      "fp32_users_per_sec": 0.0,
+      "passed": true
+    },
+    "quickstart_fast": {
+      "max_steps": 80,
+      "n_users": 2000,
+      "passed": true,
+      "returncode": 0,
+      "wall_time_s": 0.0
+    },
+    "serve_caps": {
+      "chunked_vs_whole_max_abs": 0.0,
+      "device": "cpu",
+      "passed": true,
+      "rejected_oversized": true
+    },
+    "serving": [
+      {
+        "concurrency": 1,
+        "device": "cpu",
+        "n_completed": 0,
+        "p50_ms": 0.0,
+        "p95_ms": 0.0,
+        "p99_ms": 0.0,
+        "req_s": 0.0
+      }
+    ],
+    "training": [
+      {
+        "devices": 1,
+        "efficiency": 1.0,
+        "elapsed_s": 0.0,
+        "gpu_mem_gb": 0.0,
+        "model_size": "small",
+        "returncode": 0,
+        "run_name": "sweep_d1",
+        "token_budget": 32768,
+        "tokens_per_sec": 0.0
+      }
+    ],
+    "triton": {
+      "rows": [],
+      "skip_reason": "docker not found in PATH"
+    }
+  },
+  "meta": {
+    "cuda": "12.8",
+    "flash_attn": "2.8.3",
+    "gpu_count": 1,
+    "gpu_name": "<gpu name>",
+    "mode": "gpu",
+    "model_size": "small",
+    "n_users": 50000,
+    "note": "schema example only \u2014 every number is a placeholder; real evidence files are written by scripts/validate_gpu.py --tag <tag>",
+    "started": "2026-09-15T00:00:00",
+    "steps": 300,
+    "tag": "example",
+    "token_budget": 32768,
+    "torch": "2.8.0+cu128"
+  },
+  "utilisation": [
+    {
+      "gpu": {
+        "mean_power_w": 0.0,
+        "mean_util_pct": 0.0,
+        "n_gpus": 1,
+        "n_samples": 0,
+        "peak_mem_mib": 0.0,
+        "peak_util_pct": 0.0
+      },
+      "label": "pretrain_d1",
+      "mean_cpu_pct": 0.0,
+      "peak_ram_gb": 0.0
+    }
+  ]
+}
