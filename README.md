@@ -304,7 +304,20 @@ the table below with `--write`.
 
 <!-- STALENESS_PROBE_RESULTS -->
 
-_Not yet measured on this build; run the benchmark script to fill this table._
+| task | stale window | probe ROC-AUC | Δ vs fresh | probe PR-AUC | Δ vs fresh | baseline ROC-AUC |
+| --- | --- | --- | --- | --- | --- | --- |
+| default_12m | 0 | 0.710 | +0.000 | 0.131 | +0.000 | 0.487 |
+| default_12m | 1h | 0.698 | -0.012 | 0.139 | +0.008 | 0.484 |
+| default_12m | 6h | 0.713 | +0.002 | 0.142 | +0.011 | 0.489 |
+| default_12m | 1d | 0.702 | -0.008 | 0.119 | -0.012 | 0.484 |
+| default_12m | 3d | 0.691 | -0.019 | 0.108 | -0.024 | 0.528 |
+| churn_6m | 0 | 0.695 | +0.000 | 0.315 | +0.000 | 0.598 |
+| churn_6m | 1h | 0.695 | -0.000 | 0.312 | -0.004 | 0.601 |
+| churn_6m | 6h | 0.695 | +0.000 | 0.308 | -0.007 | 0.602 |
+| churn_6m | 1d | 0.692 | -0.003 | 0.302 | -0.014 | 0.602 |
+| churn_6m | 3d | 0.687 | -0.008 | 0.298 | -0.017 | 0.598 |
+
+<sub>provenance: n_users=50000, model=small, steps=2000, seed=0, commit=fd60311</sub>
 
 ## Using your own data
 
