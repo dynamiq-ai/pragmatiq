@@ -22,14 +22,18 @@ def test_load_yaml_rejects_non_mapping(tmp_path) -> None:
 def test_naive_datetime_warns_once(caplog) -> None:
     schema._warned_naive_ts = False  # reset the module-level one-time guard
     with caplog.at_level(logging.WARNING):
-        UserRecord.from_dict({
-            "user_id": "u",
-            "events": [{"ts": dt.datetime(2024, 1, 1, 9, 0), "source": "transaction", "fields": {}}],
-        })
-        UserRecord.from_dict({
-            "user_id": "v",
-            "events": [{"ts": dt.datetime(2024, 1, 2, 9, 0), "source": "transaction", "fields": {}}],
-        })
+        UserRecord.from_dict(
+            {
+                "user_id": "u",
+                "events": [{"ts": dt.datetime(2024, 1, 1, 9, 0), "source": "transaction", "fields": {}}],
+            }
+        )
+        UserRecord.from_dict(
+            {
+                "user_id": "v",
+                "events": [{"ts": dt.datetime(2024, 1, 2, 9, 0), "source": "transaction", "fields": {}}],
+            }
+        )
     naive_warnings = [r for r in caplog.records if "naive datetime" in r.getMessage()]
     assert len(naive_warnings) == 1  # warned, and only once
 
@@ -46,7 +50,8 @@ def test_synthesize_default_skips_report_without_matplotlib(tmp_path, monkeypatc
 
     real_find_spec = ilu.find_spec
     monkeypatch.setattr(
-        ilu, "find_spec",
+        ilu,
+        "find_spec",
         lambda name, *a, **k: None if name == "matplotlib" else real_find_spec(name, *a, **k),
     )
     with caplog.at_level(logging.WARNING):
@@ -88,7 +93,8 @@ def test_quickstart_fails_fast_without_lightning(tmp_path, monkeypatch) -> None:
 
     real_find_spec = ilu.find_spec
     monkeypatch.setattr(
-        ilu, "find_spec",
+        ilu,
+        "find_spec",
         lambda name, *a, **k: None if name == "lightning" else real_find_spec(name, *a, **k),
     )
     with pytest.raises(MissingExtraError, match=r"pragmatiq\[train\]"):
@@ -107,3 +113,29 @@ def test_quickstart_fails_fast_without_lightning(tmp_path, monkeypatch) -> None:
 def test_pretrain_rejects_unknown_resume_value(tmp_path, bad_resume) -> None:
     with pytest.raises(ValueError, match="resume must be None or 'auto'"):
         api.pretrain(tmp_path / "tok", "some_run", resume=bad_resume)
+
+
+def test_finetune_accepts_validation_metric_override(monkeypatch) -> None:
+    called_cfg = {}
+
+    import pragmatiq.training.finetuner as FT
+
+    def fake_init(self, model, config, device="auto"):
+        self.config = config
+
+    def fake_fit(self, ds, label_path):
+        called_cfg["metric"] = self.config.validation_metric
+        return {"best_val_auc": 0.8, "validation_metric": self.config.validation_metric}
+
+    monkeypatch.setattr(FT.LoRAFineTuner, "__init__", fake_init)
+    monkeypatch.setattr(FT.LoRAFineTuner, "fit", fake_fit)
+    monkeypatch.setattr(
+        "pragmatiq.data.dataset.ShardDataset", lambda d: type("D", (), {"close": lambda s: None})()
+    )
+    monkeypatch.setattr("pragmatiq.models.pragmatiq.PragmaModel.from_pretrained", lambda r, device: None)
+    monkeypatch.setattr("pragmatiq.api._ensure_shard_tokenizer_matches_run", lambda s, r: None)
+    monkeypatch.setattr("pragmatiq.api._require_label_table", lambda p: None)
+
+    res = api.finetune("shards", "run", "label.parquet", validation_metric="ap")
+    assert called_cfg["metric"] == "ap"
+    assert res["validation_metric"] == "ap"
