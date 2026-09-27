@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import pytest
@@ -20,11 +21,25 @@ from pragmatiq.training.finetuner import FineTuneConfig, LoRAFineTuner
 @pytest.fixture(scope="module")
 def ft_work(tmp_path_factory: pytest.TempPathFactory) -> Path:
     work = tmp_path_factory.mktemp("ft")
-    api.synthesize({"n_users": 90, "months": 14, "n_merchants": 500, "mule_ring_count": 1,
-                    "seed": 4, "eval_month_credit": 2, "eval_month_short": 8},
-                   out=work / "raw", n_workers=0, write_report=False)
-    api.tokenize(work / "raw", work / "tok",
-                 config={"target_vocab": 3000, "n_buckets": 16, "categorical_threshold": 150})
+    api.synthesize(
+        {
+            "n_users": 90,
+            "months": 14,
+            "n_merchants": 500,
+            "mule_ring_count": 1,
+            "seed": 4,
+            "eval_month_credit": 2,
+            "eval_month_short": 8,
+        },
+        out=work / "raw",
+        n_workers=0,
+        write_report=False,
+    )
+    api.tokenize(
+        work / "raw",
+        work / "tok",
+        config={"target_vocab": 3000, "n_buckets": 16, "categorical_threshold": 150},
+    )
     return work
 
 
@@ -59,8 +74,9 @@ def test_finetune_early_stops_and_restores_best(ft_work: Path, monkeypatch) -> N
     assert abs(res["best_val_auc"] - 0.92) < 1e-6
     assert res["n_adapted"] > 0  # LoRA adapters were injected
     # the peak val_auc was at epoch 2, so the restored adapters must be epoch 2's
-    assert torch.allclose(lora_param, torch.full_like(lora_param, 2.0)), \
+    assert torch.allclose(lora_param, torch.full_like(lora_param, 2.0)), (
         "fine-tuner must restore the best-epoch LoRA adapters, not the last epoch's"
+    )
 
 
 def test_finetune_restores_best_lora_adapters(ft_work: Path, monkeypatch) -> None:
@@ -79,11 +95,7 @@ def test_finetune_restores_best_lora_adapters(ft_work: Path, monkeypatch) -> Non
                         param.add_(len(snapshots) + 1.0)
                 for param in ft.head.parameters():
                     param.add_(len(head_snapshots) + 1.0)
-            snapshots.append({
-                k: v.detach().clone()
-                for k, v in ft.model.state_dict().items()
-                if "lora" in k
-            })
+            snapshots.append({k: v.detach().clone() for k, v in ft.model.state_dict().items() if "lora" in k})
             head_snapshots.append({k: v.detach().clone() for k, v in ft.head.state_dict().items()})
             return 0.0
         return next(seq)
@@ -187,6 +199,7 @@ def test_run_epoch_reshuffles_per_epoch(ft_work: Path) -> None:
 
         # Patch the sampler's class method; ft._run_epoch creates a fresh sampler per call
         import pragmatiq.data.dataset as _ds_mod
+
         orig = _ds_mod.DynamicBatchSampler.set_epoch
         _ds_mod.DynamicBatchSampler.set_epoch = spy_set_epoch  # type: ignore[method-assign]
         try:
@@ -236,6 +249,7 @@ def test_run_epoch_reshuffles_per_epoch(ft_work: Path) -> None:
             return real_run_epoch(dataset, users, label_of, opt, train, epoch)
 
         import unittest.mock as _mock
+
         with _mock.patch.object(ft2, "_run_epoch", recording_run_epoch):
             ft2.fit(ds, ft_work / "raw" / "labels" / "default_12m.parquet")
 
@@ -272,6 +286,7 @@ def test_ddp_finetune_requires_mark_forward_method(monkeypatch) -> None:
             return _Wrapper(module)
 
     import pragmatiq.training.pretrainer as P
+
     monkeypatch.setattr(P, "_make_fabric", lambda *a, **k: _FakeFabric())
     model = PragmaModel(ModelConfig.preset("nano", 1500))
     with pytest.raises(RuntimeError, match="lightning>=2.3"):
@@ -320,3 +335,65 @@ def test_missing_lightning_falls_back_to_single_process(monkeypatch) -> None:
     model = PragmaModel(ModelConfig.preset("nano", 1500))
     ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4), device="cpu")  # devices="auto"
     assert ft.fabric is None and not ft._ddp
+
+
+def test_validation_metric_normalization_and_validation() -> None:
+    model = PragmaModel(ModelConfig.preset("nano", 100))
+    ft_default = LoRAFineTuner(model, FineTuneConfig(lora_rank=4), device="cpu")
+    assert ft_default.validation_metric == "aucroc"
+
+    for alias in ("ap", "AP", "aucpr", "AUCPR", "auc_pr", "average_precision", "pr_auc"):
+        ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4, validation_metric=alias), device="cpu")
+        assert ft.validation_metric in ("ap", "aucpr")
+
+    for alias in ("aucroc", "auc_roc", "roc_auc", "ROC_AUC"):
+        ft = LoRAFineTuner(model, FineTuneConfig(lora_rank=4, validation_metric=alias), device="cpu")
+        assert ft.validation_metric == "aucroc"
+
+    with pytest.raises(ValueError, match="unknown validation_metric 'f1_macro'"):
+        LoRAFineTuner(model, FineTuneConfig(lora_rank=4, validation_metric="f1_macro"), device="cpu")
+
+
+def test_compute_val_metric_math() -> None:
+    from sklearn.metrics import average_precision_score, roc_auc_score
+
+    model = PragmaModel(ModelConfig.preset("nano", 100))
+    ft_auc = LoRAFineTuner(model, FineTuneConfig(lora_rank=4, validation_metric="aucroc"), device="cpu")
+    ft_ap = LoRAFineTuner(model, FineTuneConfig(lora_rank=4, validation_metric="ap"), device="cpu")
+
+    ys = [0, 1, 0, 1, 0, 0, 1, 0]
+    probs = [0.1, 0.9, 0.2, 0.8, 0.4, 0.3, 0.7, 0.15]
+
+    expected_auc = float(roc_auc_score(ys, probs))
+    expected_ap = float(average_precision_score(ys, probs))
+
+    assert abs(ft_auc._compute_val_metric(ys, probs) - expected_auc) < 1e-6
+    assert abs(ft_ap._compute_val_metric(ys, probs) - expected_ap) < 1e-6
+
+    assert math.isnan(ft_auc._compute_val_metric([1, 1, 1], [0.5, 0.6, 0.7]))
+    assert math.isnan(ft_ap._compute_val_metric([0, 0], [0.1, 0.2]))
+
+
+def test_finetune_with_ap_metric_early_stops(ft_work: Path, monkeypatch) -> None:
+    tok = PragmaTokenizer.load(ft_work / "tok" / "tokenizer")
+    model = PragmaModel(ModelConfig.preset("nano", tok.vocab_size))
+    ft = LoRAFineTuner(model, FineTuneConfig(max_epochs=20, patience=2, lora_rank=4, validation_metric="ap"))
+
+    assert ft.validation_metric == "ap"
+    seq = iter([0.65, 0.78, 0.72, 0.70])
+
+    def fake_epoch(dataset, users, label_of, opt, train, epoch=0):
+        if train:
+            return 0.0
+        return next(seq)
+
+    monkeypatch.setattr(ft, "_run_epoch", fake_epoch)
+    ds = ShardDataset(ft_work / "tok")
+    res = ft.fit(ds, ft_work / "raw" / "labels" / "default_12m.parquet")
+    ds.close()
+
+    assert res["epochs_run"] == 4  # peak at epoch 2 (0.78), patience=2 triggers after 2 non-improving epochs
+    assert abs(res["best_val_score"] - 0.78) < 1e-6
+    assert abs(res["best_val_auc"] - 0.78) < 1e-6
+    assert res["validation_metric"] == "ap"
+    assert res["val_score_history"] == [0.65, 0.78, 0.72, 0.70]

@@ -22,9 +22,23 @@ from pragmatiq.core.progress import progress
 from pragmatiq.storage.staging import staging as _staging
 
 __all__ = [
-    "synthesize", "tokenize", "pretrain", "pretrain_plan", "finetune", "embed", "probe",
-    "uplift", "export", "benchmark", "gnn", "validate", "quickstart", "runs_list",
-    "runs_compare", "calibrate", "info",
+    "synthesize",
+    "tokenize",
+    "pretrain",
+    "pretrain_plan",
+    "finetune",
+    "embed",
+    "probe",
+    "uplift",
+    "export",
+    "benchmark",
+    "gnn",
+    "validate",
+    "quickstart",
+    "runs_list",
+    "runs_compare",
+    "calibrate",
+    "info",
 ]
 
 
@@ -252,8 +266,12 @@ def tokenize(
         tok.save(out / "tokenizer")
         tok_src = out / "tokenizer"
 
-        writer = ShardWriter(out, tokenizer_hash=tok.content_hash, rows_per_shard=rows_per_shard,
-                             max_events_per_user=tok.config.max_events_per_user)
+        writer = ShardWriter(
+            out,
+            tokenizer_hash=tok.content_hash,
+            rows_per_shard=rows_per_shard,
+            max_events_per_user=tok.config.max_events_per_user,
+        )
         # Progress total is best-effort: manifest.json may be absent or foreign
         # (bring-your-own datasets only owe us the parquet contract).
         total: int | None = None
@@ -277,8 +295,10 @@ def tokenize(
         else:
             records = iter_user_records(data_dir, max_users=max_users)
             encoded = (
-                (tok.encode(rec),
-                 {"attributes": rec.attributes, "lifelong": rec.lifelong, "as_of": rec.as_of})
+                (
+                    tok.encode(rec),
+                    {"attributes": rec.attributes, "lifelong": rec.lifelong, "as_of": rec.as_of},
+                )
                 for rec in records
             )
         n = 0
@@ -334,8 +354,7 @@ def pretrain(
                     "staging: pre-populating local run dir from %s", _remote_run
                 )
                 _mat_dir(_remote_run, Path(runs_root) / run_name)
-        result = _pretrain_inner(shard_dir, run_name, model_size, config, runs_root, resume,
-                                 **overrides)
+        result = _pretrain_inner(shard_dir, run_name, model_size, config, runs_root, resume, **overrides)
         if _runs_root_staged:
             # The staged local dir is uploaded then deleted when this context
             # exits; hand back the durable remote destination instead.
@@ -386,8 +405,9 @@ def _resolve_pretrain(
         # from the visible GPUs. resolve_device_count is the same mapping the trainer uses
         # to build Fabric, so the planned world matches the world the run launches.
         per_node = resolve_device_count(overrides.get("devices", "auto"), dev.startswith("cuda"))
-        plan = autoconfigure(shard_dir, device=dev, world_size=nodes * max(1, per_node),
-                             model_size=model_size)
+        plan = autoconfigure(
+            shard_dir, device=dev, world_size=nodes * max(1, per_node), model_size=model_size
+        )
         logging.getLogger(__name__).info("auto-config: %s", plan.rationale["note"])
         base = plan.as_overrides()
     elif isinstance(config, (str, Path)):
@@ -425,8 +445,9 @@ def _resolve_pretrain(
     tcfg = TrainConfig(**{k: v for k, v in base.items() if k in TrainConfig.__dataclass_fields__})
     # Architecture fields (rope_base, dropout, dim, ...) in the config tune the
     # model on top of the size preset (these are the paper-silent knobs the design notes expose).
-    model_overrides = {k: v for k, v in base.items()
-                       if k in ModelConfig.__dataclass_fields__ and k != "vocab_size"}
+    model_overrides = {
+        k: v for k, v in base.items() if k in ModelConfig.__dataclass_fields__ and k != "vocab_size"
+    }
     # Hands-off PRAGMA+Nemotron wiring: a tokenizer built in embed mode implies the
     # model needs the matching frozen text encoder (and its width) so text tokens are
     # embedded and reconstructed rather than silently collapsing to [UNK]. An explicit
@@ -438,11 +459,26 @@ def _resolve_pretrain(
         mcfg = ModelConfig.preset(model_size, tok.vocab_size, overrides=model_overrides)
     except ValueError as e:
         raise ConfigError(f"{e}; pass --model-size nano|small|medium|large") from e
-    resolved = {"model_size": model_size, "vocab_size": tok.vocab_size,
-                **{k: getattr(mcfg, k) for k in
-                   ("dim", "n_heads", "depth_profile", "depth_event", "depth_history",
-                    "dropout", "rope_base", "max_position", "text_encoder", "text_encoder_dim")},
-                **dataclasses.asdict(tcfg)}
+    resolved = {
+        "model_size": model_size,
+        "vocab_size": tok.vocab_size,
+        **{
+            k: getattr(mcfg, k)
+            for k in (
+                "dim",
+                "n_heads",
+                "depth_profile",
+                "depth_event",
+                "depth_history",
+                "dropout",
+                "rope_base",
+                "max_position",
+                "text_encoder",
+                "text_encoder_dim",
+            )
+        },
+        **dataclasses.asdict(tcfg),
+    }
     return tok, tcfg, model_overrides, resolved, model_size, resuming, shard_dir
 
 
@@ -466,9 +502,14 @@ def pretrain_plan(
     if resume is not None and resume != "auto":
         raise ConfigError(f"resume must be None or 'auto', got {resume!r}")
     tok, _tcfg, _mo, resolved, _size, resuming, _sd = _resolve_pretrain(
-        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides))
-    return {**resolved, "device": _resolve_device("auto"), "tokenizer_hash": tok.content_hash,
-            "resuming": resuming}
+        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides)
+    )
+    return {
+        **resolved,
+        "device": _resolve_device("auto"),
+        "tokenizer_hash": tok.content_hash,
+        "resuming": resuming,
+    }
 
 
 def _pretrain_inner(
@@ -487,21 +528,28 @@ def _pretrain_inner(
     from pragmatiq.training.pretrainer import PreTrainer, seed_everything
 
     tok, tcfg, model_overrides, resolved, model_size, resuming, shard_dir = _resolve_pretrain(
-        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides))
+        shard_dir, run_name, model_size, config, runs_root, resume, dict(overrides)
+    )
     seed_everything(tcfg.seed, tcfg.deterministic)  # deterministic init + dropout stream (resume-safe)
     model = PragmaModel(ModelConfig.preset(model_size, tok.vocab_size, overrides=model_overrides))
-    run = (Run.open(run_name, runs_root) if resuming
-           else Run.create(run_name, resolved, tcfg.seed, tok.content_hash, runs_root,
-                           tokenizer_src=shard_dir / "tokenizer"))
+    run = (
+        Run.open(run_name, runs_root)
+        if resuming
+        else Run.create(
+            run_name, resolved, tcfg.seed, tok.content_hash, runs_root, tokenizer_src=shard_dir / "tokenizer"
+        )
+    )
     if resuming:
         _enforce_resume_config(run.read_config(), resolved)
-    logger = MetricLogger(run.dir, wandb=tcfg.wandb, wandb_project=tcfg.wandb_project,
-                          run_name=run_name, config=resolved)
+    logger = MetricLogger(
+        run.dir, wandb=tcfg.wandb, wandb_project=tcfg.wandb_project, run_name=run_name, config=resolved
+    )
     trainer = PreTrainer(model, run, tcfg, tok.content_hash, logger=logger)
     ds = ShardDataset(shard_dir)
     sampler = DynamicBatchSampler(ds.index, token_budget=tcfg.token_budget, seed=tcfg.seed)
-    loader = ShardDataLoader(ds, sampler, prefetch=tcfg.prefetch_batches,
-                             pin_memory=str(trainer.fabric.device).startswith("cuda"))
+    loader = ShardDataLoader(
+        ds, sampler, prefetch=tcfg.prefetch_batches, pin_memory=str(trainer.fabric.device).startswith("cuda")
+    )
     trainer.fit(loader, resume=resume)
     logger.close()
     ds.close()
@@ -554,8 +602,10 @@ def embed(
         emb = embed_users(model, ds, token_budget=token_budget, device=device)
         ds.close()
         if not emb:
-            raise DataContractError(f"no users found in shard_dir {str(shard_dir)!r}; check the path and that "
-                             "tokenize() produced shards")
+            raise DataContractError(
+                f"no users found in shard_dir {str(shard_dir)!r}; check the path and that "
+                "tokenize() produced shards"
+            )
         if out is not None:
             import numpy as np
             import pyarrow as pa
@@ -563,8 +613,7 @@ def embed(
 
             uids = list(emb)
             mat = np.stack([emb[u] for u in uids])
-            table = pa.table({"user_id": uids,
-                              "embedding": [row.tolist() for row in mat]})
+            table = pa.table({"user_id": uids, "embedding": [row.tolist() for row in mat]})
             pq.write_table(table, Path(out))
         return {"n_users": len(emb), "dim": int(next(iter(emb.values())).shape[0])}
 
@@ -618,18 +667,25 @@ def probe(
         uids, _, eval_us = _load_label_table(label_path)
         if staleness_us and eval_us is None:
             raise DataContractError(
-                f"staleness_window needs an eval_ts column in the label table {str(label_path)!r}")
+                f"staleness_window needs an eval_ts column in the label table {str(label_path)!r}"
+            )
         cutoffs = cutoffs_from_labels(uids, eval_us, staleness_us)
         emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
         probe_res = EmbeddingProbe(model=probe_model, seed=seed).run(emb, label_path)
-        out_dict: dict[str, Any] = {"probe_model": probe_model,
-                                    "probe_auc": probe_res.auc, "probe_pr_auc": probe_res.pr_auc,
-                                    "probe_accuracy": probe_res.accuracy,
-                                    "n_test": probe_res.n_test, "prevalence": probe_res.prevalence,
-                                    "staleness_window": staleness_window, "staleness_us": staleness_us}
+        out_dict: dict[str, Any] = {
+            "probe_model": probe_model,
+            "probe_auc": probe_res.auc,
+            "probe_pr_auc": probe_res.pr_auc,
+            "probe_accuracy": probe_res.accuracy,
+            "n_test": probe_res.n_test,
+            "prevalence": probe_res.prevalence,
+            "staleness_window": staleness_window,
+            "staleness_us": staleness_us,
+        }
         if with_baseline:
-            base = RawCountBaseline(seed=seed, model=probe_model).run(ds, label_path,
-                                                                     staleness_us=staleness_us)
+            base = RawCountBaseline(seed=seed, model=probe_model).run(
+                ds, label_path, staleness_us=staleness_us
+            )
             out_dict["baseline_auc"] = base.auc
             out_dict["baseline_pr_auc"] = base.pr_auc
         ds.close()
@@ -672,8 +728,14 @@ def uplift(
         emb = embed_users(model, ds, token_budget=token_budget, device=device, cutoffs=cutoffs)
         res = UpliftLearner(seed=seed, learner=learner).run(emb, rows)
         ds.close()
-        return {"qini": res.qini, "qini_oracle": res.qini_oracle, "ate": res.ate,
-                "n_train": res.n_train, "n_test": res.n_test, "treated_frac": res.treated_frac}
+        return {
+            "qini": res.qini,
+            "qini_oracle": res.qini_oracle,
+            "ate": res.ate,
+            "n_train": res.n_train,
+            "n_test": res.n_test,
+            "treated_frac": res.treated_frac,
+        }
 
 
 def finetune(
@@ -699,9 +761,9 @@ def finetune(
         **overrides: ``FineTuneConfig`` fields that override ``config``.
 
     Returns:
-        ``{"best_val_auc", "epochs_run", "n_adapted", "val_auc_history"}`` — best
-        held-out AUC, epochs run before early-stopping, number of injected LoRA
-        adapters, and the per-epoch validation-AUC history.
+        ``{"best_val_auc", "best_val_score", "epochs_run", "n_adapted", "val_auc_history", "validation_metric"}`` —
+        best held-out validation metric score, epochs run before early-stopping, number of injected
+        LoRA adapters, per-epoch validation history, and the configured validation metric.
     """
     with _staging() as stage:
         shard_dir = stage.input(shard_dir)  # type: ignore[assignment]
@@ -720,10 +782,11 @@ def finetune(
         base.update(overrides)
         unknown = set(base) - set(FineTuneConfig.__dataclass_fields__)
         if unknown:
-            raise ConfigError(f"unknown finetune config key(s): {sorted(unknown)}; "
-                              f"known: {sorted(FineTuneConfig.__dataclass_fields__)}")
-        fcfg = FineTuneConfig(**{k: v for k, v in base.items()
-                                 if k in FineTuneConfig.__dataclass_fields__})
+            raise ConfigError(
+                f"unknown finetune config key(s): {sorted(unknown)}; "
+                f"known: {sorted(FineTuneConfig.__dataclass_fields__)}"
+            )
+        fcfg = FineTuneConfig(**{k: v for k, v in base.items() if k in FineTuneConfig.__dataclass_fields__})
         # Seed before LoRA init + dropout so the same seed → identical adapters (rule 2).
         seed_everything(fcfg.seed)
         device = _resolve_device(device)
@@ -796,8 +859,9 @@ def benchmark(
         device = _resolve_device(device)
         _ensure_shard_tokenizer_matches_run(shard_dir, run)
         model = PragmaModel.from_pretrained(run, device=device)
-        stats = benchmark_batch_embed(model, shard_dir, device=device, max_users=max_users,
-                                      precision=precision)
+        stats = benchmark_batch_embed(
+            model, shard_dir, device=device, max_users=max_users, precision=precision
+        )
         write_results(stats, out)
         return stats
 
@@ -850,8 +914,12 @@ def validate(data_dir: str | Path) -> dict[str, Any]:
         from pragmatiq.validate import validate_dataset
 
         report = validate_dataset(data_dir)
-        return {"ok": report.ok, "errors": report.errors, "warnings": report.warnings,
-                "summary": report.summary()}
+        return {
+            "ok": report.ok,
+            "errors": report.errors,
+            "warnings": report.warnings,
+            "summary": report.summary(),
+        }
 
 
 def quickstart(
@@ -899,16 +967,26 @@ def quickstart(
         label = base + "/raw/labels/default_12m.parquet"
     synthesize({"n_users": n_users, "seed": seed}, out=raw, n_workers=n_workers, write_report=False)
     tokenize(raw, tok, config={"target_vocab": 28000, "n_buckets": 64})
-    summary = pretrain(tok, "quickstart", model_size=model_size,
-                       # One device: a nano smoke run gains nothing from DDP, and on an
-                       # 8-GPU host the launch and all-reduce overhead made it ~2.5x slower.
-                       config={"max_steps": max_steps, "token_budget": 8192,
-                               "warmup_steps": max(10, max_steps // 10), "devices": 1},
-                       runs_root=runs_root)
+    summary = pretrain(
+        tok,
+        "quickstart",
+        model_size=model_size,
+        # One device: a nano smoke run gains nothing from DDP, and on an
+        # 8-GPU host the launch and all-reduce overhead made it ~2.5x slower.
+        config={
+            "max_steps": max_steps,
+            "token_budget": 8192,
+            "warmup_steps": max(10, max_steps // 10),
+            "devices": 1,
+        },
+        runs_root=runs_root,
+    )
     res = probe(tok, summary["run_dir"], label)
-    return {"run_dir": summary["run_dir"], "probe": res,
-            "message": f"credit probe AUC {res['probe_auc']:.3f} vs raw-count baseline "
-                       f"{res['baseline_auc']:.3f}"}
+    return {
+        "run_dir": summary["run_dir"],
+        "probe": res,
+        "message": f"credit probe AUC {res['probe_auc']:.3f} vs raw-count baseline {res['baseline_auc']:.3f}",
+    }
 
 
 def _remote_runs_root_missing(runs_root: str | Path) -> bool:
@@ -974,15 +1052,29 @@ def calibrate(
 
 
 _ENV_VARS: tuple[str, ...] = (
-    "PRAGMATIQ_DEVICE", "PRAGMATIQ_INFERENCE_PRECISION", "PRAGMATIQ_DISABLE_FLASH",
-    "PRAGMATIQ_SERVE_CPU", "PRAGMATIQ_SERVE_MAX_RECORDS", "PRAGMATIQ_SERVE_TOKEN_BUDGET",
-    "PRAGMATIQ_OUT", "PRAGMATIQ_RUN", "PRAGMATIQ_DETERMINISTIC",
+    "PRAGMATIQ_DEVICE",
+    "PRAGMATIQ_INFERENCE_PRECISION",
+    "PRAGMATIQ_DISABLE_FLASH",
+    "PRAGMATIQ_SERVE_CPU",
+    "PRAGMATIQ_SERVE_MAX_RECORDS",
+    "PRAGMATIQ_SERVE_TOKEN_BUDGET",
+    "PRAGMATIQ_OUT",
+    "PRAGMATIQ_RUN",
+    "PRAGMATIQ_DETERMINISTIC",
 )
 _EXTRA_MODULES: tuple[tuple[str, str], ...] = (
-    ("lightning", "train"), ("onnxruntime", "serve"), ("onnxscript", "serve"),
-    ("torch_geometric", "aml"), ("transformers", "text"), ("lightgbm", "gbdt"),
-    ("wandb", "tracking"), ("streamlit", "demo"), ("s3fs", "s3"), ("gcsfs", "gcs"),
-    ("adlfs", "azure"), ("tritonclient", "triton-client"),
+    ("lightning", "train"),
+    ("onnxruntime", "serve"),
+    ("onnxscript", "serve"),
+    ("torch_geometric", "aml"),
+    ("transformers", "text"),
+    ("lightgbm", "gbdt"),
+    ("wandb", "tracking"),
+    ("streamlit", "demo"),
+    ("s3fs", "s3"),
+    ("gcsfs", "gcs"),
+    ("adlfs", "azure"),
+    ("tritonclient", "triton-client"),
 )
 
 
@@ -1014,8 +1106,9 @@ def info() -> dict[str, Any]:
         cuda["version"] = torch.version.cuda
         for i in range(torch.cuda.device_count()):
             props = torch.cuda.get_device_properties(i)
-            cuda["devices"].append({"index": i, "name": props.name,
-                                    "memory_gib": round(props.total_memory / (1024 ** 3), 1)})
+            cuda["devices"].append(
+                {"index": i, "name": props.name, "memory_gib": round(props.total_memory / (1024**3), 1)}
+            )
     try:
         flash_version: str | None = version("flash-attn")
     except PackageNotFoundError:
@@ -1035,8 +1128,10 @@ def info() -> dict[str, Any]:
         "device": device,
         "cuda": cuda,
         "flash_attn": {"importable": flash_available(), "version": flash_version},
-        "attention_backend": {"cuda/bf16": attention_backend("cuda", torch.bfloat16),
-                              "cpu/fp32": attention_backend("cpu", torch.float32)},
+        "attention_backend": {
+            "cuda/bf16": attention_backend("cuda", torch.bfloat16),
+            "cpu/fp32": attention_backend("cpu", torch.float32),
+        },
         "inference_precision": resolve_precision("auto", device),
         "extras": extras,
         "env": {k: os.environ.get(k) for k in _ENV_VARS},

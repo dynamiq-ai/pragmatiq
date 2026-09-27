@@ -54,7 +54,9 @@ def _stratified_split(
         rng.shuffle(members)
         # Cap at len-1 so at least one member of each class stays in train (a
         # high val_fraction on a tiny class must not empty that class from train).
-        n_val = min(len(members) - 1, max(1, int(round(len(members) * val_fraction)))) if len(members) > 1 else 0
+        n_val = (
+            min(len(members) - 1, max(1, int(round(len(members) * val_fraction)))) if len(members) > 1 else 0
+        )
         val.update(members[:n_val])
     return set(users) - val, val
 
@@ -90,6 +92,9 @@ class FineTuneConfig:
     # everywhere (otherwise the ranks diverge and DDP hangs).
     devices: int | str = "auto"
     num_nodes: int = 1
+    # Validation metric used for early stopping and model checkpointing:
+    # "aucroc" (ROC-AUC, default) or "ap" / "aucpr" (Average Precision / PR-AUC)
+    validation_metric: str = "aucroc"
 
 
 def _lightning_available() -> bool:
@@ -122,11 +127,27 @@ class LoRAFineTuner:
 
         device = resolve_device(device)
         if config.token_budget is None:
-            budget = (token_budget_for(device, _size_name(model)) if str(device).startswith("cuda")
-                      else 16_384)
+            budget = token_budget_for(device, _size_name(model)) if str(device).startswith("cuda") else 16_384
             config = dataclasses.replace(config, token_budget=budget)
         self.config = config
         self.device = device
+        _metric_raw = str(config.validation_metric).lower().strip()
+        _metric_map = {
+            "aucroc": "aucroc",
+            "auc_roc": "aucroc",
+            "roc_auc": "aucroc",
+            "ap": "ap",
+            "average_precision": "ap",
+            "aucpr": "aucpr",
+            "auc_pr": "aucpr",
+            "pr_auc": "aucpr",
+        }
+        if _metric_raw not in _metric_map:
+            raise ValueError(
+                f"unknown validation_metric '{config.validation_metric}'; "
+                f"supported: {sorted(set(_metric_map.values()))}"
+            )
+        self.validation_metric = _metric_map[_metric_raw]
         self._epoch_stats: list[dict[str, Any]] = []
         # Resolve the data-parallel world size early so the single-process path
         # (world == 1) can stay byte-identical: it never touches Fabric, while
@@ -142,8 +163,11 @@ class LoRAFineTuner:
         if self._ddp and config.devices == "auto" and not _lightning_available():
             # Several GPUs are visible but the [train] extra is absent: run on one
             # device rather than fail — the user did not ask for DDP explicitly.
-            log.warning("lightning is not installed; %d devices visible but fine-tuning on a "
-                        "single device (pip install 'pragmatiq[train]' for DDP)", world)
+            log.warning(
+                "lightning is not installed; %d devices visible but fine-tuning on a "
+                "single device (pip install 'pragmatiq[train]' for DDP)",
+                world,
+            )
             self._ddp = False
         if not self._ddp:
             # ---- single-process path: UNCHANGED (no Fabric) ----
@@ -158,8 +182,9 @@ class LoRAFineTuner:
         # ---- DDP path (world > 1): mirror the pretrainer ----
         from .pretrainer import _make_fabric, seed_everything
 
-        self.fabric = _make_fabric(config.devices, num_nodes=config.num_nodes,
-                                   accelerator="cuda" if use_cuda else "cpu")
+        self.fabric = _make_fabric(
+            config.devices, num_nodes=config.num_nodes, accelerator="cuda" if use_cuda else "cpu"
+        )
         # Per-rank seed offset so LoRA init / any sampling draws an independent
         # stream on each rank (the global seed was already applied by the caller;
         # single-process keeps the base seed via the world==1 branch above).
@@ -230,33 +255,40 @@ class LoRAFineTuner:
         label_of = have
 
         self._params = list(self._trainable())
-        opt = torch.optim.AdamW(self._params, lr=self.config.lr,
-                                weight_decay=self.config.weight_decay)
+        opt = torch.optim.AdamW(self._params, lr=self.config.lr, weight_decay=self.config.weight_decay)
         if self._ddp:
             opt = self.fabric.setup_optimizers(opt)
         # Best-state is saved/restored on the UNWRAPPED modules so the keys match
         # the single-process layout (and are identical on every rank: the LoRA/head
         # weights are DDP-synchronized and the AUC driving the decision is global).
         model_mod, head_mod = self._unwrap(self.model), self._unwrap(self.head)
-        best_auc, best_state, bad = -1.0, None, 0
+        best_score, best_state, bad = -1.0, None, 0
         history = []
+        metric_label = "auc" if self.validation_metric == "aucroc" else self.validation_metric
         run_epoch = self._run_epoch_ddp if self._ddp else self._run_epoch
         for _epoch in range(self.config.max_epochs):
             run_epoch(dataset, train_users, label_of, opt, train=True, epoch=_epoch)
-            val_auc = run_epoch(dataset, val_users, label_of, opt, train=False, epoch=_epoch)
-            history.append(val_auc)
-            log.info("finetune epoch %d/%d  val_auc %.4f  best %.4f",
-                     _epoch + 1, self.config.max_epochs, val_auc, max(best_auc, val_auc))
-            # val_auc is identical on every rank (the single-process path computes
+            val_score = run_epoch(dataset, val_users, label_of, opt, train=False, epoch=_epoch)
+            history.append(val_score)
+            log.info(
+                "finetune epoch %d/%d  val_%s %.4f  best %.4f",
+                _epoch + 1,
+                self.config.max_epochs,
+                metric_label,
+                val_score,
+                max(best_score, val_score),
+            )
+            # val_score is identical on every rank (the single-process path computes
             # it locally; the DDP path gathers val logits+labels across ranks before
             # scoring), so the early-stop decision below fires in lockstep — no rank
             # can break while another keeps iterating, which would deadlock the next
             # epoch's all-reduce.
-            if val_auc > best_auc + 1e-4:
-                best_auc, bad = val_auc, 0
-                best_state = {"head": {k: v.detach().clone() for k, v in head_mod.state_dict().items()},
-                              "lora": {k: v.detach().clone() for k, v in model_mod.state_dict().items()
-                                       if "lora" in k}}
+            if val_score > best_score + 1e-4:
+                best_score, bad = val_score, 0
+                best_state = {
+                    "head": {k: v.detach().clone() for k, v in head_mod.state_dict().items()},
+                    "lora": {k: v.detach().clone() for k, v in model_mod.state_dict().items() if "lora" in k},
+                }
             else:
                 bad += 1
                 if bad >= self.config.patience:
@@ -268,13 +300,39 @@ class LoRAFineTuner:
             # state dict over the adapter keys only, hence strict=False.
             head_mod.load_state_dict(best_state["head"])
             model_mod.load_state_dict(best_state["lora"], strict=False)
-        return {"best_val_auc": best_auc, "epochs_run": len(history), "n_adapted": self.n_adapted,
-                "val_auc_history": history, "epoch_stats": list(self._epoch_stats),
-                "token_budget": self.config.token_budget}
+        return {
+            "best_val_score": best_score,
+            "best_val_auc": best_score,
+            "epochs_run": len(history),
+            "n_adapted": self.n_adapted,
+            "val_score_history": history,
+            "val_auc_history": history,
+            "validation_metric": self.validation_metric,
+            "epoch_stats": list(self._epoch_stats),
+            "token_budget": self.config.token_budget,
+        }
 
-    def _run_epoch(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
-                   opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
+    def _compute_val_metric(self, ys: list[int], probs: list[float]) -> float:
+        """Compute the configured validation metric over validation predictions."""
+        if len(set(ys)) <= 1:
+            return float("nan")
+        if self.validation_metric in ("ap", "aucpr"):
+            from sklearn.metrics import average_precision_score
+
+            return float(average_precision_score(ys, probs))
         from sklearn.metrics import roc_auc_score
+
+        return float(roc_auc_score(ys, probs))
+
+    def _run_epoch(
+        self,
+        dataset: ShardDataset,
+        users: set[str],
+        label_of: dict[str, int],
+        opt: torch.optim.Optimizer,
+        train: bool,
+        epoch: int = 0,
+    ) -> float:
 
         self.model.train(train)
         self.head.train(train)
@@ -285,14 +343,20 @@ class LoRAFineTuner:
         # 2026-07-06) even though only a fraction of users carried labels.
         pos_of = {u: i for i, u in enumerate(dataset.index.order)}
         subset = sorted(pos_of[u] for u in users if u in pos_of)
-        sampler = DynamicBatchSampler(dataset.index, token_budget=int(self.config.token_budget or 16_384),
-                                      shuffle=train, seed=self.config.seed, subset=subset)
+        sampler = DynamicBatchSampler(
+            dataset.index,
+            token_budget=int(self.config.token_budget or 16_384),
+            shuffle=train,
+            seed=self.config.seed,
+            subset=subset,
+        )
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
         is_cuda = str(self.device).startswith("cuda")
-        loader = ShardDataLoader(dataset, sampler, collator=collator,
-                                 prefetch=self.config.prefetch_batches, pin_memory=is_cuda)
+        loader = ShardDataLoader(
+            dataset, sampler, collator=collator, prefetch=self.config.prefetch_batches, pin_memory=is_cuda
+        )
         probs, ys = [], []
         # Long epochs still need a liveness signal at scale — heartbeat so
         # operators and the GPU-validation harness can tell slow from stuck.
@@ -304,9 +368,15 @@ class LoRAFineTuner:
             _wait_s += time.time() - _t_iter
             _hb_batches += 1
             if _hb_batches % 200 == 0:
-                log.info("finetune %s epoch %d: %d batches, %d labeled users, %.0fs (%.0fs waiting on data)",
-                         "train" if train else "val", epoch + 1, _hb_batches,
-                         _hb_users, time.time() - _hb_t0, _wait_s)
+                log.info(
+                    "finetune %s epoch %d: %d batches, %d labeled users, %.0fs (%.0fs waiting on data)",
+                    "train" if train else "val",
+                    epoch + 1,
+                    _hb_batches,
+                    _hb_users,
+                    time.time() - _hb_t0,
+                    _wait_s,
+                )
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 continue
@@ -321,16 +391,17 @@ class LoRAFineTuner:
             # 'large' preset (observed 2026-07-06). The DDP path already trains
             # bf16-mixed via Fabric; this aligns the single-process path. CPU
             # stays fp32 (nullcontext), preserving the byte-identical contract.
-            autocast = (torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-                        if str(self.device).startswith("cuda")
-                        else contextlib.nullcontext())
+            autocast = (
+                torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+                if str(self.device).startswith("cuda")
+                else contextlib.nullcontext()
+            )
             with torch.set_grad_enabled(train):
                 with autocast:
                     z = self.model.embed_users(batch)
                     logits = self.head(z)
                     sel = torch.tensor(idx, device=self.device)
-                    y = torch.tensor([label_of[batch.user_ids[i]] for i in idx],
-                                     device=self.device)
+                    y = torch.tensor([label_of[batch.user_ids[i]] for i in idx], device=self.device)
                     loss = torch.nn.functional.cross_entropy(logits[sel], y)
                 if train:
                     # backward runs outside autocast (torch re-autocasts saved
@@ -344,18 +415,31 @@ class LoRAFineTuner:
                     ys.extend(y.cpu().tolist())
             _t_iter = time.time()
         elapsed = max(time.time() - _hb_t0, 1e-6)
-        self._epoch_stats.append({
-            "epoch": epoch + 1, "phase": "train" if train else "val", "batches": _hb_batches,
-            "users": _hb_users, "tokens": _hb_tokens, "seconds": round(elapsed, 2),
-            "tokens_per_sec": round(_hb_tokens / elapsed, 1),
-            "data_wait_seconds": round(_wait_s, 2),
-        })
-        if not train and len(set(ys)) > 1:
-            return float(roc_auc_score(ys, probs))
+        self._epoch_stats.append(
+            {
+                "epoch": epoch + 1,
+                "phase": "train" if train else "val",
+                "batches": _hb_batches,
+                "users": _hb_users,
+                "tokens": _hb_tokens,
+                "seconds": round(elapsed, 2),
+                "tokens_per_sec": round(_hb_tokens / elapsed, 1),
+                "data_wait_seconds": round(_wait_s, 2),
+            }
+        )
+        if not train:
+            return self._compute_val_metric(ys, probs)
         return float("nan")
 
-    def _run_epoch_ddp(self, dataset: ShardDataset, users: set[str], label_of: dict[str, int],
-                       opt: torch.optim.Optimizer, train: bool, epoch: int = 0) -> float:
+    def _run_epoch_ddp(
+        self,
+        dataset: ShardDataset,
+        users: set[str],
+        label_of: dict[str, int],
+        opt: torch.optim.Optimizer,
+        train: bool,
+        epoch: int = 0,
+    ) -> float:
         """DDP epoch: each rank trains a disjoint, equal-length slice and the
         validation AUC is computed over the FULL val set gathered across ranks.
 
@@ -374,7 +458,6 @@ class LoRAFineTuner:
           so the gathered val AUC matches the single-process AUC over the same set.
         """
         import torch.distributed as dist
-        from sklearn.metrics import roc_auc_score
 
         self.model.train(train)
         self.head.train(train)
@@ -383,15 +466,24 @@ class LoRAFineTuner:
         # solely by the sampler's replica padding (equal across ranks).
         pos_of = {u: i for i, u in enumerate(dataset.index.order)}
         subset = sorted(pos_of[u] for u in users if u in pos_of)
-        sampler = DynamicBatchSampler(dataset.index, token_budget=int(self.config.token_budget or 16_384),
-                                      shuffle=train, seed=self.config.seed, subset=subset)
+        sampler = DynamicBatchSampler(
+            dataset.index,
+            token_budget=int(self.config.token_budget or 16_384),
+            shuffle=train,
+            seed=self.config.seed,
+            subset=subset,
+        )
         sampler.set_replica_info(int(self.fabric.world_size), int(self.fabric.global_rank))
         sampler.set_epoch(epoch)
         cutoffs = getattr(self, "_cutoffs", None)
         collator = TruncatingCollator(cutoffs, max_events=dataset.max_events) if cutoffs else None
-        loader = ShardDataLoader(dataset, sampler, collator=collator,
-                                 prefetch=self.config.prefetch_batches,
-                                 pin_memory=str(self.fabric.device).startswith("cuda"))
+        loader = ShardDataLoader(
+            dataset,
+            sampler,
+            collator=collator,
+            prefetch=self.config.prefetch_batches,
+            pin_memory=str(self.fabric.device).startswith("cuda"),
+        )
         local_probs: list[float] = []
         local_ys: list[int] = []
         local_uids: list[str] = []
@@ -402,15 +494,21 @@ class LoRAFineTuner:
         for batch in loader:
             _hb_batches += 1
             if _hb_batches % 200 == 0 and int(self.fabric.global_rank) == 0:
-                log.info("finetune %s epoch %d (ddp): %d batches/rank, %.0fs",
-                         "train" if train else "val", epoch + 1, _hb_batches,
-                         time.time() - _hb_t0)
+                log.info(
+                    "finetune %s epoch %d (ddp): %d batches/rank, %.0fs",
+                    "train" if train else "val",
+                    epoch + 1,
+                    _hb_batches,
+                    time.time() - _hb_t0,
+                )
             idx = [i for i, u in enumerate(batch.user_ids) if u in users]
             if not idx:
                 # With a subset over `users`, batches always carry a selected user;
                 # this guard is defensive only and never skips under DDP (skipping
                 # would desynchronize the per-rank backward count and deadlock).
-                raise RuntimeError("DDP fine-tune: empty batch on a rank would desync gradient all-reduce; the subset sampler should prevent this")
+                raise RuntimeError(
+                    "DDP fine-tune: empty batch on a rank would desync gradient all-reduce; the subset sampler should prevent this"
+                )
             batch = batch.to(self.fabric.device)
             with torch.set_grad_enabled(train):
                 z = self.model.embed_users(batch)
@@ -453,6 +551,6 @@ class LoRAFineTuner:
             return float("nan")
         probs = [sum(vs) / len(vs) for vs in prob_acc.values()]
         ys = [label_map[uid] for uid in prob_acc]
-        if len(set(ys)) > 1:
-            return float(roc_auc_score(ys, probs))
+        if not train:
+            return self._compute_val_metric(ys, probs)
         return float("nan")

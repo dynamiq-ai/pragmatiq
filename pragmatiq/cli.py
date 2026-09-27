@@ -16,8 +16,12 @@ import sys
 
 import typer
 
-app = typer.Typer(name="pragmatiq", help="pragmatiq: behavioral foundation model for banking events.",
-                  no_args_is_help=True, pretty_exceptions_show_locals=False)
+app = typer.Typer(
+    name="pragmatiq",
+    help="pragmatiq: behavioral foundation model for banking events.",
+    no_args_is_help=True,
+    pretty_exceptions_show_locals=False,
+)
 synth_app = typer.Typer(help="Synthetic data generation.", no_args_is_help=True)
 app.add_typer(synth_app, name="synth")
 
@@ -33,14 +37,19 @@ def _version_callback(value: bool) -> None:
 @app.callback()
 def _setup(
     ctx: typer.Context,
-    verbose: bool = typer.Option(True, "--verbose/--quiet",
-                                 help="Show INFO-level progress logs on stderr."),
-    version: bool = typer.Option(False, "--version", callback=_version_callback, is_eager=True,
-                                 help="Print the pragmatiq version and exit."),
+    verbose: bool = typer.Option(True, "--verbose/--quiet", help="Show INFO-level progress logs on stderr."),
+    version: bool = typer.Option(
+        False,
+        "--version",
+        callback=_version_callback,
+        is_eager=True,
+        help="Print the pragmatiq version and exit.",
+    ),
 ) -> None:
     ctx.obj = {"verbose": verbose}
-    logging.basicConfig(level=logging.INFO if verbose else logging.WARNING,
-                        stream=sys.stderr, format="%(message)s")
+    logging.basicConfig(
+        level=logging.INFO if verbose else logging.WARNING, stream=sys.stderr, format="%(message)s"
+    )
 
 
 @synth_app.command("generate")
@@ -50,15 +59,18 @@ def synth_generate(
     n_users: int | None = typer.Option(None, help="Override n_users."),
     seed: int | None = typer.Option(None, help="Override seed."),
     n_workers: int = typer.Option(0, help="Parallel workers (<=1 = inline)."),
-    report: bool | None = typer.Option(None, "--report/--no-report",
-                                       help="Write realism_report.html (default: only when "
-                                            "matplotlib is installed)."),
+    report: bool | None = typer.Option(
+        None,
+        "--report/--no-report",
+        help="Write realism_report.html (default: only when matplotlib is installed).",
+    ),
 ) -> None:
     """Generate a synthetic banking dataset."""
     from pragmatiq import api
 
-    manifest = api.synthesize(config=config, out=out, n_users=n_users, seed=seed,
-                              n_workers=n_workers, write_report=report)
+    manifest = api.synthesize(
+        config=config, out=out, n_users=n_users, seed=seed, n_workers=n_workers, write_report=report
+    )
     typer.echo(json.dumps(manifest, indent=2))
 
 
@@ -74,9 +86,14 @@ def tokenize_cmd(
     """Fit/apply the tokenizer and write tokenized shards + LMDB index."""
     from pragmatiq import api
 
-    manifest = api.tokenize(data_dir=data_dir, out=out, config=config,
-                            tokenizer_dir=tokenizer_dir, max_users=max_users,
-                            n_workers=n_workers)
+    manifest = api.tokenize(
+        data_dir=data_dir,
+        out=out,
+        config=config,
+        tokenizer_dir=tokenizer_dir,
+        max_users=max_users,
+        n_workers=n_workers,
+    )
     typer.echo(json.dumps(manifest, indent=2))
 
 
@@ -87,15 +104,20 @@ def pretrain_cmd(
     run_name: str = typer.Option(..., "--name", help="Run name (runs/{name})."),
     model_size: str = typer.Option("small", help="small | medium | large."),
     config: str | None = typer.Option(
-        "auto", help="Pretrain YAML (configs/pretrain.yaml), or 'auto' to size the batch and "
-                     "schedule from the data and the device."),
+        "auto",
+        help="Pretrain YAML (configs/pretrain.yaml), or 'auto' to size the batch and "
+        "schedule from the data and the device.",
+    ),
     runs_root: str = typer.Option("runs", help="Runs root directory."),
     resume: str | None = typer.Option(None, help="'auto' to resume runs/{name}/checkpoints/last.pt."),
-    wandb: bool = typer.Option(False, "--wandb",
-                               help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."),
-    show_config: bool = typer.Option(False, "--show-config",
-                                     help="Print the resolved training + model config as JSON "
-                                          "and exit without training."),
+    wandb: bool = typer.Option(
+        False, "--wandb", help="Mirror metrics to Weights & Biases (needs the [tracking] extra)."
+    ),
+    show_config: bool = typer.Option(
+        False,
+        "--show-config",
+        help="Print the resolved training + model config as JSON and exit without training.",
+    ),
 ) -> None:
     """Pretrain a pragmatiq model (MLM) on tokenized shards."""
     from pragmatiq import api
@@ -108,12 +130,26 @@ def pretrain_cmd(
     if ctx.obj and not ctx.obj.get("verbose", True):
         overrides["verbose"] = False  # --quiet also silences the heartbeat
     if show_config:
-        plan = api.pretrain_plan(shard_dir, model_size=model_size, config=config, run_name=run_name,
-                                 runs_root=runs_root, resume=resume, **overrides)
+        plan = api.pretrain_plan(
+            shard_dir,
+            model_size=model_size,
+            config=config,
+            run_name=run_name,
+            runs_root=runs_root,
+            resume=resume,
+            **overrides,
+        )
         typer.echo(json.dumps(plan, indent=2, default=str))
         return
-    summary = api.pretrain(shard_dir, run_name, model_size=model_size, config=config,
-                           runs_root=runs_root, resume=resume, **overrides)
+    summary = api.pretrain(
+        shard_dir,
+        run_name,
+        model_size=model_size,
+        config=config,
+        runs_root=runs_root,
+        resume=resume,
+        **overrides,
+    )
     typer.echo(json.dumps(summary, indent=2))
 
 
@@ -126,15 +162,28 @@ def probe_cmd(
     probe_model: str = typer.Option("gbdt", help="Probe head: gbdt | logistic | lightgbm."),
     seed: int = typer.Option(0, help="Probe random seed (for reproducible AUCs)."),
     staleness_window: str | None = typer.Option(
-        None, help="Drop the most recent window of history before each eval point "
-                   "(e.g. 6h, 1d): the paper's event-staleness robustness check."),
+        None,
+        help="Drop the most recent window of history before each eval point "
+        "(e.g. 6h, 1d): the paper's event-staleness robustness check.",
+    ),
 ) -> None:
     """Probe a trained model on a label table; reports ROC-AUC + PR-AUC vs baseline."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(
-        api.probe(shard_dir, run, label, device=device, probe_model=probe_model, seed=seed,
-                  staleness_window=staleness_window), indent=2))
+    typer.echo(
+        json.dumps(
+            api.probe(
+                shard_dir,
+                run,
+                label,
+                device=device,
+                probe_model=probe_model,
+                seed=seed,
+                staleness_window=staleness_window,
+            ),
+            indent=2,
+        )
+    )
 
 
 @app.command("uplift")
@@ -158,11 +207,19 @@ def finetune_cmd(
     label: str = typer.Option(..., help="Label parquet (labels/<task>.parquet)."),
     config: str | None = typer.Option(None, help="Finetune YAML (see configs/finetune/credit.yaml)."),
     device: str = typer.Option("auto", help="auto | cpu | cuda."),
+    metric: str | None = typer.Option(
+        None, "--metric", "-m", help="Validation metric: aucroc (default) | ap | aucpr."
+    ),
 ) -> None:
     """LoRA fine-tune a trained model's adapters + head on a label table."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.finetune(shard_dir, run, label, config=config, device=device), indent=2))
+    overrides = {}
+    if metric is not None:
+        overrides["validation_metric"] = metric
+    typer.echo(
+        json.dumps(api.finetune(shard_dir, run, label, config=config, device=device, **overrides), indent=2)
+    )
 
 
 @app.command("embed")
@@ -189,8 +246,9 @@ def quickstart_cmd(
     """End-to-end smoke: synth -> tokenize -> pretrain -> probe (prints AUC)."""
     from pragmatiq import api
 
-    res = api.quickstart(out=out, n_users=n_users, model_size=model_size,
-                         max_steps=max_steps, n_workers=n_workers)
+    res = api.quickstart(
+        out=out, n_users=n_users, model_size=model_size, max_steps=max_steps, n_workers=n_workers
+    )
     typer.echo(json.dumps(res, indent=2))
     typer.echo(res["message"])
 
@@ -239,8 +297,9 @@ def benchmark_cmd(
     """Benchmark batch-embedding throughput; writes RESULTS.md."""
     from pragmatiq import api
 
-    typer.echo(json.dumps(api.benchmark(run, shard_dir, device=device, out=out, precision=precision),
-                          indent=2))
+    typer.echo(
+        json.dumps(api.benchmark(run, shard_dir, device=device, out=out, precision=precision), indent=2)
+    )
 
 
 @app.command("gnn")
